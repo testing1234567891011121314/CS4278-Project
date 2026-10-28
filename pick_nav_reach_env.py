@@ -11,6 +11,9 @@ from copy import deepcopy
 from solver import Solver
 from utils import closest_joint_values
 
+from custom_libraries import recording
+record_navigation = recording.record_navigation
+
 class PickNavReachEnv:
 
     def __init__(self, 
@@ -416,228 +419,40 @@ if __name__ == "__main__":
             physicsClientId=env.pb_physics_client,
         )
 
-# ## Alternate main loop suggested by ChatGPT: has logging ##
-# if __name__ == "__main__":
-#     import json
-#     import shutil
-#     import subprocess
-#     import time
-#     from pathlib import Path
+## Recording navigation video, using MX130 GPU. The video will be saved in the current working directory.
+if __name__ == "__main__":
+    env = PickNavReachEnv(seed=42)
+    env.reset()
+    solver = Solver(env)
 
-#     ffmpeg = shutil.which("ffmpeg")
-#     if ffmpeg is None:
-#         raise RuntimeError("FFmpeg is not available on PATH.")
+    record_navigation(
+        env,
+        solver,
+        encoder_args=[
+            "-c:v", "libx264",
+            "-preset", "ultrafast",
+            "-crf", "20",
+        ],
+        label="mx130",
+        max_steps=1000,
+    )
 
-#     env = PickNavReachEnv(seed=42)
-#     env.reset()
-#     solver = Solver(env)
-#     client = env.pb_physics_client
 
-#     p.configureDebugVisualizer(
-#         p.COV_ENABLE_GUI, 0, physicsClientId=client
-#     )
-#     p.setRealTimeSimulation(0, physicsClientId=client)
+## Recording navigation video, using P4000 GPU. The video will be saved in the current working directory.
+if __name__ == "__main__":
+    env = PickNavReachEnv(seed=42)
+    env.reset()
+    solver = Solver(env)
 
-#     input("Position the camera, then press Enter to record...")
-
-#     width, height = 640, 480
-#     camera = p.getDebugVisualizerCamera(physicsClientId=client)
-#     view = camera[2]
-#     projection = list(camera[3])
-#     projection[0] = projection[5] / (width / height)
-
-#     dt = p.getPhysicsEngineParameters(
-#         physicsClientId=client
-#     )["fixedTimeStep"]
-#     step_duration = dt * env.substeps
-#     fps = 1.0 / step_duration
-
-#     # Matching filenames for this run.
-#     run_name = f"navigation_{time.time_ns()}"
-#     output = Path(f"{run_name}.mp4").resolve()
-#     log_output = Path(f"{run_name}.jsonl").resolve()
-
-#     def json_value(value):
-#         if isinstance(value, np.ndarray):
-#             return value.tolist()
-#         if isinstance(value, np.generic):
-#             return value.item()
-#         raise TypeError(f"Cannot serialize {type(value)}")
-
-#     # Cache readable body/link names once, outside the recording loop.
-#     body_names = {}
-#     link_names = {}
-
-#     for index in range(p.getNumBodies(physicsClientId=client)):
-#         body_id = p.getBodyUniqueId(
-#             index, physicsClientId=client
-#         )
-#         base_name, body_name = p.getBodyInfo(
-#             body_id, physicsClientId=client
-#         )
-
-#         body_names[body_id] = body_name.decode(
-#             "utf-8", errors="replace"
-#         )
-#         link_names[(body_id, -1)] = base_name.decode(
-#             "utf-8", errors="replace"
-#         )
-
-#         for link in range(
-#             p.getNumJoints(body_id, physicsClientId=client)
-#         ):
-#             joint_info = p.getJointInfo(
-#                 body_id, link, physicsClientId=client
-#             )
-#             link_names[(body_id, link)] = joint_info[12].decode(
-#                 "utf-8", errors="replace"
-#             )
-
-#     encoder = subprocess.Popen(
-#         [
-#             ffmpeg, "-hide_banner", "-loglevel", "error", "-n",
-#             "-f", "rawvideo",
-#             "-pix_fmt", "rgb24",
-#             "-s", f"{width}x{height}",
-#             "-framerate", str(fps),
-#             "-i", "pipe:0",
-#             "-an",
-#             "-c:v", "libx264",
-#             "-preset", "ultrafast",
-#             "-crf", "20",
-#             "-pix_fmt", "yuv420p",
-#             "-movflags", "+faststart",
-#             str(output),
-#         ],
-#         stdin=subprocess.PIPE,
-#     )
-
-#     frames = 0
-
-#     try:
-#         with log_output.open("w", encoding="utf-8") as log_file:
-#             for step in range(1000):
-#                 action = solver.get_action(env)
-#                 obs, info = env.step(action)
-
-#                 # Contacts after the most recent physics step.
-#                 # Keep ground contacts too; do not discard evidence.
-#                 contacts = []
-
-#                 for contact in p.getContactPoints(
-#                     bodyA=env.robot_id,
-#                     physicsClientId=client,
-#                 ):
-#                     body_b = contact[2]
-#                     link_a = contact[3]
-#                     link_b = contact[4]
-
-#                     contacts.append({
-#                         "robot_link": link_a,
-#                         "robot_link_name": link_names.get(
-#                             (env.robot_id, link_a), ""
-#                         ),
-#                         "other_body": body_b,
-#                         "other_body_name": body_names.get(body_b, ""),
-#                         "other_link": link_b,
-#                         "other_link_name": link_names.get(
-#                             (body_b, link_b), ""
-#                         ),
-#                         "position_on_robot": contact[5],
-#                         "position_on_other": contact[6],
-#                         "normal_on_other": contact[7],
-#                         "distance": contact[8],
-#                         "normal_force": contact[9],
-#                     })
-
-#                 waypoint_index = getattr(
-#                     solver, "waypoint_index", None
-#                 )
-#                 path = getattr(solver, "path", None)
-#                 waypoint_xy = None
-
-#                 if (
-#                     path is not None
-#                     and waypoint_index is not None
-#                     and 0 <= waypoint_index < len(path)
-#                 ):
-#                     waypoint_xy = solver.convert_to_world(
-#                         path[waypoint_index]
-#                     )
-
-#                 t0 = time.perf_counter()
-
-#                 image = p.getCameraImage(
-#                     width,
-#                     height,
-#                     viewMatrix=view,
-#                     projectionMatrix=projection,
-#                     renderer=p.ER_BULLET_HARDWARE_OPENGL,
-#                     physicsClientId=client,
-#                 )
-
-#                 t1 = time.perf_counter()
-
-#                 rgba = np.asarray(
-#                     image[2], dtype=np.uint8
-#                 ).reshape(height, width, 4)
-
-#                 encoder.stdin.write(
-#                     np.ascontiguousarray(rgba[:, :, :3]).tobytes()
-#                 )
-
-#                 t2 = time.perf_counter()
-
-#                 # Frame 0 matches the observation after step 0.
-#                 record = {
-#                     "frame": frames,
-#                     "step": step,
-#                     "simulation_time": (step + 1) * step_duration,
-#                     "video_time": frames / fps,
-#                     "action": action,
-#                     "qpos": obs["qpos"],
-#                     "qvel": obs["qvel"],
-#                     "object_pos": obs["object_pos"],
-#                     "object_xyzw": obs["object_xyzw"],
-#                     "goal_pos": obs["goal_pos"],
-#                     "waypoint_index": waypoint_index,
-#                     "waypoint_xy": waypoint_xy,
-#                     "path_length": (
-#                         len(path) if path is not None else None
-#                     ),
-#                     "contacts": contacts,
-#                     "info": info,
-#                     "render_seconds": t1 - t0,
-#                     "write_seconds": t2 - t1,
-#                 }
-
-#                 log_file.write(
-#                     json.dumps(record, default=json_value) + "\n"
-#                 )
-#                 frames += 1
-
-#                 # Periodic flush instead of flushing every frame.
-#                 if frames % 48 == 0:
-#                     log_file.flush()
-
-#                 if info["success"]:
-#                     break
-
-#     except KeyboardInterrupt:
-#         print("\nStopping recording...")
-
-#     finally:
-#         try:
-#             encoder.stdin.close()
-#         except BrokenPipeError:
-#             pass
-
-#         result = encoder.wait()
-
-#         if result != 0:
-#             raise RuntimeError(
-#                 f"FFmpeg failed with exit code {result}."
-#             )
-
-#         print(f"Saved {frames} frames: {output}")
-#         print(f"Matching state/contact log: {log_output}")
+    record_navigation(
+        env,
+        solver,
+        encoder_args=[
+            "-c:v", "h264_nvenc",
+            "-preset", "p1",
+            "-rc", "constqp",
+            "-qp", "23",
+        ],
+        label="p4000",
+        max_steps=1000,
+    )
