@@ -376,19 +376,17 @@ if __name__ == "__main__":
     env.reset()
     print(f"Action size: {env.action_size}, Obs size: {env.obs_size}")
 
-    # NEW: calculate base_link radius from its collision mesh.
-    mesh_path = (
-        Path("assets/fetch")
-        / "fetch_description/meshes/base_link_collision.STL"
+    # Set camera angle
+    p.resetDebugVisualizerCamera(
+        cameraDistance=8.0,              # Distance from the target, in metres
+        cameraYaw=45,                    # Horizontal viewing angle, in degrees
+        cameraPitch=-60,                 # Downward viewing angle, in degrees
+        cameraTargetPosition=[0, 0, 0],   # World position to look at
+        physicsClientId=env.pb_physics_client,
     )
-    mesh = trimesh.load(mesh_path, force="mesh", process=False)
+    steps_taken = 0 # Track the number of steps taken in the simulation
 
-    radius_from_model = float(
-        np.linalg.norm(mesh.vertices[:, :2], axis=1).max()
-    )
-    print(f"Base radius: {radius_from_model:.6f} m")
-
-    solver = Solver(env, robot_radius=radius_from_model)
+    solver = Solver(env)
     # keyboard_controller = KeyBoardController(env)
     
     import time
@@ -401,6 +399,22 @@ if __name__ == "__main__":
             print(f"{k}: {v}")
         # p.stepSimulation()
         # time.sleep(1./240.)
+
+
+        ## below are additional metrics for debugging ##
+        steps_taken += 1
+
+        # Follow the measured base position in world coordinates.
+        base_x = float(obs["qpos"][0]) - 2.0
+        base_y = float(obs["qpos"][1])
+
+        p.resetDebugVisualizerCamera(
+            cameraDistance=4.0,
+            cameraYaw=45,
+            cameraPitch=-60,
+            cameraTargetPosition=[base_x, base_y, 0.5],
+            physicsClientId=env.pb_physics_client,
+        )
 
 # ## Alternate main loop suggested by ChatGPT: has logging ##
 # if __name__ == "__main__":

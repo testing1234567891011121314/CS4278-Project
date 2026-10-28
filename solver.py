@@ -1,15 +1,17 @@
 import numpy as np
 import pybullet as p
-from queue import PriorityQueue
 
+from custom_libraries.a_star import a_star
+from custom_libraries.curved_navigator import CurvedNavigator 
+from custom_libraries.wall_projection import build_wall_collision_grid
 
 class Solver:
-    def __init__(self, env, robot_radius):
+    def __init__(self, env):
         self.env = env
-        self.robot_radius = float(robot_radius)
-
+        self.robot_radius = self.get_base_radius()
         if not np.isfinite(self.robot_radius) or self.robot_radius <= 0:
             raise ValueError("robot_radius must be a positive number in metres.")
+        
         self.action = env.agent_qpos # np.zeros(self.env.action_size)
         self.action_scale = np.array([0.01] * env.action_size)
         self.action_scale[:3] = 0.02  # root movement
@@ -33,166 +35,259 @@ class Solver:
 
         self.create_map(env) # stores self.occupancy, self.cell_size, self.x_min, self.y_max
         self.inflated_occupancy = self.create_navigable_map() # returns inflated occupancy grid
+        self.curved_nav = CurvedNavigator(self)
         self.path = None
 
     ## This function is called every time step.
     def get_action(self, env):
         obs = env._get_obs()
-
-        # # Joint values -> robot base world XY.
         qpos = obs["qpos"]
-        base_xy = (qpos[0] - 2.0, qpos[1])
 
-        # # World XY -> grid (row, col) tuples.
+        # Keep moving toward the test pose until it has settled.
+        if not getattr(self, "_travel_pose_complete", False):
+            pose_action = self.moving_pose(obs)
+
+            if self.moving_pose_ready:
+                self._travel_pose_complete = True
+
+                # Rebuild using the robot's measured, settled posture.
+                self.inflated_occupancy = self.create_navigable_map()
+                self.path = None
+                self.waypoint_index = 0
+                self.curved_nav.reset()
+
+            # Hold the base still throughout pose preparation.
+            return pose_action
+        
+        base_xy = np.array([qpos[0] - 2.0, qpos[1]])
+
         start = self.convert_to_grid(base_xy)
         goal = self.convert_to_grid(obs["goal_pos"][:2])
 
-
-        # Plan once initially.
+        # Plan once using the separate A* module.
         if self.path is None:
-            self.path = self.a_star(start, goal, self.inflated_occupancy)
+            self.path = a_star(start, goal, self.inflated_occupancy)
             self.waypoint_index = 0
-            print("Path length:", len(self.path)) # debug
-        
-        # Reset movement commands every timestep.
+            self.curved_nav.reset()
+            print("Path length:", len(self.path))
+
         self.forward = 0
         self.turn = 0
         self.yaw = 0
 
+        # Anchor translation targets to the measured position.
+        self.action[:2] = qpos[:2]
+
         if self.path:
-            base = np.asarray(base_xy, dtype=float)
+            step_xy = self.curved_nav.step(base_xy, self.path)
 
-            # Advance past reached waypoints or passed waypoints on a straight.
-            while self.waypoint_index < len(self.path):
-                index = self.waypoint_index
-                target = self.convert_to_world(self.path[index])
-                reached = np.linalg.norm(target - base) <= 0.03
+            self.forward = step_xy[0] / self.action_scale[0]
+            self.turn = step_xy[1] / self.action_scale[1]
+            self.waypoint_index = self.curved_nav.grid_index
 
-                passed = False
-                if 0 < index < len(self.path) - 1:
-                    previous = self.convert_to_world(self.path[index - 1])
-                    following = self.convert_to_world(self.path[index + 1])
+            # Print only when the navigation status changes.
+            status = self.curved_nav.status
+            if status != getattr(self, "_last_nav_status", None):
+                print("Navigation:", status)
+                self._last_nav_status = status
 
-                    incoming = target - previous
-                    outgoing = following - target
+        unit_action = [
+            self.forward, self.turn, self.yaw,
+            self.torso_lift, self.head_pan, self.head_tilt,
+            self.shoulder_pan, self.shoulder_lift,
+            self.upperarm_roll, self.elbow_flex,
+            self.forearm_roll, self.wrist_flex, self.wrist_roll,
+            self.gripper_open, self.gripper_open,
+        ]
 
-                    # Only skip passed waypoints within the same straight section.
-                    if np.allclose(incoming, outgoing):
-                        direction = incoming / np.linalg.norm(incoming)
-                        offset = base - target
-                        sideways = offset - np.dot(offset, direction) * direction
+        self.action = np.clip(
+            self.action + self.action_scale * np.asarray(unit_action),
+            self.action_lower_bound,
+            self.action_upper_bound,
+        )
+        return self.action.copy()
 
-                        passed = (
-                            np.dot(offset, direction) >= 0
-                            and np.linalg.norm(sideways) <= 0.03
-                        )
+    def moving_pose(self, obs):
+        """Move gradually toward a fixed test pose while holding the base still."""
+        qpos = np.asarray(obs["qpos"], dtype=float)
 
-                if not (reached or passed):
-                    break
+        # Initialise once: preserve the starting base, torso, head and fingers.
+        if not hasattr(self, "_moving_pose_target"):
+            target = qpos.copy()
 
-                self.waypoint_index += 1
+            # Illustrative test angles in radians.
+            # These need validation on your robot; they are not a verified safe pose.
+            target[6] = 0.0     # shoulder_pan
+            target[7] = -1.0    # shoulder_lift
+            target[8] = 0.0     # upperarm_roll
+            target[9] = -2.0    # elbow_flex
+            target[10] = 0.0    # forearm_roll
+            target[11] = 1.0    # wrist_flex
+            target[12] = 0.0    # wrist_roll
 
-            if self.waypoint_index < len(self.path):
-                index = self.waypoint_index
-                end_index = index
+            self._moving_pose_target = np.clip(
+                target,
+                self.action_lower_bound,
+                self.action_upper_bound,
+            )
 
-                # Extend the target along this straight, stopping at the next corner.
-                # Look ahead only when already following the same straight section.
-                can_look_ahead = False
+        target = self._moving_pose_target
+        arm = slice(6, 13)
 
-                if 0 < index < len(self.path) - 1:
-                    incoming = (
-                        np.asarray(self.path[index])
-                        - np.asarray(self.path[index - 1])
-                    )
-                    outgoing = (
-                        np.asarray(self.path[index + 1])
-                        - np.asarray(self.path[index])
-                    )
-                    can_look_ahead = np.array_equal(incoming, outgoing)
+        # Absolute targets: retain the original base position.
+        action = target.copy()
 
-                if can_look_ahead:
-                    direction = (
-                        np.asarray(self.path[index + 1])
-                        - np.asarray(self.path[index])
-                    )
+        # Maximum commanded joint increment per action, in radians.
+        max_joint_step = 0.05
+        error = target[arm] - qpos[arm]
+        action[arm] = qpos[arm] + np.clip(
+            error, -max_joint_step, max_joint_step
+        )
 
-                    while end_index < len(self.path) - 1:
-                        next_direction = (
-                            np.asarray(self.path[end_index + 1])
-                            - np.asarray(self.path[end_index])
-                        )
+        qvel = np.asarray(obs["qvel"], dtype=float)
+        self.moving_pose_ready = (
+            np.max(np.abs(error)) < 0.03
+            and np.max(np.abs(qvel[arm])) < 0.05
+        )
 
-                        if not np.array_equal(next_direction, direction):
-                            break
+        self.action = np.clip(
+            action,
+            self.action_lower_bound,
+            self.action_upper_bound,
+        )
+        return self.action.copy()
 
-                        end_index += 1
+    ## Helper function to compute the robot's base radius from its collision mesh.
+    def get_base_radius(self):
+        client = self.env.pb_physics_client
+        robot_id = self.env.robot_id
 
-                target = self.convert_to_world(self.path[end_index])
-                error = target - base
-                distance = np.linalg.norm(error)
+        # 1. Find base_link without hard-coded body or joint IDs.
+        link_names = {
+            -1: p.getBodyInfo(
+                robot_id, physicsClientId=client
+            )[0].decode("utf-8")
+        }
 
-                if distance > 1e-9:
-                    direction = error / distance
-                    max_distance = min(distance, 1.0)
-                    chosen_distance = 0.0
-                    minimum_clearance = self.base_clearance(base)
+        for index in range(p.getNumJoints(
+            robot_id, physicsClientId=client
+        )):
+            info = p.getJointInfo(
+                robot_id, index, physicsClientId=client
+            )
+            link_names[index] = info[12].decode("utf-8")
 
-                    # Check the proposed movement at intervals of at most 2 cm.
-                    samples = max(1, int(np.ceil(max_distance / 0.02)))
+        matches = [
+            index for index, name in link_names.items()
+            if name == "base_link"
+        ]
 
-                    for travel in np.linspace(
-                        max_distance / samples, max_distance, samples
-                    ):
-                        point = base + direction * travel
-                        row, col = self.convert_to_grid(point)
-                        rows, cols = self.inflated_occupancy.shape
+        if len(matches) != 1:
+            raise RuntimeError(
+                f"Expected one base_link; found links: {link_names}"
+            )
 
-                        if not (0 <= row < rows and 0 <= col < cols):
-                            break
+        link_index = matches[0]
 
-                        if self.inflated_occupancy[row, col] != 0:
-                            break
+        # 2. Check that this link has mesh collision geometry.
+        shapes = p.getCollisionShapeData(
+            robot_id, link_index, physicsClientId=client
+        )
 
-                        minimum_clearance = min(
-                            minimum_clearance,
-                            self.base_clearance(point),
-                        )
+        # This implementation targets the single-mesh Fetch chassis.
+        if len(shapes) != 1 or shapes[0][2] != p.GEOM_MESH:
+            raise RuntimeError(
+                "Expected one collision mesh on base_link."
+            )
 
-                        if minimum_clearance < 0.15:
-                            allowed_step = 0.02
-                        elif minimum_clearance < 0.40:
-                            allowed_step = 0.10
-                        elif minimum_clearance < 0.80:
-                            allowed_step = 0.25
-                        else:
-                            allowed_step = 1.0
+        # 3. Read simulation vertices, not graphics vertices.
+        count, vertices = p.getMeshData(
+            robot_id,
+            linkIndex=link_index,
+            flags=p.MESH_DATA_SIMULATION_MESH,
+            physicsClientId=client,
+        )
 
-                        if travel > allowed_step + 1e-9:
-                            break
+        vertices = np.asarray(vertices, dtype=float)
 
-                        chosen_distance = travel
+        if (
+            count == 0
+            or vertices.shape != (count, 3)
+            or not np.all(np.isfinite(vertices))
+        ):
+            raise RuntimeError(
+                "PyBullet did not return valid base collision vertices."
+            )
 
-                    step_xy = direction * chosen_distance
+        # 4. Transform rigid-body simulation vertices from the local
+        # inertial frame into the base_link frame.
+        dynamics = p.getDynamicsInfo(
+            robot_id, link_index, physicsClientId=client
+        )
+        inertial_position = np.asarray(dynamics[3])
+        inertial_rotation = np.asarray(
+            p.getMatrixFromQuaternion(dynamics[4])
+        ).reshape(3, 3)
 
-                    print(
-                        f"Clearance: {minimum_clearance:.3f} m | "
-                        f"Target displacement: {chosen_distance:.3f} m"
-                    )
+        vertices_base = (
+            vertices @ inertial_rotation.T + inertial_position
+        )
 
-                    self.action[:2] = qpos[:2]
-                    self.forward = step_xy[0] / self.action_scale[0]
-                    self.turn = step_xy[1] / self.action_scale[1]
-        
-        ## Concactenate the movement commands into a single action vector and return it.
-        unit_action = [self.forward, self.turn, self.yaw, self.torso_lift, self.head_pan, self.head_tilt, self.shoulder_pan, self.shoulder_lift, self.upperarm_roll, self.elbow_flex, self.forearm_roll, self.wrist_flex, self.wrist_roll, self.gripper_open, self.gripper_open]
-        print("unit_action: ", unit_action)
-        self.action = self.action + self.action_scale * np.array(unit_action)
-        return np.clip(self.action, self.action_lower_bound, self.action_upper_bound)
+        # 5. Sanity-check the assumed vertex frame against world bounds.
+        if link_index == -1:
+            com_position, com_orientation = (
+                p.getBasePositionAndOrientation(
+                    robot_id, physicsClientId=client
+                )
+            )
+        else:
+            state = p.getLinkState(
+                robot_id,
+                link_index,
+                computeForwardKinematics=True,
+                physicsClientId=client,
+            )
+            com_position, com_orientation = state[0], state[1]
 
+        world_rotation = np.asarray(
+            p.getMatrixFromQuaternion(com_orientation)
+        ).reshape(3, 3)
+
+        vertices_world = (
+            vertices @ world_rotation.T + np.asarray(com_position)
+        )
+
+        lower, upper = p.getAABB(
+            robot_id, link_index, physicsClientId=client
+        )
+
+        tolerance = 1e-3
+        if (
+            np.any(vertices_world < np.asarray(lower) - tolerance)
+            or np.any(vertices_world > np.asarray(upper) + tolerance)
+        ):
+            raise RuntimeError(
+                "Returned mesh vertices do not fit the collision AABB. "
+                "Check the mesh coordinate convention for this build."
+            )
+
+        # 6. Radius comes from actual returned vertices, NOT AABB corners.
+        radius = float(
+            np.linalg.norm(vertices_base[:, :2], axis=1).max()
+        )
+
+        if not np.isfinite(radius) or radius <= 0:
+            raise RuntimeError("Invalid mesh-derived radius.")
+
+        print("Chassis link index:", link_index)
+        print("Collision vertex count:", count)
+        print("Base-frame minimum XYZ:", vertices_base.min(axis=0))
+        print("Base-frame maximum XYZ:", vertices_base.max(axis=0))
+        print(f"Mesh-derived base radius: {radius:.6f} m")
+
+        return radius
 
     ### Helper functions for creating a map of the environment and navigating the environment. ###
-
     ## When initialising the solver, this function is called to create a map of the environment.
     def create_map(self, env):
         print("Creating map of the environment...")
@@ -226,107 +321,59 @@ class Solver:
             occupancy[row_start:row_end, col_start:col_end] = 1
 
         # Store the map and its coordinate reference for later navigation.
-        self.occupancy = occupancy
         self.cell_size = cell_size
         self.x_min = x_min
         self.y_max = y_max
 
-        self.occupancy = occupancy
+        # At this point, occupancy contains only maze walls.
+        self.wall_occupancy = occupancy.copy()
 
-        # Temporary: simulator queries for additional obstacles.
+        # Keep table/additional obstacles separate.
+        self.extra_occupancy = np.zeros_like(occupancy)
         extra_bounds = self.get_extra_obstacle_bounds(cube_positions)
-        self.mark_obstacle_bounds(occupancy, extra_bounds)
+        self.mark_obstacle_bounds(self.extra_occupancy, extra_bounds)
+
+        self.occupancy = (
+            self.wall_occupancy | self.extra_occupancy
+        )
 
         print("Map created. Occupancy grid : ", occupancy)
 
     def create_navigable_map(self):
-        # # Derive the clearance radius from the loaded base-link collision bounds.
         safety_margin = 0.05
-        robot_radius_cells = int(np.ceil(
+
+        # Maze: use projected geometry of all robot collision links.
+        wall_blocked = build_wall_collision_grid(
+            self.env,
+            self.wall_occupancy,
+            self.cell_size,
+            safety_margin=safety_margin,
+        )
+
+        # Additional obstacles: retain the existing base-radius treatment
+        # temporarily. This is NOT whole-arm table collision checking.
+        radius_cells = int(np.ceil(
             (self.robot_radius + safety_margin) / self.cell_size
         ))
 
-        print("Robot radius:", self.robot_radius)
-        print("Inflation cells:", robot_radius_cells)
-
-        structure_size = 2 * robot_radius_cells + 1
-        rows, cols = self.occupancy.shape
-        padded_occupancy = np.pad(
-            self.occupancy.astype(bool),
-            robot_radius_cells,
+        rows, cols = self.extra_occupancy.shape
+        padded = np.pad(
+            self.extra_occupancy.astype(bool),
+            radius_cells,
             mode="constant",
         )
-        inflated_occupancy = np.zeros((rows, cols), dtype=bool)
+        extra_blocked = np.zeros((rows, cols), dtype=bool)
 
-        for row_offset in range(structure_size):
-            for col_offset in range(structure_size):
-                inflated_occupancy |= padded_occupancy[
-                    row_offset : row_offset + rows,
-                    col_offset : col_offset + cols,
+        for dr in range(2 * radius_cells + 1):
+            for dc in range(2 * radius_cells + 1):
+                extra_blocked |= padded[
+                    dr:dr + rows,
+                    dc:dc + cols,
                 ]
 
-        return inflated_occupancy.astype(np.uint8)
-
-    def a_star(self, start, goal, occupancy):
-        # A* pathfinding algorithm implementation
-        rows, cols = occupancy.shape
-        for name, cell in [("start", start), ("goal", goal)]:
-            row, col = cell
-
-            if not (0 <= row < rows and 0 <= col < cols):
-                print(f"{name} is outside the map: {cell}")
-                return []
-
-            if occupancy[row, col] != 0:
-                print(f"{name} is blocked after inflation: {cell}")
-                return []
-
-        open_set = PriorityQueue()
-        open_set.put((0, start))
-        came_from = {}
-        g_score = {start: 0}
-        f_score = {start: self.heuristic(start, goal)}
-
-        while not open_set.empty():
-            current = open_set.get()[1]
-
-            if current == goal:
-                return self.reconstruct_path(came_from, current)
-
-            for neighbor in self.get_neighbors(current, rows, cols):
-                if occupancy[neighbor] == 1:
-                    continue  # Skip occupied cells
-
-                tentative_g_score = g_score[current] + 1  # Assume cost between neighbors is 1
-
-                if neighbor not in g_score or tentative_g_score < g_score[neighbor]:
-                    came_from[neighbor] = current
-                    g_score[neighbor] = tentative_g_score
-                    f_score[neighbor] = tentative_g_score + self.heuristic(neighbor, goal)
-                    if neighbor not in [i[1] for i in open_set.queue]:
-                        open_set.put((f_score[neighbor], neighbor))
-
-        return []  # Return empty path if no path found
-
-    def heuristic(self, start, goal):
-        # Use Manhattan distance as heuristic
-        return abs(start[0] - goal[0]) + abs(start[1] - goal[1])
-
-    def get_neighbors(self, cell, rows, cols):
-        row, col = cell
-        neighbors = []
-        for d_row, d_col in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-            new_row, new_col = row + d_row, col + d_col
-            if 0 <= new_row < rows and 0 <= new_col < cols:
-                neighbors.append((new_row, new_col))
-        return neighbors
-
-    def reconstruct_path(self, came_from, current):
-        total_path = [current]
-        while current in came_from:
-            current = came_from[current]
-            total_path.append(current)
-        return total_path[::-1]  # Return reversed path
+        return (
+            wall_blocked.astype(bool) | extra_blocked
+        ).astype(np.uint8)
 
     def convert_to_grid(self, position):
         col = int(np.floor(
