@@ -8,20 +8,42 @@ import numpy as np
 import pybullet as p
 
 
-def record_navigation(env, solver, encoder_args, label, max_steps=1000):
+def record_navigation(
+    env, solver, encoder_args, label, max_steps=1000,
+    *,
+    interactive=True,
+):
     ffmpeg = shutil.which("ffmpeg")
     if ffmpeg is None:
         raise RuntimeError("FFmpeg is not available on PATH.")
 
     client = env.pb_physics_client
+    if interactive:
+        input("Position the camera, then press Enter to record...")
 
-    input("Position the camera, then press Enter to record...")
-
-    width, height = 640, 480
+    width, height = 1920, 1080
     camera = p.getDebugVisualizerCamera(physicsClientId=client)
     view = camera[2]
-    projection = list(camera[3])
-    projection[0] = projection[5] / (width / height)
+
+    # Safe check for DIRECT (headless) mode
+    if camera is not None and len(camera) >= 4:
+        projection = list(camera[3])
+        projection[0] = projection[5] / (width / height)
+    else:
+        # Fallback projection matrix for p.DIRECT mode
+        # projection = p.computeProjectionMatrixFOV(
+        #     fov=60.0,
+        #     aspect=float(width) / float(height),
+        #     nearVal=0.1,
+        #     farVal=100.0,
+        #     physicsClientId=client,
+        # )
+        projection = p.computeProjectionMatrixFOV(
+            fov=60.0,
+            aspect=width / height,
+            nearVal=0.1,
+            farVal=100.0,
+        )
 
     dt = p.getPhysicsEngineParameters(
         physicsClientId=client
@@ -69,11 +91,27 @@ def record_navigation(env, solver, encoder_args, label, max_steps=1000):
                 "utf-8", errors="replace"
             )
 
+    ## Original command does about 3 physics steps/frames per second
+    # command = [
+    #     ffmpeg,
+    #     "-hide_banner", "-loglevel", "error", "-n",
+    #     "-f", "rawvideo",
+    #     "-pix_fmt", "rgb24",
+    #     "-s", f"{width}x{height}",
+    #     "-framerate", str(fps),
+    #     "-i", "pipe:0",
+    #     "-an",
+    #     *encoder_args,
+    #     "-pix_fmt", "yuv420p",
+    #     "-movflags", "+faststart",
+    #     str(output),
+    # ]
+
     command = [
         ffmpeg,
         "-hide_banner", "-loglevel", "error", "-n",
         "-f", "rawvideo",
-        "-pix_fmt", "rgb24",
+        "-pix_fmt", "rgba",
         "-s", f"{width}x{height}",
         "-framerate", str(fps),
         "-i", "pipe:0",
@@ -156,6 +194,20 @@ def record_navigation(env, solver, encoder_args, label, max_steps=1000):
                         )
 
                     t0 = time.perf_counter()
+
+                    # Follow the measured robot base position.
+                    base_x = float(obs["qpos"][0]) - 2.0
+                    base_y = float(obs["qpos"][1])
+
+                    view = p.computeViewMatrixFromYawPitchRoll(
+                        cameraTargetPosition=[base_x, base_y, 0.7],
+                        distance=5.0,
+                        yaw=45.0,
+                        pitch=-55.0,
+                        roll=0.0,
+                        upAxisIndex=2,
+                    )
+
                     image = p.getCameraImage(
                         width,
                         height,
@@ -165,6 +217,11 @@ def record_navigation(env, solver, encoder_args, label, max_steps=1000):
                         flags=p.ER_NO_SEGMENTATION_MASK,
                         physicsClientId=client,
                     )
+
+                    # debug
+                    if step == 0:
+                        print(type(image[2]), getattr(image[2], "shape", None))
+
                     render_seconds = time.perf_counter() - t0
 
                     t0 = time.perf_counter()
@@ -172,14 +229,16 @@ def record_navigation(env, solver, encoder_args, label, max_steps=1000):
                         image[2], dtype=np.uint8
                     ).reshape(height, width, 4)
 
-                    rgb_bytes = np.ascontiguousarray(
-                        rgba[:, :, :3]
-                    ).tobytes()
+                    ## Replace original conversion with direct tobytes() call
+                    # rgb_bytes = np.ascontiguousarray(
+                    #     rgba[:, :, :3]
+                    # ).tobytes()
+                    rgba_bytes = rgba.tobytes()
 
                     convert_seconds = time.perf_counter() - t0
 
                     t0 = time.perf_counter()
-                    encoder.stdin.write(rgb_bytes)
+                    encoder.stdin.write(rgba_bytes)
                     write_seconds = time.perf_counter() - t0
 
                     record = {

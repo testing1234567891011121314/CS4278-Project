@@ -133,3 +133,5 @@ outputs/
 tests/results/
 
 pristine/
+
+runs/
