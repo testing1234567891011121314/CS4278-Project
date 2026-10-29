@@ -22,28 +22,31 @@ def record_navigation(
         input("Position the camera, then press Enter to record...")
 
     width, height = 1920, 1080
-    camera = p.getDebugVisualizerCamera(physicsClientId=client)
-    view = camera[2]
 
-    # Safe check for DIRECT (headless) mode
-    if camera is not None and len(camera) >= 4:
-        projection = list(camera[3])
-        projection[0] = projection[5] / (width / height)
-    else:
-        # Fallback projection matrix for p.DIRECT mode
-        # projection = p.computeProjectionMatrixFOV(
-        #     fov=60.0,
-        #     aspect=float(width) / float(height),
-        #     nearVal=0.1,
-        #     farVal=100.0,
-        #     physicsClientId=client,
-        # )
-        projection = p.computeProjectionMatrixFOV(
-            fov=60.0,
-            aspect=width / height,
-            nearVal=0.1,
-            farVal=100.0,
-        )
+    # Always build the projection explicitly. getDebugVisualizerCamera()'s
+    # projectionMatrix reflects a separate debug-visualizer camera state that
+    # is never guaranteed to be valid or non-degenerate under p.DIRECT + the
+    # EGL renderer plugin (it maintains its own camera, independent of the
+    # debug visualizer). Using a stale/zeroed matrix from it produces frames
+    # with nothing inside the clip volume -- i.e. blank, flat-color video.
+    projection = p.computeProjectionMatrixFOV(
+        fov=60.0,
+        aspect=float(width) / float(height),
+        nearVal=0.1,
+        farVal=100.0,
+        physicsClientId=client,
+    )
+
+    # Initial view only; it's recomputed every step from the robot's
+    # measured base position inside the loop below.
+    view = p.computeViewMatrixFromYawPitchRoll(
+        cameraTargetPosition=[0, 0, 0.7],
+        distance=3.0,
+        yaw=45.0,
+        pitch=-55.0,
+        roll=0.0,
+        upAxisIndex=2,
+    )
 
     dt = p.getPhysicsEngineParameters(
         physicsClientId=client
@@ -196,18 +199,20 @@ def record_navigation(
                     t0 = time.perf_counter()
 
                     # Follow the measured robot base position.
-                    base_x = float(obs["qpos"][0]) - 2.0
+                    # base_x = float(obs["qpos"][0]) - 2.0
+                    base_x = float(obs["qpos"][0])
                     base_y = float(obs["qpos"][1])
 
                     view = p.computeViewMatrixFromYawPitchRoll(
                         cameraTargetPosition=[base_x, base_y, 0.7],
-                        distance=5.0,
+                        distance=3.0,
                         yaw=45.0,
                         pitch=-55.0,
                         roll=0.0,
                         upAxisIndex=2,
                     )
 
+                    # For windows use OPENGL
                     image = p.getCameraImage(
                         width,
                         height,
@@ -217,6 +222,26 @@ def record_navigation(
                         flags=p.ER_NO_SEGMENTATION_MASK,
                         physicsClientId=client,
                     )
+
+                    ## For windows use OPENGL
+                    # image = p.getCameraImage(
+                    #     width,
+                    #     height,
+                    #     viewMatrix=view,
+                    #     projectionMatrix=projection,
+                    #     renderer=p.ER_BULLET_HARDWARE_OPENGL,
+                    #     flags=p.ER_NO_SEGMENTATION_MASK,
+                    #     physicsClientId=client,
+                    # )
+
+                    # For GPUless fallback to Tiny Renderer (CPU only, 1 thread):
+                    # image = p.getCameraImage(
+                    #     width, height,
+                    #     viewMatrix=view,
+                    #     projectionMatrix=projection,
+                    #     renderer=p.ER_TINY_RENDERER,  # <--- Works with NO GUI
+                    #     physicsClientId=client,
+                    # )
 
                     # debug
                     if step == 0:

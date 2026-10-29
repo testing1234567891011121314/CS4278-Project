@@ -28,25 +28,25 @@ class PickNavReachEnv:
         self.maze_urdf_path = Path(maze_urdf_path).expanduser().resolve()
         self.set_seed(seed)
 
+        self.gui = gui
         connection_mode = p.GUI if gui else p.DIRECT
         self.pb_physics_client = p.connect(connection_mode)
-        
+
+        if self.pb_physics_client < 0:
+            raise RuntimeError("Could not connect to PyBullet.")        
         
         self.renderer_plugin_id = None
 
         if not gui:
             egl = pkgutil.get_loader("eglRenderer")
-            if egl is None:
-                p.disconnect(physicsClientId=self.pb_physics_client)
-                raise RuntimeError(
-                    "eglRenderer is unavailable in this Python environment."
+            if egl:
+                plugin_id = p.loadPlugin(
+                    egl.get_filename(),
+                    "_eglRendererPlugin",
+                    physicsClientId=self.pb_physics_client
                 )
-
-            plugin_id = p.loadPlugin(
-                egl.get_filename(),
-                "_eglRendererPlugin",
-                physicsClientId=self.pb_physics_client,
-            )
+            else:
+                plugin_id = p.loadPlugin("eglRendererPlugin",physicsClientId=self.pb_physics_client)
 
             if plugin_id < 0:
                 p.disconnect(physicsClientId=self.pb_physics_client)
@@ -215,7 +215,8 @@ class PickNavReachEnv:
             maze_center_x=(n_cols-room_width)/2*grid_xy + maze_offset, 
             maze_center_y=0.0, 
             maze_center_z=0.0,
-            box_color=(0.95, 0.95, 0.98, 1.0),
+            # box_color=(0.95, 0.95, 0.98, 1.0),
+            box_color=(0.75, 0.78, 0.85, 1.0)  # still cool-toned but enough value separation to shade
         )
 
         p.loadURDF(
@@ -316,9 +317,11 @@ class PickNavReachEnv:
             # velocityGains=velocity_gains,
         )
 
+        # Edit loop to skip real time waiting for headless collection
         for _ in range(self.substeps):
-            p.stepSimulation()
-            time.sleep(1./240.)
+            p.stepSimulation(physicsClientId=self.pb_physics_client)
+            if self.gui:
+                time.sleep(1.0 / 240.0)
 
         obs = self._get_obs()
 
@@ -493,5 +496,5 @@ if __name__ == "__main__":
             "-qp", "23",
         ],
         label="p4000",
-        max_steps=1000,
+        max_steps=250,
     )

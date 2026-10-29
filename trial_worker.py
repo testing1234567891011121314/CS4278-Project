@@ -15,6 +15,10 @@ def json_value(value):
 
 def run_trial(project_dir, trial_dir, seed, max_steps, gpu,
               object_idx, object_name, repeat_id, maze_spec_path):
+              # top of trial_worker.py, before `import pybullet as p`
+    import os
+    os.environ.setdefault("DISPLAY", ":0")
+    os.environ.setdefault("EGL_PLATFORM", "x11")
     import contextlib
     import hashlib
     import os

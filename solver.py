@@ -4,7 +4,7 @@ from utils import closest_joint_values  # Handles joint angle wrapping
 from custom_libraries.a_star import a_star
 from custom_libraries.curved_navigator import CurvedNavigator 
 from custom_libraries.wall_projection import build_wall_collision_grid
-from custom_libraries.grasp import AntipodalGraspPlanner
+# from custom_libraries.grasp import AntipodalGraspPlanner
 
 class Solver:
     def __init__(self, env):
