@@ -57,7 +57,10 @@ def main():
     parser.add_argument('--seed', type=int, default=42,
                         help='Environment seed; shared by all objects in a repeat')
     parser.add_argument('--repeats', type=int, default=1)
-    parser.add_argument('--gpu', type=int, default=0, help='NVENC GPU only')
+    parser.add_argument('--gpu', type=int, default=0, help='NVENC GPU only (single-GPU runs)')
+    parser.add_argument('--gpus', type=int, nargs='+', default=None,
+                        help='NVENC GPU indices to round-robin trials across '
+                             '(overrides --gpu, e.g. --gpus 0 1)')
     parser.add_argument('--objects', type=int, nargs='+', default=list(range(15)))
     args = parser.parse_args()
     if min(args.workers, args.max_steps, args.repeats) < 1:
@@ -66,6 +69,9 @@ def main():
         parser.error('seeds must be nonnegative')
     if len(set(args.objects)) != len(args.objects):
         parser.error('object indices must be unique')
+    gpu_pool = args.gpus if args.gpus else [args.gpu]
+    if any(g < 0 for g in gpu_pool):
+        parser.error('GPU indices must be nonnegative')
 
     project = Path(__file__).resolve().parent
     # Match the existing environment's sorted glob exactly.
@@ -82,6 +88,7 @@ def main():
     maze_spec = prepare_maze(batch, args.maze_seed)
     config = vars(args).copy()
     config['trials'] = len(args.objects) * args.repeats
+    config['gpu_pool'] = gpu_pool
     config['objects_resolved'] = [{'index': i, 'name': assets[i].name} for i in args.objects]
     (batch / 'config.json').write_text(json.dumps(config, indent=2), encoding='utf-8')
     print(f'Results: {batch}', flush=True)
@@ -90,11 +97,17 @@ def main():
         with ProcessPoolExecutor(max_workers=min(args.workers, config['trials']),
                                  mp_context=mp.get_context('spawn')) as pool:
             futures = {}
+            trial_counter = 0
             for repeat in range(args.repeats):
                 for idx in args.objects:
                     name = f'object_{idx:02d}_{assets[idx].name}_repeat_{repeat:03d}'
+                    # Round-robin across the GPU pool so trials spread evenly
+                    # across all available encode/render GPUs rather than
+                    # all contending for a single one.
+                    gpu = gpu_pool[trial_counter % len(gpu_pool)]
+                    trial_counter += 1
                     future = pool.submit(run_trial, str(project), str(batch/name),
-                                         args.seed + repeat, args.max_steps, args.gpu,
+                                         args.seed + repeat, args.max_steps, gpu,
                                          idx, assets[idx].name, repeat, str(maze_spec))
                     futures[future] = name
             for future in as_completed(futures):

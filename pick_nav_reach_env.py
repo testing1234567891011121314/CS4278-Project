@@ -414,34 +414,34 @@ class PickNavReachEnv:
         return qpos.copy()
 
 
-# if __name__ == "__main__":
-#     env = PickNavReachEnv(seed=42)
-#     env.reset()
-#     print(f"Action size: {env.action_size}, Obs size: {env.obs_size}")
+if __name__ == "__main__":
+    env = PickNavReachEnv(seed=42)
+    env.reset()
+    print(f"Action size: {env.action_size}, Obs size: {env.obs_size}")
 
-#     # Set camera angle
-#     p.resetDebugVisualizerCamera(
-#         cameraDistance=8.0,              # Distance from the target, in metres
-#         cameraYaw=45,                    # Horizontal viewing angle, in degrees
-#         cameraPitch=-60,                 # Downward viewing angle, in degrees
-#         cameraTargetPosition=[0, 0, 0],   # World position to look at
-#         physicsClientId=env.pb_physics_client,
-#     )
-#     steps_taken = 0 # Track the number of steps taken in the simulation
+    # Set camera angle
+    p.resetDebugVisualizerCamera(
+        cameraDistance=8.0,              # Distance from the target, in metres
+        cameraYaw=45,                    # Horizontal viewing angle, in degrees
+        cameraPitch=-60,                 # Downward viewing angle, in degrees
+        cameraTargetPosition=[0, 0, 0],   # World position to look at
+        physicsClientId=env.pb_physics_client,
+    )
+    steps_taken = 0 # Track the number of steps taken in the simulation
 
-#     solver = Solver(env)
-#     # keyboard_controller = KeyBoardController(env)
+    solver = Solver(env)
+    # keyboard_controller = KeyBoardController(env)
     
-#     import time
-#     for i in range (1000):
-#     # while True:
-#         # random_action = np.random.uniform(-1.0, 1.0, size=(env.action_size,))
-#         action = solver.get_action(env)
-#         obs, info = env.step(action)
-#         for k, v in info.items():
-#             print(f"{k}: {v}")
-#         # p.stepSimulation()
-#         # time.sleep(1./240.)
+    import time
+    for i in range (1000):
+    # while True:
+        # random_action = np.random.uniform(-1.0, 1.0, size=(env.action_size,))
+        action = solver.get_action(env)
+        obs, info = env.step(action)
+        for k, v in info.items():
+            print(f"{k}: {v}")
+        # p.stepSimulation()
+        # time.sleep(1./240.)
 
 
 #         ## below are additional metrics for debugging ##
@@ -480,21 +480,21 @@ class PickNavReachEnv:
 
 
 ## Recording navigation video, using P4000 GPU. The video will be saved in the current working directory.
-if __name__ == "__main__":
-    env = PickNavReachEnv(seed=42)
-    env.reset()
-    solver = Solver(env)
+# if __name__ == "__main__":
+#     env = PickNavReachEnv(seed=42)
+#     env.reset()
+#     solver = Solver(env)
 
-    import time
-    record_navigation(
-        env,
-        solver,
-        encoder_args=[
-            "-c:v", "h264_nvenc",
-            "-preset", "p1",
-            "-rc", "constqp",
-            "-qp", "23",
-        ],
-        label="p4000",
-        max_steps=250,
-    )
+#     import time
+#     record_navigation(
+#         env,
+#         solver,
+#         encoder_args=[
+#             "-c:v", "h264_nvenc",
+#             "-preset", "p1",
+#             "-rc", "constqp",
+#             "-qp", "23",
+#         ],
+#         label="p4000",
+#         max_steps=250,
+#     )

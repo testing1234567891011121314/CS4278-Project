@@ -12,7 +12,7 @@ trap 'popd > /dev/null' EXIT
     "$SCRIPT_DIR/run_batch.py" \
     --maze-seed 42 \
     --seed 42 \
-    --workers 2 \
-    --max-steps 200 \
-    --gpu 0 \
+    --workers 15 \
+    --max-steps 1000 \
+    --gpus 0 1 \
     "$@"
