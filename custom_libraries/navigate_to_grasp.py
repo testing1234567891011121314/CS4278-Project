@@ -196,7 +196,8 @@ class NavigateToGrasp:
         if self.grasp is None:
             candidates = self.grasp_planner.sample_antipodal_grasps(
                 self.env.object_id,
-                num_samples=500,
+                points=obs["object_pc"],
+                normals=obs["object_normals"],
             )
 
             if len(candidates) > 0:
