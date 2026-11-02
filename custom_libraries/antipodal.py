@@ -203,9 +203,11 @@ class AntipodalGraspPlanner:
         """Return the best IK-verified grasp dict, or None.
 
         candidates: tuples (p1, p2, center, quat, score) from
-        sample_antipodal_grasps. Only arm joints move; base, torso, head and
-        fingers are locked at their current pose, so their -1 sentinel limits
-        never reach PyBullet.
+        sample_antipodal_grasps. IK runs over every movable DOF (PyBullet
+        returns one entry per movable joint regardless of the limit list),
+        with everything but the 7 arm joints pinned at their current pose via
+        lower==upper==current. Only the arm entries are extracted; we never
+        slice sol[:7]. joint_angles in the result are the 7 arm values.
         """
         if strategy not in ("greedy_first", "score_all"):
             raise ValueError("strategy must be 'greedy_first' or 'score_all'")
@@ -213,31 +215,27 @@ class AntipodalGraspPlanner:
             self.ik_stats[strategy] = {"calls": 0, "ik_fail": 0, "fk_fail": 0}
             return None
 
-        arm_ids, locked_ids = self._arm_joint_ids(robot_id)
+        movable_ids, arm_ids = self._movable_and_arm_ids(robot_id)
         if len(arm_ids) != 7:
             raise ValueError(
                 f"Expected 7 arm joints, found {len(arm_ids)}: check robot URDF naming"
             )
+        arm_pos = [movable_ids.index(j) for j in arm_ids]
 
         current = np.array([
             p.getJointState(robot_id, j, physicsClientId=self.client)[0]
-            for j in arm_ids
+            for j in movable_ids
         ])
 
-        lower, upper = [], []
-        for j in arm_ids:
+        # Pin everything; then unlock only the arm joints with their URDF
+        # limits. Sentinel/garbage limits (hi < lo) stay pinned at current.
+        lower = current.copy()
+        upper = current.copy()
+        for k, j in enumerate(arm_ids):
             info = p.getJointInfo(robot_id, j, physicsClientId=self.client)
             lo, hi = float(info[8]), float(info[9])
-            if hi < lo:
-                hi = lo
-            lower.append(lo)
-            upper.append(hi)
-        lower = np.array(lower)
-        upper = np.array(upper)
-        locked_states = [
-            (j, p.getJointState(robot_id, j, physicsClientId=self.client)[0])
-            for j in locked_ids
-        ]
+            if hi >= lo:
+                lower[arm_pos[k]], upper[arm_pos[k]] = lo, hi
 
         # Dedup candidates spatially BEFORE spending IK calls on them.
         ranked = sorted(candidates, key=lambda c: c[4])
@@ -257,14 +255,23 @@ class AntipodalGraspPlanner:
             if len(picked) >= max_candidates:
                 break
 
-        stats = {"calls": 0, "ik_fail": 0, "fk_fail": 0}
+        stats = {"calls": 0, "ik_fail": 0, "fk_fail": 0, "reasons": []}
         self.ik_stats[strategy] = stats
         passing = []
 
+        def reject(reason):
+            if len(stats["reasons"]) < 5:
+                stats["reasons"].append(reason)
+
         for p1, p2, center, quat, score in picked:
             center = np.asarray(center, dtype=float)
-            quat = np.asarray(quat, dtype=float)
             axis = self._grasp_axis((p1, p2, center, quat, score))
+            # p1/p2 ordering makes the axis sign arbitrary; a parallel jaw is
+            # symmetric so orient it upward and put the gripper ABOVE the
+            # contacts (finger pads forward of gripper_link along +x).
+            if axis[2] < 0:
+                axis = -axis
+            quat = self._contact_orientations(axis[None, :])[0]
             ee_target = center + self.ee_forward_offset * axis
 
             sol = p.calculateInverseKinematics(
@@ -274,7 +281,7 @@ class AntipodalGraspPlanner:
                 lowerLimits=lower.tolist(),
                 upperLimits=upper.tolist(),
                 jointRanges=np.maximum(upper - lower, 1e-8).tolist(),
-                restPoses=np.clip(current, lower, upper).tolist(),
+                restPoses=current.tolist(),
                 maxNumIterations=200,
                 residualThreshold=1e-4,
                 physicsClientId=self.client,
@@ -282,14 +289,31 @@ class AntipodalGraspPlanner:
             stats["calls"] += 1
             sol = np.asarray(sol, dtype=float)
 
-            if (sol.shape != lower.shape or not np.all(np.isfinite(sol))
-                    or np.any(sol < lower - 1e-6) or np.any(sol > upper + 1e-6)):
+            if sol.shape != lower.shape:
                 stats["ik_fail"] += 1
+                reject(f"shape {sol.shape} != ({len(movable_ids)},) movable={movable_ids}")
+                continue
+            if not np.all(np.isfinite(sol)):
+                stats["ik_fail"] += 1
+                reject("non-finite solution")
                 continue
 
-            if not self._fk_verify(robot_id, ee_link_index, arm_ids, sol,
-                                   ee_target, quat, axis, pos_tol, axis_tol_deg,
-                                   locked_states):
+            arm_sol = sol[arm_pos]
+            outside = (arm_sol < lower[arm_pos] - 1e-6) | (arm_sol > upper[arm_pos] + 1e-6)
+            if np.any(outside):
+                idx = int(np.flatnonzero(outside)[0])
+                stats["ik_fail"] += 1
+                reject(f"arm joint {arm_ids[idx]}={arm_sol[idx]:.4f} outside "
+                       f"[{lower[arm_pos][idx]:.4f}, {upper[arm_pos][idx]:.4f}]")
+                continue
+            if np.max(np.abs(np.delete(sol, arm_pos) - np.delete(current, arm_pos))) > 1e-3:
+                stats["ik_fail"] += 1
+                reject("pinned joints drifted during IK")
+                continue
+
+            if not self._fk_verify(robot_id, ee_link_index, movable_ids,
+                                   arm_ids, arm_pos, current, arm_sol,
+                                   ee_target, quat, axis, pos_tol, axis_tol_deg):
                 stats["fk_fail"] += 1
                 continue
 
@@ -299,14 +323,14 @@ class AntipodalGraspPlanner:
                 "ee_quat": quat,
                 "ee_target": ee_target,
                 "arm_joint_ids": arm_ids,
-                "joint_angles": sol,
+                "joint_angles": arm_sol,
                 "score": float(score),
                 "strategy": strategy,
             }
             if strategy == "greedy_first":
                 return result
             # min-effort tiebreak: stability + distance from current arm pose
-            result["_effort"] = result["score"] + joint_damping * np.linalg.norm(sol - current)
+            result["_effort"] = result["score"] + joint_damping * np.linalg.norm(arm_sol - current[arm_pos])
             passing.append(result)
 
         if not passing:
@@ -318,38 +342,43 @@ class AntipodalGraspPlanner:
         axis = p2 - p1
         return axis / max(np.linalg.norm(axis), 1e-12)
 
-    def _arm_joint_ids(self, robot_id):
-        arm, locked = [], []
+    def _movable_and_arm_ids(self, robot_id):
+        movable, arm = [], []
         for j in range(p.getNumJoints(robot_id, physicsClientId=self.client)):
-            jtype = p.getJointInfo(robot_id, j, physicsClientId=self.client)[2]
-            if jtype not in (p.JOINT_REVOLUTE, p.JOINT_PRISMATIC):
+            info = p.getJointInfo(robot_id, j, physicsClientId=self.client)
+            if info[2] not in (p.JOINT_REVOLUTE, p.JOINT_PRISMATIC):
                 continue
-            name = p.getJointInfo(robot_id, j, physicsClientId=self.client)[1]
-            (arm if name.startswith(ARM_NAME_PREFIXES) else locked).append(j)
-        return arm, locked
+            movable.append(j)
+            if info[1].startswith(ARM_NAME_PREFIXES):
+                arm.append(j)
+        return movable, arm
 
-    def _fk_verify(self, robot_id, ee_link_index, arm_ids, sol,
+    def _fk_verify(self, robot_id, ee_link_index, movable_ids,
+                   arm_ids, arm_pos, current, arm_sol,
                    target_pos, target_quat, grasp_axis,
-                   pos_tol, axis_tol_deg, locked_states):
+                   pos_tol, axis_tol_deg):
         """IK always returns numbers; command the solution and measure the truth."""
-        saved = [p.getJointState(robot_id, j, physicsClientId=self.client)[0] for j in arm_ids]
         try:
-            for j, v in locked_states:
-                p.resetJointState(robot_id, j, v, physicsClientId=self.client)
-            for j, v in zip(arm_ids, sol):
+            for j, v in zip(movable_ids, current):
                 p.resetJointState(robot_id, j, float(v), physicsClientId=self.client)
-            pos, orn = p.getLinkState(
+            for j, v in zip(arm_ids, arm_sol):
+                p.resetJointState(robot_id, j, float(v), physicsClientId=self.client)
+            state = p.getLinkState(
                 robot_id, ee_link_index,
                 computeForwardKinematics=True,
                 physicsClientId=self.client,
-            )[:4][:2]
+            )
+            # With computeForwardKinematics the computed pose is at [4:6];
+            # [0:2] is the stale pose from the last stepSimulation.
+            pos, orn = state[4], state[5]
         finally:
-            for j, v in zip(arm_ids, saved):
-                p.resetJointState(robot_id, j, v, physicsClientId=self.client)
+            for j, v in zip(movable_ids, current):
+                p.resetJointState(robot_id, j, float(v), physicsClientId=self.client)
 
-        if np.linalg.norm(np.asarray(pos) - target_pos) > pos_tol:
+        pos_err = np.linalg.norm(np.asarray(pos) - target_pos)
+        if pos_err > pos_tol:
             return False
         achieved_x = _quat_to_mat(np.asarray(orn, dtype=float))[:, 0]
-        # abs(): fingers closing along +x or -x are the same grasp
-        cos_err = abs(float(achieved_x @ grasp_axis))
-        return np.degrees(np.arccos(min(cos_err, 1.0))) <= axis_tol_deg
+        # Signed: +x must face the grasp axis, not -x (pads would face away).
+        cos_err = float(achieved_x @ grasp_axis)
+        return np.degrees(np.arccos(min(max(cos_err, -1.0), 1.0))) <= axis_tol_deg
