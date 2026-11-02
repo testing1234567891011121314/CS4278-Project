@@ -39,7 +39,7 @@ class Solver:
 
         self.create_map(env) # stores self.occupancy, self.cell_size, self.x_min, self.y_max
         self.inflated_occupancy = self.create_navigable_map() # returns inflated occupancy grid
-        self.grasp_planner = AntipodalGraspPlanner(env.pb_physics_client)
+        self.grasp_planner = AntipodalGraspPlanner(gripper_max_width, env.pb_physics_client)    # need to add gripper_max_width
         self.curved_nav = CurvedNavigator(self)
         self.navigate_grasp = NavigateToGrasp(env, self.grasp_planner)
 
