@@ -39,7 +39,7 @@ class Solver:
 
         self.create_map(env) # stores self.occupancy, self.cell_size, self.x_min, self.y_max
         self.inflated_occupancy = self.create_navigable_map() # returns inflated occupancy grid
-        self.grasp_planner = AntipodalGraspPlanner(gripper_max_width, env.pb_physics_client)    # need to add gripper_max_width
+        self.grasp_planner = AntipodalGraspPlanner(physics_client_id=env.pb_physics_client)    # need to add gripper_max_width
         self.curved_nav = CurvedNavigator(self)
         self.navigate_grasp = NavigateToGrasp(env, self.grasp_planner)
 
@@ -71,15 +71,183 @@ class Solver:
 
             goal = self.convert_to_grid(decision["navigation_goal"])
             return self.navigate(env, goal)
+        
         if self.state == 1:
             print("solver state:", self.state)
-            self.state = 2
-            return np.asarray(obs["qpos"]).copy() 
+            # if self.navigate_grasp.grasp_complete:
+            #     self.state = 2
+            #     self.path = None
+            #     self._path_goal = None
+            #     self.waypoint_index = 0
+            #     self.curved_nav.reset()
+            #     return np.asarray(obs["qpos"]).copy()
+            return self.execute_grasp(obs)
+        
         if self.state == 2:    
             print("solver state:", self.state)
             goal = self.convert_to_grid(obs["goal_pos"][:2])
             return self.navigate(env, goal)
-    
+        
+    def execute_grasp(self, obs):
+        qpos = np.asarray(obs["qpos"], dtype=float)
+
+        # Plan once, like `if self.path is None` in navigate().
+        if getattr(self, "grasp_path", None) is None:
+            client = self.env.pb_physics_client
+            robot_id = self.env.robot_id
+
+            joint_info = {
+                j: p.getJointInfo(
+                    robot_id, j, physicsClientId=client
+                )
+                for j in range(p.getNumJoints(
+                    robot_id, physicsClientId=client
+                ))
+            }
+
+            ee_matches = [
+                j for j, info in joint_info.items()
+                if info[12].decode("utf-8") == "gripper_link"
+            ]
+            if len(ee_matches) != 1:
+                raise RuntimeError("Expected exactly one gripper_link.")
+
+            # Map PyBullet joint IDs to your action-vector indices.
+            arm_names = [
+                "shoulder_pan_joint",
+                "shoulder_lift_joint",
+                "upperarm_roll_joint",
+                "elbow_flex_joint",
+                "forearm_roll_joint",
+                "wrist_flex_joint",
+                "wrist_roll_joint",
+            ]
+            joint_ids = {
+                info[1].decode("utf-8"): j
+                for j, info in joint_info.items()
+            }
+            action_index = {
+                joint_ids[name]: i
+                for i, name in enumerate(arm_names, start=6)
+            }
+
+            candidates = self.grasp_planner.sample_antipodal_grasps(
+                points=obs["object_pc"],
+                normals=obs["object_normals"],
+                num_samples=500,
+            )
+
+            grasp = self.grasp_planner.select_optimal_grasp(
+                robot_id=robot_id,
+                ee_link_index=ee_matches[0],
+                candidates=candidates,
+                strategy="greedy_first",
+                max_candidates=25,
+            )
+
+            if grasp is None:
+                raise RuntimeError(
+                    "No reachable grasp found. "
+                    f"IK statistics: {self.grasp_planner.ik_stats}"
+                )
+
+            arm_indices = np.array([
+                action_index[j] for j in grasp["arm_joint_ids"]
+            ], dtype=int)
+            arm_target = np.asarray(
+                grasp["joint_angles"], dtype=float
+            )
+
+            lower = np.asarray(self.action_lower_bound)
+            upper = np.asarray(self.action_upper_bound)
+
+            if (
+                arm_target.shape != arm_indices.shape
+                or not np.all(np.isfinite(arm_target))
+                or np.any(arm_target < lower[arm_indices])
+                or np.any(arm_target > upper[arm_indices])
+            ):
+                raise RuntimeError("Invalid grasp joint targets.")
+
+            # Each row is a complete absolute joint-position target.
+            # Preserve the current base, torso and head positions.
+            open_pose = np.clip(qpos.copy(), lower, upper)
+            open_pose[-2:] = upper[-2:]
+
+            reach_pose = open_pose.copy()
+            reach_pose[arm_indices] = arm_target
+
+            close_pose = reach_pose.copy()
+            close_pose[-2:] = lower[-2:]
+
+            self.grasp_path = np.stack([
+                open_pose,
+                reach_pose,
+                close_pose,
+            ])
+            self.grasp_waypoint_index = 0
+            self._grasp_waypoint_ticks = 0
+            self.grasp_motion_complete = False
+
+        target = self.grasp_path[self.grasp_waypoint_index]
+
+        # Continue holding the final pose after closing.
+        if self.grasp_motion_complete:
+            self.action = target.copy()
+            return self.action.copy()
+
+        # Convert the current waypoint into one bounded action.
+        action = qpos + np.clip(
+            target - qpos,
+            -self.action_scale,
+            self.action_scale,
+        )
+
+        # Keep commanding the planned base, torso and head pose.
+        action[:6] = target[:6]
+
+        self._grasp_waypoint_ticks += 1
+
+        if self.grasp_waypoint_index == 0:
+            # OPEN: check the finger positions.
+            reached = np.max(
+                np.abs(target[-2:] - qpos[-2:])
+            ) < 0.002
+
+        elif self.grasp_waypoint_index == 1:
+            # REACH: check arm position and settling.
+            reached = (
+                np.max(np.abs(target[6:13] - qpos[6:13])) < 0.02
+                and np.max(np.abs(
+                    np.asarray(obs["qvel"])[6:13]
+                )) < 0.05
+            )
+
+        else:
+            # CLOSE: contact may stop the fingers before the target.
+            # Command closure for a settling period.
+            action[6:13] = target[6:13]
+            reached = self._grasp_waypoint_ticks >= 120
+
+        if reached:
+            if self.grasp_waypoint_index < len(self.grasp_path) - 1:
+                self.grasp_waypoint_index += 1
+                self._grasp_waypoint_ticks = 0
+            else:
+                self.grasp_motion_complete = True
+
+        elif self._grasp_waypoint_ticks > 600:
+            raise RuntimeError(
+                f"Grasp stalled at waypoint {self.grasp_waypoint_index}."
+            )
+
+        self.action = np.clip(
+            action,
+            self.action_lower_bound,
+            self.action_upper_bound,
+        )
+        return self.action.copy()
+
     def navigate(self, env, goal):
         obs = env._get_obs()
         qpos = obs["qpos"]
