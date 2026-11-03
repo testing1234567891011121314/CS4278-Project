@@ -52,7 +52,7 @@ class Solver:
         obs = env._get_obs()
 
         if self.state == 0:
-            decision = self.navigate_grasp.update(obs, self.inflated_occupancy, self.convert_to_grid, self.convert_to_world)
+            decision = self.navigate_grasp.update(obs, self.inflated_occupancy, self.convert_to_grid, self.convert_to_world, self.cell_size)
             goal_world = decision["navigation_goal"]
             base_xy = np.array([obs["qpos"][0] - 2.0, obs["qpos"][1]])
 
@@ -63,6 +63,10 @@ class Solver:
             )
             if decision["state"] == "GRASP" or arrived:
                 self.state = 1
+                self.grasp_attempt_goal = (
+                    tuple(np.round(np.asarray(goal_world), 3))
+                    if goal_world is not None else None
+                )
                 self.path = None
                 self._path_goal = None
                 self.waypoint_index = 0
@@ -74,14 +78,27 @@ class Solver:
         
         if self.state == 1:
             print("solver state:", self.state)
-            # if self.navigate_grasp.grasp_complete:
-            #     self.state = 2
-            #     self.path = None
-            #     self._path_goal = None
-            #     self.waypoint_index = 0
-            #     self.curved_nav.reset()
-            #     return np.asarray(obs["qpos"]).copy()
-            return self.execute_grasp(obs)
+            action = self.execute_grasp(obs)
+            if action is None:
+                # IK proved this parked pose cannot grasp the object:
+                # blacklist the cell and navigate to another approach pose.
+                # Only when IK was actually attempted -- an empty candidate
+                # list or an airborne object says nothing about the cell.
+                # Clear the cached grasp so it re-samples from the next cell.
+                if (getattr(self, "grasp_proved_unreachable", False)
+                        and getattr(self, "grasp_attempt_goal", None) is not None):
+                    self.navigate_grasp.mark_goal_failed(self.grasp_attempt_goal)
+                self.grasp_attempt_goal = None
+                self.grasp_path = None
+                self.navigate_grasp.grasp = None
+                self.grasp_motion_complete = False
+                self.state = 0
+                self.path = None
+                self._path_goal = None
+                self.waypoint_index = 0
+                self.curved_nav.reset()
+                return np.asarray(obs["qpos"]).copy()
+            return action
         
         if self.state == 2:    
             print("solver state:", self.state)
@@ -137,19 +154,39 @@ class Solver:
                 num_samples=500,
             )
 
+            object_pos = np.asarray(obs["object_pos"], dtype=float)
+            self.grasp_proved_unreachable = False
+            if object_pos[2] > 1.0:
+                # Object still falling from its z=5 spawn: an IK attempt now
+                # would prove a perfectly good cell un-graspable and blacklist
+                # it for the rest of the run.
+                print("object airborne at z=%.2f; deferring grasp" % object_pos[2])
+                return None
+
             grasp = self.grasp_planner.select_optimal_grasp(
                 robot_id=robot_id,
                 ee_link_index=ee_matches[0],
                 candidates=candidates,
                 strategy="greedy_first",
                 max_candidates=25,
+                support_z=float(np.min(np.asarray(obs["object_pc"])[:, 2])),
             )
 
             if grasp is None:
-                raise RuntimeError(
-                    "No reachable grasp found. "
-                    f"IK statistics: {self.grasp_planner.ik_stats}"
-                )
+                # Parked pose proven un-graspable; the caller blacklists
+                # this cell and navigates to another approach pose.
+                # Nothing was even tried (empty candidate list): this says
+                # nothing about the cell, so don't poison it.
+                stats = self.grasp_planner.ik_stats.get("greedy_first", {})
+                self.grasp_last_stats = stats
+                self.grasp_proved_unreachable = stats.get("calls", 0) > 0
+                print("grasp IK failed from parked pose:", stats)
+                print("  candidates:", len(candidates),
+                      "object_pos:", np.round(object_pos, 3),
+                      "base_xy:", np.round(np.asarray(qpos[:3]), 3))
+                for f in stats.get("failures", [])[:3]:
+                    print("  failure point:", f)
+                return None
 
             arm_indices = np.array([
                 action_index[j] for j in grasp["arm_joint_ids"]
@@ -180,19 +217,34 @@ class Solver:
             close_pose = reach_pose.copy()
             close_pose[-2:] = lower[-2:]
 
+            lift_pose = close_pose.copy()
+            lift_pose[3] = upper[3]
+
             self.grasp_path = np.stack([
                 open_pose,
                 reach_pose,
                 close_pose,
+                lift_pose,
             ])
             self.grasp_waypoint_index = 0
             self._grasp_waypoint_ticks = 0
             self.grasp_motion_complete = False
+            self._grasp_evidence_printed = False
 
         target = self.grasp_path[self.grasp_waypoint_index]
 
         # Continue holding the final pose after closing.
         if self.grasp_motion_complete:
+            if not getattr(self, "_grasp_evidence_printed", False):
+                self._grasp_evidence_printed = True
+                pts = p.getContactPoints(
+                    bodyA=self.env.robot_id,
+                    bodyB=self.env.object_id,
+                    physicsClientId=self.env.pb_physics_client)
+                obj_z = float(np.asarray(obs["object_pos"])[2])
+                print(f"GRASP CLOSED: robot-object contacts={len(pts)} "
+                      f"fingers={np.round(qpos[-2:], 4)} "
+                      f"object z={obj_z:.3f} (table top ~0.626)")
             self.action = target.copy()
             return self.action.copy()
 
@@ -223,11 +275,28 @@ class Solver:
                 )) < 0.05
             )
 
-        else:
-            # CLOSE: contact may stop the fingers before the target.
-            # Command closure for a settling period.
+        elif self.grasp_waypoint_index == 2:
+            # CLOSE: ramp the prismatic fingers shut slowly -- the ±0.05
+            # action scale slams the 0.024-range joints in one step, which
+            # bats the light slab sideways before the pads arrive.
             action[6:13] = target[6:13]
-            reached = self._grasp_waypoint_ticks >= 120
+            action[-2:] = qpos[-2:] + np.clip(
+                target[-2:] - qpos[-2:], -0.0004, 0.0004
+            )
+            reached = self._grasp_waypoint_ticks >= 160
+
+        else:
+            # LIFT: torso rises with the fingers still closed. Ramp it --
+            # a torso jump from the base-override below excites arm
+            # oscillation that shakes the object out of the pads.
+            action[3] = float(
+                qpos[3] + np.clip(target[3] - qpos[3], -0.008, 0.008)
+            )
+            action[6:13] = target[6:13]
+            reached = (
+                abs(target[3] - qpos[3]) < 0.02
+                and abs(float(np.asarray(obs["qvel"])[3])) < 0.05
+            )
 
         if reached:
             if self.grasp_waypoint_index < len(self.grasp_path) - 1:
@@ -648,6 +717,13 @@ class Solver:
                 lower, upper = p.getAABB(
                     body_id, link, physicsClientId=client
                 )
+                # The 2-D map plans the BASE only. A box entirely above base
+                # height (table top underside ~0.59 m vs base ~0.2 m tall)
+                # does not block it -- inflating those footprints sealed the
+                # reach annulus around the table and stranded the robot 1.0 m
+                # out. Table legs start at z=0 and still count.
+                if lower[2] >= 0.35:
+                    continue
                 link_bounds.append((
                     np.asarray(lower),
                     np.asarray(upper),

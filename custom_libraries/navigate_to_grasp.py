@@ -35,6 +35,7 @@ class NavigateToGrasp:
 
         self.grasp = None
         self.navigation_goal = None
+        self.failed_goals = set()
 
     def select_grasp(self, obs):
         """
@@ -150,12 +151,19 @@ class NavigateToGrasp:
 
         return "WITHIN_REACH"
 
-    def nearest_free_goal(self, object_xy, occupancy, convert_to_grid,
-                          convert_to_world):
-        """
-        Find the nearest free navigation cell to the object.
+    def mark_goal_failed(self, goal_world):
+        """Called when the arm proved unable to grasp from a parked pose."""
+        self.failed_goals.add(tuple(np.round(np.asarray(goal_world), 3)))
 
-        This prevents A* from targeting the table/object obstacle itself.
+    def nearest_free_goal(self, object_xy, occupancy, convert_to_grid,
+                          convert_to_world, cell_size=0.1, robot_xy=None):
+        """
+        Find a free navigation cell from which the arm can actually reach.
+
+        Prefers cells inside an arm-reach annulus around the object, nearest
+        to the robot's current pose, skipping cells previously proven
+        un-graspable. Falls back to plain nearest-free when the annulus is
+        empty (old behaviour, used when no grasp exists yet).
         """
         object_cell = np.asarray(
             convert_to_grid(object_xy),
@@ -167,14 +175,38 @@ class NavigateToGrasp:
         if len(free_cells) == 0:
             raise RuntimeError("The occupancy grid has no free cells.")
 
-        distances = np.linalg.norm(
-            free_cells - object_cell,
-            axis=1,
+        def to_world(cell):
+            return tuple(np.round(np.asarray(convert_to_world(tuple(cell))), 3))
+
+        if self.failed_goals:
+            ok = np.array([to_world(c) not in self.failed_goals for c in free_cells])
+            if not ok.any():
+                raise RuntimeError(
+                    "Every free cell near the object has been proven "
+                    "un-graspable by IK; the arm cannot reach the object "
+                    "from anywhere the base can stand."
+                )
+            free_cells = free_cells[ok]
+
+        dist_to_object = (
+            np.linalg.norm(free_cells - object_cell, axis=1) * cell_size
         )
+        annulus = (dist_to_object >= self.min_reach) & (dist_to_object <= self.max_reach)
+        candidates = free_cells[annulus]
 
-        nearest_cell = free_cells[np.argmin(distances)]
+        if len(candidates) == 0:
+            print(f"nearest_free_goal: annulus empty; {len(free_cells)} free cells, "
+                  f"closest free cell {dist_to_object.min():.2f} m from object "
+                  f"-- falling back to all free cells")
+            candidates = free_cells
 
-        return convert_to_world(tuple(nearest_cell))
+        if robot_xy is not None:
+            robot_cell = np.asarray(convert_to_grid(robot_xy), dtype=float)
+            best = candidates[np.argmin(np.linalg.norm(candidates - robot_cell, axis=1))]
+        else:
+            best = candidates[np.argmin(np.linalg.norm(candidates - object_cell, axis=1))]
+
+        return to_world(best)
 
     def update(
         self,
@@ -182,6 +214,7 @@ class NavigateToGrasp:
         occupancy,
         convert_to_grid,
         convert_to_world,
+        cell_size=0.1,
     ):
         """
         Decide whether to navigate or attempt grasping.
@@ -199,6 +232,8 @@ class NavigateToGrasp:
                 points=obs["object_pc"],
                 normals=obs["object_normals"],
             )
+            if len(candidates) == 0:
+                print("sampler starved:", self.grasp_planner.sample_stats)
 
             if len(candidates) > 0:
                 p1, p2, grasp_center, ee_quat, score = candidates[0]
@@ -229,6 +264,7 @@ class NavigateToGrasp:
                 occupancy,
                 convert_to_grid,
                 convert_to_world,
+                cell_size,
             )
 
             return {
@@ -250,11 +286,14 @@ class NavigateToGrasp:
         )
 
         if reach_state != "WITHIN_REACH":
+            base_position, _ = self.get_base_pose(obs)
             navigation_goal = self.nearest_free_goal(
                 self.grasp["position_world"][:2],
                 occupancy,
                 convert_to_grid,
                 convert_to_world,
+                cell_size,
+                robot_xy=base_position[:2],
             )
 
             return {

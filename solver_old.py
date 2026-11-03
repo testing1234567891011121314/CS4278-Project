@@ -1,11 +1,16 @@
+###############################################################################
+## Solver currently has navigation to object and to end of maze implemented. ##
+###############################################################################
 import numpy as np
 import pybullet as p
 from utils import closest_joint_values  # Handles joint angle wrapping
-from custom_libraries.a_star import a_star
+
+## import custom libraries
 from custom_libraries.curved_navigator import CurvedNavigator 
-from custom_libraries.wall_projection import build_wall_collision_grid
-from custom_libraries.antipodal import AntipodalGraspPlanner
 from custom_libraries.navigate_to_grasp import NavigateToGrasp
+from custom_libraries.antipodal import AntipodalGraspPlanner
+from custom_libraries.a_star import a_star
+from custom_libraries.wall_projection import build_wall_collision_grid
 
 class Solver:
     def __init__(self, env):
@@ -37,377 +42,280 @@ class Solver:
 
         self.create_map(env) # stores self.occupancy, self.cell_size, self.x_min, self.y_max
         self.inflated_occupancy = self.create_navigable_map() # returns inflated occupancy grid
+        self.grasp_planner = AntipodalGraspPlanner(physics_client_id=env.pb_physics_client)    # need to add gripper_max_width
         self.curved_nav = CurvedNavigator(self)
+        self.navigate_grasp = NavigateToGrasp(env, self.grasp_planner)
+
+        ## used for planning
         self.path = None
-        self.grasp_planner = AntipodalGraspPlanner(
-            physics_client_id=env.pb_physics_client,
-        )
-        self.ee_link_index = self.find_link_index("gripper_link")
-        self.navigate_grasp = NavigateToGrasp(
-            env,
-            self.grasp_planner,
-        )
-        self.debug_joint_mapping()
+        self.state = 0
 
-    def get_action(self, env):
+    ## This function is called every time step.
+    def get_action(self,env):
         obs = env._get_obs()
 
-        if not hasattr(self, "_action_phase"):
-            self._action_phase = "NAVIGATE"
-            self._active_navigation_goal = None
+        if self.state == 0:
+            decision = self.navigate_grasp.update(obs, self.inflated_occupancy, self.convert_to_grid, self.convert_to_world)
+            goal_world = decision["navigation_goal"]
+            base_xy = np.array([obs["qpos"][0] - 2.0, obs["qpos"][1]])
 
-        # Persist grasp execution across timesteps.
-        if self._action_phase == "GRASP":
-            self._last_state = "GRASP"
-            action = self.grasp(env)
-            self.action = np.asarray(action, dtype=float).copy()
-            return self.action.copy()
-
-        # Check the existing goal before update() can replace it.
-        if (
-            self._active_navigation_goal is not None
-            and self.at_pregrasp_pose(
-                env,
-                goal=self._active_navigation_goal,
-                obs=obs,
+            print("solver state:", self.state, "decision:", decision["state"])
+            arrived = (
+                goal_world is not None
+                and np.linalg.norm(base_xy - goal_world) < 0.10
             )
-        ):
-            self._action_phase = "GRASP"
-            self._last_state = "GRASP"
+            if decision["state"] == "GRASP" or arrived:
+                self.state = 1
+                self.path = None
+                self._path_goal = None
+                self.waypoint_index = 0
+                self.curved_nav.reset()
+                return np.asarray(obs["qpos"]).copy()
 
-            self.path = None
-            self._path_goal = None
-            self.curved_nav.reset()
-
-            self.forward = 0.0
-            self.turn = 0.0
-            self.yaw = 0.0
-
-            print("Navigation complete: attempting grasp.")
-
-            # grasp() selects a candidate and attempts IK on its first call.
-            action = self.grasp(env)
-            self.action = np.asarray(action, dtype=float).copy()
-            return self.action.copy()
-
-        # Obtain a decision only when no navigation goal is active.
-        if self._active_navigation_goal is None:
-            decision = self.navigate_grasp.update(
-                obs,
-                self.inflated_occupancy,
-                self.convert_to_grid,
-                self.convert_to_world,
-            )
-
-            state = decision["state"]
-            self._last_state = state
-
-            if state == "GRASP":
-                self._action_phase = "GRASP"
-                action = self.grasp(env)
-                self.action = np.asarray(action, dtype=float).copy()
-                return self.action.copy()
-
-            if state not in {
-                "NAVIGATE_TO_OBJECT",
-                "NAVIGATE_TO_GRASP",
-            }:
-                raise RuntimeError(f"Unhandled planner state: {state}")
-
-            goal = np.asarray(decision["navigation_goal"], dtype=float)
-
-            if goal.shape != (2,) or not np.all(np.isfinite(goal)):
-                raise ValueError(f"Invalid navigation goal: {goal}")
-
-            self._active_navigation_goal = goal.copy()
-
-        return self.navigate(
-            env,
-            self._active_navigation_goal,
-        )
-
-
-    def at_pregrasp_pose(self, env, tolerance=0.10, goal=None, obs=None):
-        if obs is None:
-            obs = env._get_obs()
-
-        if goal is None:
-            goal = getattr(self, "_active_navigation_goal", None)
-
-        if goal is None:
-            return False
-
-        qpos = np.asarray(obs["qpos"], dtype=float)
-        current_xy = np.array([qpos[0] - 2.0, qpos[1]])
-
-        return bool(
-            np.linalg.norm(current_xy - np.asarray(goal)) < tolerance
-        )
-
-    def grasp(self, env):
-        """
-        Plan and execute one grasp.
-
-        The object position and gripper orientation are expressed relative
-        to the robot base. Call this once per simulation timestep.
-        """
-
-        obs = env._get_obs()
+            goal = self.convert_to_grid(decision["navigation_goal"])
+            return self.navigate(env, goal)
+        
+        if self.state == 1:
+            print("solver state:", self.state)
+            # if self.navigate_grasp.grasp_complete:
+            #     self.state = 2
+            #     self.path = None
+            #     self._path_goal = None
+            #     self.waypoint_index = 0
+            #     self.curved_nav.reset()
+            #     return np.asarray(obs["qpos"]).copy()
+            return self.execute_grasp(obs)
+        
+        if self.state == 2:    
+            print("solver state:", self.state)
+            goal = self.convert_to_grid(obs["goal_pos"][:2])
+            return self.navigate(env, goal)
+        
+    def execute_grasp(self, obs):
         qpos = np.asarray(obs["qpos"], dtype=float)
 
-        # ---------------------------------------------------------
-        # Select and cache a grasp only once
-        # ---------------------------------------------------------
-        if not hasattr(self, "_grasp_plan"):
+        # Plan once, like `if self.path is None` in navigate().
+        if getattr(self, "grasp_path", None) is None:
+            client = self.env.pb_physics_client
+            robot_id = self.env.robot_id
+
+            joint_info = {
+                j: p.getJointInfo(
+                    robot_id, j, physicsClientId=client
+                )
+                for j in range(p.getNumJoints(
+                    robot_id, physicsClientId=client
+                ))
+            }
+
+            ee_matches = [
+                j for j, info in joint_info.items()
+                if info[12].decode("utf-8") == "gripper_link"
+            ]
+            if len(ee_matches) != 1:
+                raise RuntimeError("Expected exactly one gripper_link.")
+
+            # Map PyBullet joint IDs to your action-vector indices.
+            arm_names = [
+                "shoulder_pan_joint",
+                "shoulder_lift_joint",
+                "upperarm_roll_joint",
+                "elbow_flex_joint",
+                "forearm_roll_joint",
+                "wrist_flex_joint",
+                "wrist_roll_joint",
+            ]
+            joint_ids = {
+                info[1].decode("utf-8"): j
+                for j, info in joint_info.items()
+            }
+            action_index = {
+                joint_ids[name]: i
+                for i, name in enumerate(arm_names, start=6)
+            }
+
+            candidates = self.grasp_planner.sample_antipodal_grasps(
+                points=obs["object_pc"],
+                normals=obs["object_normals"],
+                num_samples=500,
+            )
+
             grasp = self.grasp_planner.select_optimal_grasp(
-                robot_id=env.robot_id,
-                ee_link_index=self.ee_link_index,
-                object_id=env.object_id,
-                joint_limits=list(zip(env.joint_lower, env.joint_upper)),
+                robot_id=robot_id,
+                ee_link_index=ee_matches[0],
+                candidates=candidates,
+                strategy="greedy_first",
+                max_candidates=25,
             )
 
             if grasp is None:
-                raise RuntimeError("No reachable antipodal grasp found.")
+                raise RuntimeError(
+                    "No reachable grasp found. "
+                    f"IK statistics: {self.grasp_planner.ik_stats}"
+                )
 
-            self._grasp_plan = grasp
-            self._grasp_joint_target = np.asarray(
-                grasp["joint_angles"][:len(qpos)],
-                dtype=float,
+            arm_indices = np.array([
+                action_index[j] for j in grasp["arm_joint_ids"]
+            ], dtype=int)
+            arm_target = np.asarray(
+                grasp["joint_angles"], dtype=float
             )
 
-        # ---------------------------------------------------------
-        # Object position relative to robot base
-        # ---------------------------------------------------------
-        object_world = np.asarray(obs["object_pos"], dtype=float)
+            lower = np.asarray(self.action_lower_bound)
+            upper = np.asarray(self.action_upper_bound)
 
-        # qpos[0:2] uses the robot's base coordinates.
-        # Keep the same coordinate convention used by navigate().
-        base_world = np.array([
-            qpos[0] - 2.0,
-            qpos[1],
-            0.0,
-        ])
+            if (
+                arm_target.shape != arm_indices.shape
+                or not np.all(np.isfinite(arm_target))
+                or np.any(arm_target < lower[arm_indices])
+                or np.any(arm_target > upper[arm_indices])
+            ):
+                raise RuntimeError("Invalid grasp joint targets.")
 
-        base_yaw = qpos[2]
+            # Each row is a complete absolute joint-position target.
+            # Preserve the current base, torso and head positions.
+            open_pose = np.clip(qpos.copy(), lower, upper)
+            open_pose[-2:] = upper[-2:]
 
-        c = np.cos(base_yaw)
-        s = np.sin(base_yaw)
+            reach_pose = open_pose.copy()
+            reach_pose[arm_indices] = arm_target
 
-        world_to_base = np.array([
-            [ c, s, 0.0],
-            [-s, c, 0.0],
-            [0.0, 0.0, 1.0],
-        ])
+            close_pose = reach_pose.copy()
+            close_pose[-2:] = lower[-2:]
 
-        object_base = world_to_base @ (object_world - base_world)
+            self.grasp_path = np.stack([
+                open_pose,
+                reach_pose,
+                close_pose,
+            ])
+            self.grasp_waypoint_index = 0
+            self._grasp_waypoint_ticks = 0
+            self.grasp_motion_complete = False
 
-        # ---------------------------------------------------------
-        # Grasp orientation relative to robot base
-        # ---------------------------------------------------------
-        grasp_quat_world = self._grasp_plan["ee_quat"]
+        target = self.grasp_path[self.grasp_waypoint_index]
 
-        base_quat_world = p.getQuaternionFromEuler(
-            [0.0, 0.0, base_yaw]
+        # Continue holding the final pose after closing.
+        if self.grasp_motion_complete:
+            self.action = target.copy()
+            return self.action.copy()
+
+        # Convert the current waypoint into one bounded action.
+        action = qpos + np.clip(
+            target - qpos,
+            -self.action_scale,
+            self.action_scale,
         )
 
-        base_quat_inverse = p.invertTransform(
-            [0.0, 0.0, 0.0],
-            base_quat_world,
-        )[1]
+        # Keep commanding the planned base, torso and head pose.
+        action[:6] = target[:6]
 
-        grasp_quat_base = p.multiplyTransforms(
-            [0.0, 0.0, 0.0],
-            base_quat_inverse,
-            [0.0, 0.0, 0.0],
-            grasp_quat_world,
-        )[1]
+        self._grasp_waypoint_ticks += 1
 
-        # ---------------------------------------------------------
-        # Check whether the object is within the arm's workspace
-        # ---------------------------------------------------------
-        distance = np.linalg.norm(object_base)
+        if self.grasp_waypoint_index == 0:
+            # OPEN: check the finger positions.
+            reached = np.max(
+                np.abs(target[-2:] - qpos[-2:])
+            ) < 0.002
 
-        within_reach = (
-            0.25 <= object_base[0] <= 0.90
-            and abs(object_base[1]) <= 0.60
-            and 0.20 <= object_base[2] <= 1.30
-            and distance <= 0.95
-        )
-        # if not within_reach:
-        #     # Still navigate toward the object.
-        #     return self.navigate(env, object_world[:2])
+        elif self.grasp_waypoint_index == 1:
+            # REACH: check arm position and settling.
+            reached = (
+                np.max(np.abs(target[6:13] - qpos[6:13])) < 0.02
+                and np.max(np.abs(
+                    np.asarray(obs["qvel"])[6:13]
+                )) < 0.05
+            )
 
-        # ---------------------------------------------------------
-        # Move arm toward the planned grasp
-        # ---------------------------------------------------------
-        target = qpos.copy()
-
-        arm_start = 6
-        arm_end = min(13, len(target))
-
-        target[arm_start:arm_end] = self._grasp_joint_target[
-            arm_start:arm_end
-        ]
-
-        # Close gripper after the arm has reached the grasp
-        arm_error = np.max(
-            np.abs(qpos[arm_start:arm_end] - target[arm_start:arm_end])
-        )
-
-        if arm_error < 0.05:
-            target[-2:] = env.joint_upper[-2:]
         else:
-            target[-2:] = qpos[-2:]
+            # CLOSE: contact may stop the fingers before the target.
+            # Command closure for a settling period.
+            action[6:13] = target[6:13]
+            reached = self._grasp_waypoint_ticks >= 120
 
-        return np.clip(
-            target,
-            env.joint_lower,
-            env.joint_upper,
-        )
+        if reached:
+            if self.grasp_waypoint_index < len(self.grasp_path) - 1:
+                self.grasp_waypoint_index += 1
+                self._grasp_waypoint_ticks = 0
+            else:
+                self.grasp_motion_complete = True
 
-    def find_link_index(self, name):
-        robot_id = self.env.robot_id
-        client = self.env.pb_physics_client
-
-        for i in range(p.getNumJoints(robot_id, physicsClientId=client)):
-            info = p.getJointInfo(robot_id, i, physicsClientId=client)
-            link_name = info[12].decode("utf-8")
-
-            if link_name == name:
-                return i
-
-        raise ValueError(f"Link not found: {name}")
-
-    def navigate(self, env, goal_pos):
-        obs = env._get_obs()
-        qpos = np.asarray(obs["qpos"], dtype=float)
-
-        goal_pos = np.asarray(goal_pos, dtype=float)
-
-        if goal_pos.shape != (2,) or not np.all(np.isfinite(goal_pos)):
-            raise ValueError(
-                f"Expected a finite navigation goal of shape (2,), "
-                f"got {goal_pos}"
+        elif self._grasp_waypoint_ticks > 600:
+            raise RuntimeError(
+                f"Grasp stalled at waypoint {self.grasp_waypoint_index}."
             )
 
-        # Prepare the travel posture before moving the base.
+        self.action = np.clip(
+            action,
+            self.action_lower_bound,
+            self.action_upper_bound,
+        )
+        return self.action.copy()
+
+    def navigate(self, env, goal):
+        obs = env._get_obs()
+        qpos = obs["qpos"]
+
+        # Keep moving toward the test pose until it has settled.
         if not getattr(self, "_travel_pose_complete", False):
             pose_action = self.moving_pose(obs)
 
             if self.moving_pose_ready:
                 self._travel_pose_complete = True
-                self.inflated_occupancy = self.create_navigable_map()
 
+                # Rebuild using the robot's measured, settled posture.
+                self.inflated_occupancy = self.create_navigable_map()
                 self.path = None
-                self._path_goal = None
                 self.waypoint_index = 0
                 self.curved_nav.reset()
 
+            # Hold the base still throughout pose preparation.
             return pose_action
-
-        # Retain your existing joint-to-world coordinate convention.
+        
         base_xy = np.array([qpos[0] - 2.0, qpos[1]])
 
-        start = tuple(self.convert_to_grid(base_xy))
-        goal = tuple(self.convert_to_grid(goal_pos))
+        start = self.convert_to_grid(base_xy)
 
-        rows, cols = self.inflated_occupancy.shape
-
-        def in_bounds(cell):
-            row, col = cell
-            return 0 <= row < rows and 0 <= col < cols
-
-        if not in_bounds(start):
-            raise ValueError(f"Robot cell is outside the map: {start}")
-
-        if not in_bounds(goal):
-            raise ValueError(f"Goal cell is outside the map: {goal}")
-
-        if self.inflated_occupancy[goal] != 0:
-            raise ValueError(
-                f"Navigation goal {goal} is occupied. "
-                "Choose a free approach position beside the table."
-            )
-
-        # A cached path is valid only for its original goal.
-        if goal != getattr(self, "_path_goal", None):
-            self.path = None
-            self._path_goal = goal
-            self.waypoint_index = 0
-            self.curved_nav.reset()
-            self._last_nav_status = None
-
+        # Plan once using the separate A* module.
         if self.path is None:
-            path = a_star(
-                start,
-                goal,
-                self.inflated_occupancy,
-            )
-
-            if path is None or len(path) == 0:
-                raise RuntimeError(
-                    f"No navigation path from {start} to {goal}"
-                )
-
-            self.path = path
+            self.path = a_star(start, goal, self.inflated_occupancy)
             self.waypoint_index = 0
             self.curved_nav.reset()
-
             print("Path length:", len(self.path))
 
-        self.forward = 0.0
-        self.turn = 0.0
-        self.yaw = 0.0
+        self.forward = 0
+        self.turn = 0
+        self.yaw = 0
 
-        # Preserve commanded travel posture; anchor base targets
-        # to measured joints so old translation commands do not accumulate.
-        self.action = np.asarray(self.action, dtype=float).copy()
-        self.action[:3] = qpos[:3]
+        # Anchor translation targets to the measured position.
+        self.action[:2] = qpos[:2]
 
-        step_xy = np.asarray(
-            self.curved_nav.step(base_xy, self.path),
-            dtype=float,
-        )
+        if self.path:
+            step_xy = self.curved_nav.step(base_xy, self.path)
 
-        if step_xy.shape != (2,) or not np.all(np.isfinite(step_xy)):
-            raise RuntimeError(
-                f"Navigator returned an invalid XY step: {step_xy}"
-            )
+            self.forward = step_xy[0] / self.action_scale[0]
+            self.turn = step_xy[1] / self.action_scale[1]
+            self.waypoint_index = self.curved_nav.grid_index
 
-        self.forward = step_xy[0] / self.action_scale[0]
-        self.turn = step_xy[1] / self.action_scale[1]
-        self.waypoint_index = self.curved_nav.grid_index
+            # Print only when the navigation status changes.
+            status = self.curved_nav.status
+            if status != getattr(self, "_last_nav_status", None):
+                print("Navigation:", status)
+                self._last_nav_status = status
 
-        status = self.curved_nav.status
-
-        if status != getattr(self, "_last_nav_status", None):
-            print("Navigation:", status)
-            self._last_nav_status = status
-
-        unit_action = np.array([
-            self.forward,
-            self.turn,
-            self.yaw,
-            self.torso_lift,
-            self.head_pan,
-            self.head_tilt,
-            self.shoulder_pan,
-            self.shoulder_lift,
-            self.upperarm_roll,
-            self.elbow_flex,
-            self.forearm_roll,
-            self.wrist_flex,
-            self.wrist_roll,
-            self.gripper_open,
-            self.gripper_open,
-        ], dtype=float)
+        unit_action = [
+            self.forward, self.turn, self.yaw,
+            self.torso_lift, self.head_pan, self.head_tilt,
+            self.shoulder_pan, self.shoulder_lift,
+            self.upperarm_roll, self.elbow_flex,
+            self.forearm_roll, self.wrist_flex, self.wrist_roll,
+            self.gripper_open, self.gripper_open,
+        ]
 
         self.action = np.clip(
-            self.action + self.action_scale * unit_action,
+            self.action + self.action_scale * np.asarray(unit_action),
             self.action_lower_bound,
             self.action_upper_bound,
         )
-
         return self.action.copy()
 
     def moving_pose(self, obs):
@@ -693,6 +601,20 @@ class Solver:
         y = self.y_max - (row + 0.5) * self.cell_size
         return np.array([x, y])
 
+    def debug_env(self, env):
+        ## These are the provided @properties.
+        print("Action size = ", env.action_size)
+        print("Obs size = ", env.obs_size)
+        print("Agent position = ", env.agent_qpos)
+        ## below are additional info
+        obs = env._get_obs()
+        print("Object position = ", obs["object_pos"])
+        print("Object xyzw = ", obs["object_xyzw"])
+        print("Goal position = ", obs["goal_pos"])
+        print("Object point cloud = ", obs["object_pc"])
+        print("Object normals = ", obs["object_normals"])
+        print("Wall position = ", obs["cube_positions"])
+
     ### Helper functions for querying pybullet directly to find the table. ###
     def get_extra_obstacle_bounds(self, cube_positions):
         """Read additional obstacle bounds without changing the simulation."""
@@ -782,6 +704,7 @@ class Solver:
             row_end = max(0, min(rows, row_end))
 
             occupancy[row_start:row_end, col_start:col_end] = 1
+
     def base_clearance(self, position):
         # Cache occupied-cell centres once; includes any mapped table.
         if not hasattr(self, "_obstacle_centres"):
@@ -806,64 +729,3 @@ class Solver:
         return float(
             distances.min() - half_cell_diagonal - self.robot_radius
         )
-
-
-    ## Debug
-    def debug_joint_mapping(self):
-        env = self.env
-        client = env.pb_physics_client
-
-        movable = []
-
-        for joint_id in range(
-            p.getNumJoints(env.robot_id, physicsClientId=client)
-        ):
-            info = p.getJointInfo(
-                env.robot_id,
-                joint_id,
-                physicsClientId=client,
-            )
-
-            if info[3] >= 0:  # qIndex: fixed joints have no position DOF
-                movable.append((
-                    info[3],
-                    joint_id,
-                    info[1].decode("utf-8"),
-                    info[2],
-                ))
-
-        movable.sort()
-        action_indices = {
-            int(joint_id): index
-            for index, joint_id in enumerate(env.joint_indices)
-        }
-
-        print("IK index | joint ID | joint name | action index")
-
-        for ik_index, (_, joint_id, name, joint_type) in enumerate(movable):
-            if joint_type not in {p.JOINT_REVOLUTE, p.JOINT_PRISMATIC}:
-                raise RuntimeError(
-                    f"Joint {name} has multiple DOFs; "
-                    "scalar IK mapping is insufficient."
-                )
-
-            print(
-                ik_index,
-                joint_id,
-                name,
-                action_indices.get(joint_id, "not controlled"),
-            )
-
-    def debug_env(self, env):
-        ## These are the provided @properties.
-        print("Action size = ", env.action_size)
-        print("Obs size = ", env.obs_size)
-        print("Agent position = ", env.agent_qpos)
-        ## below are additional info
-        obs = env._get_obs()
-        print("Object position = ", obs["object_pos"])
-        print("Object xyzw = ", obs["object_xyzw"])
-        print("Goal position = ", obs["goal_pos"])
-        print("Object point cloud = ", obs["object_pc"])
-        print("Object normals = ", obs["object_normals"])
-        print("Wall position = ", obs["cube_positions"])

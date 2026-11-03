@@ -431,9 +431,14 @@ if __name__ == "__main__":
 
     solver = Solver(env)
     # keyboard_controller = KeyBoardController(env)
-    
+
+    # The object spawns at z=5 and needs ~200 steps to land on the table;
+    # planning against the falling cloud produced unreachable-airborne goals.
+    for _ in range(200):
+        env.step(np.zeros(env.action_size))
+
     import time
-    for i in range (500):
+    for i in range (900):
     # while True:
         # random_action = np.random.uniform(-1.0, 1.0, size=(env.action_size,))
         action = solver.get_action(env)
