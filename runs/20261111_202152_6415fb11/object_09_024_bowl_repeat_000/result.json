@@ -1,0 +1,24 @@
+{
+  "trial": "object_09_024_bowl_repeat_000",
+  "seed": 42,
+  "object_idx": 9,
+  "object_name": "024_bowl",
+  "repeat_id": 0,
+  "gpu": 1,
+  "max_steps": 1000,
+  "directory": "/home/hejun/GitHub/CS4278-Project/runs/20261111_202152_6415fb11/object_09_024_bowl_repeat_000",
+  "task_success": false,
+  "navigation_success": false,
+  "status": "recording_completed",
+  "maze_seed": 42,
+  "maze_sha256": "5b567d2e02ec17d7d7cd8844f744ffe4f9852328bd53aefc3aa6abc1b9fcb922",
+  "maze_path": "/home/hejun/GitHub/CS4278-Project/runs/20261111_202152_6415fb11/maze.urdf",
+  "navigation_status": "following",
+  "final_info": {
+    "dist_to_goal": 17.679386858927735,
+    "success": false
+  },
+  "waypoint_index": 14,
+  "path_length": 18,
+  "wall_seconds": 141.06840348299738
+}

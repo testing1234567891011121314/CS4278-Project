@@ -1,0 +1,150 @@
+--- a/custom_libraries/grasp.py
++++ b/custom_libraries/grasp.py
+@@ -70,6 +70,8 @@
+     orientation_tolerance: float = 0.04
+     max_approach_joint_jump: float = 0.18
+     seed: int = 0
++    measured_torso_limit_tolerance: float = 0.0002  # metres, measured state only
++    measured_finger_limit_tolerance: float = 0.002  # metres, measured state only
+ 
+ 
+ @dataclass
+@@ -282,6 +284,10 @@
+                  disabled_self_pairs=()):
+         self.config = config or GraspConfig()
+         cfg = self.config
++        tolerances = np.array([cfg.measured_torso_limit_tolerance,
++                               cfg.measured_finger_limit_tolerance], dtype=float)
++        if not np.isfinite(tolerances).all() or np.any(tolerances < 0):
++            raise ValueError('Measured joint-limit tolerances must be finite and nonnegative.')
+         if (cfg.friction_coefficient < 0 or cfg.closed_gap < 0 or cfg.lift_distance < 0
+                 or cfg.contact_penetration < 0 or cfg.collision_margin < 0
+                 or cfg.squeeze < 0 or cfg.opening_clearance <= 2*cfg.collision_margin
+@@ -457,10 +463,64 @@
+         for j, value in zip(self.action_ids, q):
+             p.resetJointState(self.robot, j, float(value), physicsClientId=self.client)
+ 
++    def _configure_measured_limits(self, measured):
++        """Permit only the observed, small prismatic overshoot for this plan.
++
++        Arm/IK limits stay unchanged. Bounds expand only as far as the actual
++        observed overshoot, not by the full tolerance, and reset on each plan.
++        Collision queries still use the original, unclipped measured geometry.
++        """
++        tolerance = np.full(len(self.action_ids), 1e-8)
++        for i, name in enumerate(self.action_names):
++            if name == 'torso_lift_joint':
++                tolerance[i] = self.config.measured_torso_limit_tolerance + 1e-8
++            elif name in FINGER_NAMES:
++                tolerance[i] = self.config.measured_finger_limit_tolerance + 1e-8
++        excess = np.maximum(self.lower - measured, measured - self.upper)
++        bad = np.flatnonzero(excess > tolerance)
++        # Reset before checking so an earlier attempt cannot leave loose bounds.
++        self._state_lower, self._state_upper = self.lower.copy(), self.upper.copy()
++        if len(bad):
++            i = int(bad[0])
++            self.last_stats['reason'] = 'start_joint_limit_violation'
++            self.last_stats['start_limit_error'] = {
++                'joint': self.action_names[i], 'position': float(measured[i]),
++                'lower': float(self.lower[i]), 'upper': float(self.upper[i]),
++                'excess': float(excess[i]), 'allowed': float(tolerance[i]),
++            }
++            return False
++        self._state_lower = np.minimum(self.lower, measured)
++        self._state_upper = np.maximum(self.upper, measured)
++        self.last_stats['measured_limit_overshoot'] = {
++            self.action_names[i]: float(excess[i])
++            for i in np.flatnonzero(excess > 1e-8)
++        }
++        return True
++
++    def _record_invalid(self, stats, stage):
++        examples = stats.setdefault('invalid_examples', [])
++        if len(examples) < 3:
++            examples.append({'stage': stage, **(self._last_invalid or {})})
++
+     def _valid(self, q, *, touch=False, attached=None, deadline=float('inf')):
+         cfg = self.config
+-        if (time.monotonic() >= deadline or not np.isfinite(q).all()
+-                or np.any(q < self.lower - 1e-8) or np.any(q > self.upper + 1e-8)):
++        self._last_invalid = None
++        if time.monotonic() >= deadline:
++            self._last_invalid = {'reason': 'time_budget'}
++            return False
++        if not np.isfinite(q).all():
++            self._last_invalid = {'reason': 'nonfinite_configuration'}
++            return False
++        lower = getattr(self, '_state_lower', self.lower)
++        upper = getattr(self, '_state_upper', self.upper)
++        bad = np.flatnonzero((q < lower - 1e-8) | (q > upper + 1e-8))
++        if len(bad):
++            i = int(bad[0])
++            self._last_invalid = {
++                'reason': 'joint_limit', 'joint': self.action_names[i],
++                'position': float(q[i]), 'lower': float(lower[i]),
++                'upper': float(upper[i]),
++            }
+             return False
+         self._set(q)
+         if attached is not None:
+@@ -475,9 +535,18 @@
+                 if body == self.object and touch and contact[3] in self.finger_ids:
+                     if contact[8] >= -cfg.contact_penetration:
+                         continue
++                self._last_invalid = {
++                    'reason': 'obstacle_collision', 'body': body,
++                    'robot_link': contact[3], 'obstacle_link': contact[4],
++                    'distance': float(contact[8]),
++                }
+                 return False
+         for contact in p.getClosestPoints(self.robot, self.robot, cfg.collision_margin, physicsClientId=self.client):
+             if frozenset((contact[3], contact[4])) in self.self_pairs:
++                self._last_invalid = {
++                    'reason': 'self_collision', 'links': (contact[3], contact[4]),
++                    'distance': float(contact[8]),
++                }
+                 return False
+         if attached is not None:
+             # Include the payload, not only the fingers, in the lift sweep.
+@@ -543,7 +612,10 @@
+             raise PlanningError('Observation is stale; acquire it after navigation stops.')
+         deadline = time.monotonic() + cfg.planning_seconds
+         stats = self.last_stats = dict(candidates=0, tried=0, ik_fail=0, transit_fail=0,
+-                                      approach_fail=0, closure_fail=0, lift_fail=0, reason='search_exhausted')
++                                      approach_fail=0, opening_fail=0, closure_fail=0,
++                                      lift_fail=0, reason='search_exhausted')
++        if not self._configure_measured_limits(parked):
++            return None
+         candidates = self.sample_antipodal_grasps(points=obs['object_pc'], normals=obs['object_normals'])
+         stats['candidates'] = len(candidates)
+         if not candidates:
+@@ -582,7 +654,8 @@
+                         continue
+                     opening = self._full(parked, start, opened)
+                     if not all(self._valid(q, deadline=deadline) for q in edge_samples(parked, opening, 0.002)):
+-                        stats['closure_fail'] += 1
++                        stats['opening_fail'] += 1
++                        self._record_invalid(stats, 'opening')
+                         continue
+                     rot = Rotation.from_quat(quat)
+                     grasp_pos = centre - rot.apply(cfg.tcp_offset)
+@@ -611,6 +684,7 @@
+                     if not all(self._valid(self._full(parked, reach, f), touch=True, deadline=deadline)
+                                for f in edge_samples(opened, nominal, 0.001)):
+                         stats['closure_fail'] += 1
++                        self._record_invalid(stats, 'closure')
+                         continue
+                     lift = []
+                     if cfg.lift_distance > 0:
+@@ -634,7 +708,10 @@
+                             waypoints.append(self._full(parked, arm, fingers))
+                             phases.append(phase)
+                     stats['reason'] = 'success'
+-                    return GraspPlan(np.asarray(waypoints), tuple(phases), candidate,
++                    # Only measured/query poses get the small overshoot allowance.
++                    # Returned motor targets obey the original URDF limits.
++                    commands = np.clip(np.asarray(waypoints), self.lower, self.upper)
++                    return GraspPlan(commands, tuple(phases), candidate,
+                                      nominal, squeezed, np.asarray(obs['object_pos']).copy(),
+                                      np.asarray(object_pose[1]).copy(), stats.copy())
+         finally:

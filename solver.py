@@ -5,7 +5,8 @@ from utils import closest_joint_values  # Handles joint angle wrapping
 ## import custom libraries
 from custom_libraries.curved_navigator import CurvedNavigator 
 from custom_libraries.navigate_to_grasp import NavigateToGrasp
-from custom_libraries.antipodal import AntipodalGraspPlanner
+from custom_libraries.grasp import GraspPlanner, GraspFollower
+from custom_libraries.grasp import PlanningError
 from custom_libraries.a_star import a_star
 from custom_libraries.wall_projection import build_wall_collision_grid
 
@@ -43,21 +44,9 @@ class Solver:
         
         client_id = env.pb_physics_client
 
-        gripper_link_index = next(
-            j
-            for j in range(
-                p.getNumJoints(env.robot_id, physicsClientId=client_id)
-            )
-            if p.getJointInfo(
-                env.robot_id, j, physicsClientId=client_id
-            )[12].decode() == "gripper_link"
-        )
-
-        self.grasp_planner = AntipodalGraspPlanner(
-            robot_id=env.robot_id,
-            ee_link_index=gripper_link_index,
+        self.grasp_planner = GraspPlanner(
+            env, robot_urdf_path="assets/fetch/fetch.urdf",
             physics_client_id=client_id,
-            action_joint_ids=env.joint_indices,
         )
 
         self.curved_nav = CurvedNavigator(self)
@@ -83,6 +72,8 @@ class Solver:
             )
             if decision["state"] == "GRASP" or arrived:
                 self.state = 1
+                self._grasp_settle_ticks = 0
+                self._grasp_last_object_pos = None
                 self.grasp_attempt_goal = (
                     tuple(np.round(np.asarray(goal_world), 3))
                     if goal_world is not None else None
@@ -96,232 +87,85 @@ class Solver:
             goal = self.convert_to_grid(decision["navigation_goal"])
             return self.navigate(env, goal)
         
-        if self.state == 1: # plan grasp. dont move until planning is done
+        if self.state == 1:
             print("solver state:", self.state)
-            if self.grasp_planner.start(obs, object_id=env.object_id):
-                self.state = 2
-            return self.action.copy()
-        
-        if self.state == 2: # actual grasping
-            print("solver state:", self.state)
-            return None
-        
-        if self.state == 3:    
-            print("solver state:", self.state)
-            goal = self.convert_to_grid(obs["goal_pos"][:2])
-            return self.navigate(env, goal)
-        
-    def execute_grasp(self, obs):
-        qpos = np.asarray(obs["qpos"], dtype=float)
+            from pprint import pprint
+            import time
 
-        # Plan once, like `if self.path is None` in navigate().
-        if getattr(self, "grasp_path", None) is None:
-            client = self.env.pb_physics_client
-            robot_id = self.env.robot_id
-
-            joint_info = {
-                j: p.getJointInfo(
-                    robot_id, j, physicsClientId=client
-                )
-                for j in range(p.getNumJoints(
-                    robot_id, physicsClientId=client
-                ))
-            }
-
-            ee_matches = [
-                j for j, info in joint_info.items()
-                if info[12].decode("utf-8") == "gripper_link"
-            ]
-            if len(ee_matches) != 1:
-                raise RuntimeError("Expected exactly one gripper_link.")
-
-            # Map PyBullet joint IDs to your action-vector indices.
-            arm_names = [
-                "shoulder_pan_joint",
-                "shoulder_lift_joint",
-                "upperarm_roll_joint",
-                "elbow_flex_joint",
-                "forearm_roll_joint",
-                "wrist_flex_joint",
-                "wrist_roll_joint",
-            ]
-            joint_ids = {
-                info[1].decode("utf-8"): j
-                for j, info in joint_info.items()
-            }
-            action_index = {
-                joint_ids[name]: i
-                for i, name in enumerate(arm_names, start=6)
-            }
-
-            candidates = self.grasp_planner.sample_antipodal_grasps(
-                points=obs["object_pc"],
-                normals=obs["object_normals"],
-                num_samples=500,
-            )
-
+            # Hold the measured pose while waiting for settling.
+            self.action = np.asarray(obs["qpos"], dtype=float).copy()
             object_pos = np.asarray(obs["object_pos"], dtype=float)
-            self.grasp_proved_unreachable = False
-            if object_pos[2] > 1.0:
-                # Object still falling from its z=5 spawn: an IK attempt now
-                # would prove a perfectly good cell un-graspable and blacklist
-                # it for the rest of the run.
-                print("object airborne at z=%.2f; deferring grasp" % object_pos[2])
-                return None
 
-            grasp = self.grasp_planner.select_optimal_grasp(
-                robot_id=robot_id,
-                ee_link_index=ee_matches[0],
-                candidates=candidates,
-                strategy="greedy_first",
-                max_candidates=25,
-                support_z=float(np.min(np.asarray(obs["object_pc"])[:, 2])),
+            previous = getattr(self, "_grasp_last_object_pos", None)
+            self._grasp_last_object_pos = object_pos.copy()
+
+            settled = (
+                previous is not None
+                and np.linalg.norm(object_pos - previous) < 0.001
+                and np.max(np.abs(obs["qvel"])) < 0.05
             )
 
-            if grasp is None:
-                # Parked pose proven un-graspable; the caller blacklists
-                # this cell and navigates to another approach pose.
-                # Nothing was even tried (empty candidate list): this says
-                # nothing about the cell, so don't poison it.
-                stats = self.grasp_planner.ik_stats.get("greedy_first", {})
-                self.grasp_last_stats = stats
-                self.grasp_proved_unreachable = stats.get("calls", 0) > 0
-                print("grasp IK failed from parked pose:", stats)
-                print("  candidates:", len(candidates),
-                      "object_pos:", np.round(object_pos, 3),
-                      "base_xy:", np.round(np.asarray(qpos[:3]), 3))
-                for f in stats.get("failures", [])[:3]:
-                    print("  failure point:", f)
-                return None
-
-            arm_indices = np.array([
-                action_index[j] for j in grasp["arm_joint_ids"]
-            ], dtype=int)
-            arm_target = np.asarray(
-                grasp["joint_angles"], dtype=float
+            self._grasp_settle_ticks = (
+                getattr(self, "_grasp_settle_ticks", 0) + 1
+                if settled else 0
             )
 
-            lower = np.asarray(self.action_lower_bound)
-            upper = np.asarray(self.action_upper_bound)
+            if self._grasp_settle_ticks < 12:
+                return self.action.copy()
 
-            if (
-                arm_target.shape != arm_indices.shape
-                or not np.all(np.isfinite(arm_target))
-                or np.any(arm_target < lower[arm_indices])
-                or np.any(arm_target > upper[arm_indices])
-            ):
-                raise RuntimeError("Invalid grasp joint targets.")
+            # Planning starts only after settling.
+            started = time.monotonic()
+            print("[PLAN] Starting grasp planning", flush=True)
 
-            # Each row is a complete absolute joint-position target.
-            # Preserve the current base, torso and head positions.
-            open_pose = np.clip(qpos.copy(), lower, upper)
-            open_pose[-2:] = upper[-2:]
+            plan = self.grasp_planner.plan(obs)
 
-            reach_pose = open_pose.copy()
-            reach_pose[arm_indices] = arm_target
+            print(
+                f"[PLAN] Finished in {time.monotonic() - started:.2f}s; "
+                f"success={plan is not None}",
+                flush=True,
+            )
+            pprint(self.grasp_planner.last_stats)
 
-            close_pose = reach_pose.copy()
-            close_pose[-2:] = lower[-2:]
+            if plan is None:
+                self.grasp_error = "No plan found within the grasp search budget."
+                self.state = 4
+                return self.action.copy()
 
-            lift_pose = close_pose.copy()
-            lift_pose[3] = upper[3]
-
-            self.grasp_path = np.stack([
-                open_pose,
-                reach_pose,
-                close_pose,
-                lift_pose,
-            ])
-            self.grasp_waypoint_index = 0
-            self._grasp_waypoint_ticks = 0
-            self.grasp_motion_complete = False
-            self._grasp_evidence_printed = False
-
-        target = self.grasp_path[self.grasp_waypoint_index]
-
-        # Continue holding the final pose after closing.
-        if self.grasp_motion_complete:
-            if not getattr(self, "_grasp_evidence_printed", False):
-                self._grasp_evidence_printed = True
-                pts = p.getContactPoints(
-                    bodyA=self.env.robot_id,
-                    bodyB=self.env.object_id,
-                    physicsClientId=self.env.pb_physics_client)
-                obj_z = float(np.asarray(obs["object_pos"])[2])
-                print(f"GRASP CLOSED: robot-object contacts={len(pts)} "
-                      f"fingers={np.round(qpos[-2:], 4)} "
-                      f"object z={obj_z:.3f} (table top ~0.626)")
-            self.action = target.copy()
+            self.grasp_plan = plan
+            self.grasp_follower = GraspFollower(self.grasp_planner, plan)
+            self.state = 2
             return self.action.copy()
 
-        # Convert the current waypoint into one bounded action.
-        action = qpos + np.clip(
-            target - qpos,
-            -self.action_scale,
-            self.action_scale,
-        )
+        if self.state == 2:
+            print("solver state:", self.state)
+            self.action = self.grasp_follower.step(obs)
+            if self.grasp_follower.status == "done":
+                self.state = 3
+                print("Grasp and lift complete; holding object.")
+            elif self.grasp_follower.status == "failed":
+                self.grasp_error = self.grasp_follower.error
+                self.state = 4
+                print("Grasp stopped:", self.grasp_error)
+            return self.action.copy()
 
-        # Keep commanding the planned base, torso and head pose.
-        action[:6] = target[:6]
-
-        self._grasp_waypoint_ticks += 1
-
-        if self.grasp_waypoint_index == 0:
-            # OPEN: check the finger positions.
-            reached = np.max(
-                np.abs(target[-2:] - qpos[-2:])
-            ) < 0.002
-
-        elif self.grasp_waypoint_index == 1:
-            # REACH: check arm position and settling.
-            reached = (
-                np.max(np.abs(target[6:13] - qpos[6:13])) < 0.02
-                and np.max(np.abs(
-                    np.asarray(obs["qvel"])[6:13]
-                )) < 0.05
+        if self.state == 3:
+            print("solver state:", self.state)
+            # Terminal hold. Payload-aware transport is a separate planning
+            # task; the previous transition reopened the grasp and reset the
+            # arm to an unchecked travel pose.
+            if hasattr(self, "grasp_follower"):
+                self.action = self.grasp_follower.hold.copy()
+            return self.action.copy()
+        
+        if self.state == 4:
+            print("solver state:", self.state)
+            # Return numeric absolute targets, never an exception class.
+            self.action = np.clip(
+                np.asarray(self.action, dtype=float),
+                self.action_lower_bound, self.action_upper_bound,
             )
-
-        elif self.grasp_waypoint_index == 2:
-            # CLOSE: ramp the prismatic fingers shut slowly -- the ±0.05
-            # action scale slams the 0.024-range joints in one step, which
-            # bats the light slab sideways before the pads arrive.
-            action[6:13] = target[6:13]
-            action[-2:] = qpos[-2:] + np.clip(
-                target[-2:] - qpos[-2:], -0.0004, 0.0004
-            )
-            reached = self._grasp_waypoint_ticks >= 160
-
-        else:
-            # LIFT: torso rises with the fingers still closed. Ramp it --
-            # a torso jump from the base-override below excites arm
-            # oscillation that shakes the object out of the pads.
-            action[3] = float(
-                qpos[3] + np.clip(target[3] - qpos[3], -0.008, 0.008)
-            )
-            action[6:13] = target[6:13]
-            reached = (
-                abs(target[3] - qpos[3]) < 0.02
-                and abs(float(np.asarray(obs["qvel"])[3])) < 0.05
-            )
-
-        if reached:
-            if self.grasp_waypoint_index < len(self.grasp_path) - 1:
-                self.grasp_waypoint_index += 1
-                self._grasp_waypoint_ticks = 0
-            else:
-                self.grasp_motion_complete = True
-
-        elif self._grasp_waypoint_ticks > 600:
-            raise RuntimeError(
-                f"Grasp stalled at waypoint {self.grasp_waypoint_index}."
-            )
-
-        self.action = np.clip(
-            action,
-            self.action_lower_bound,
-            self.action_upper_bound,
-        )
-        return self.action.copy()
+            # return self.action.copy()
+            return PlanningError
 
     def navigate(self, env, goal):
         obs = env._get_obs()
@@ -403,7 +247,7 @@ class Solver:
             target[6] = 0.0     # shoulder_pan
             target[7] = -1.0    # shoulder_lift
             target[8] = 0.0     # upperarm_roll
-            target[9] = -2.0    # elbow_flex
+            target[9] = -1.0    # elbow_flex
             target[10] = 0.0    # forearm_roll
             target[11] = 1.0    # wrist_flex
             target[12] = 0.0    # wrist_roll

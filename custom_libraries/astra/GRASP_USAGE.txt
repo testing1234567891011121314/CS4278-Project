@@ -1,0 +1,109 @@
+Fetch grasp planner
+===================
+
+Install into your existing project:
+  1. Put grasp.py in custom_libraries/grasp.py.
+  2. Replace solver.py with the accompanying solver.py.
+  3. Keep navigate_to_grasp.py and pick_nav_reach_env.py unchanged.
+  4. Keep the supplied fetch.urdf at assets/fetch/fetch.urdf, together with
+     its existing mesh assets. Run from the project root as before.
+
+Dependencies:
+  python -m pip install numpy scipy pybullet
+
+The supplied solver stops after a successful grasp and 8 cm arm lift, keeping
+its fingers closed. Its old automatic transport transition reopened the fingers
+and commanded an unchecked arm travel pose. Goal transport now needs its own
+payload-aware plan before state 3 is changed to resume navigation. State 4 holds
+a failed attempt; inspect solver.grasp_error and planner.last_stats. Finite
+search failure does not prove that a parked base pose is unreachable.
+
+Direct use without the integrated solver:
+
+  from custom_libraries.grasp import GraspPlanner, GraspFollower
+
+  planner = GraspPlanner(env, robot_urdf_path='assets/fetch/fetch.urdf')
+  # Stop navigation and let the object and robot settle before planning.
+  obs = env._get_obs()
+  plan = planner.plan(obs)
+  if plan is None:
+      print(planner.last_stats)
+  else:
+      follower = GraspFollower(planner, plan)
+      while follower.status == 'running':
+          action = follower.step(obs)
+          obs, info = env.step(action)
+      print(follower.status, follower.error)
+      # Continue commanding follower.hold if the simulator keeps stepping.
+
+What is planned:
+  - Outward-normal friction-cone tests at both sampled surface contacts.
+  - Opening width from the contact separation and the actual supplied fingers:
+      gap = 0.00285 + q_right + q_left, in metres.
+  - A contact TCP 25 mm ahead of gripper_link along +X, near the pad tips.
+    +X approaches the object; +/-Y opens and closes the fingers.
+  - Seven-arm-joint IK, with base, torso and head frozen at measured positions.
+    A separate mesh-free DIRECT kinematic model freezes all non-arm URDF joints.
+    IK DOF ordering is mapped explicitly and every accepted result is checked
+    by FK, including a check against the live robot. Limits are not enforced by
+    clipping the final IK answer. Continuous roll joints use an unwrapped local
+    interval around their measured positions.
+  - Bidirectional RRT-Connect transit to a pregrasp pose 8 cm away.
+  - Cartesian approach sampled every 5 mm; each joint-space edge is also checked.
+  - Closure to nominal contact; the motor target squeezes a further 1 mm total.
+  - An 8 cm vertical lift, with a hypothesized rigidly held object included in
+    collision queries. No actual fixed constraint is created.
+
+Collision model and execution assumptions:
+  - All current scene bodies are queried, including table, walls, floor, target.
+  - Self-collision queries are explicit, even if the environment loaded the URDF
+    without URDF_USE_SELF_COLLISION. Same fixed clusters/direct joint neighbours
+    are excluded; other moving-link pairs are checked. Additional exclusions
+    must be supplied explicitly as disabled_self_pairs=[('link_a','link_b')].
+  - Static base/floor contacts are ignored for arm-only motion. The base is not
+    being replanned. A carried object is checked against the full robot.
+  - Only finger contact with the target is allowed during closure/lift, with a
+    small penetration tolerance. The object is never globally removed from
+    collision checks. Initial shallow upward support contact is allowed while
+    lifting away, but increased penetration is rejected.
+  - plan() temporarily resets robot joints and, for lift queries, object pose
+    inside saveState/restoreState. A finally block restores the state even on
+    failure. Do not step the live simulation concurrently. This is NOT a purely
+    read-only collision implementation. IK uses its own separate client.
+  - The planner issues no motor commands and never calls stepSimulation.
+  - The follower waits for observed motion, requires bilateral finger force
+    contacts, detects object movement before closing, and checks lift height.
+    It stops on lost contact/stalls instead of silently reporting success.
+  - Edges are checked at a finite angular resolution (default 0.025 rad). This
+    is not continuous collision detection or a dynamic trajectory guarantee.
+    The environment's controller gains/contact model still require local testing.
+  - Grasp friction and rigid attachment during lift are planning assumptions.
+    Two antipodal contacts do not guarantee a dynamically stable real grasp.
+
+Tuning (GraspConfig passed as config=...):
+  planning_seconds: total search budget (default 30 seconds).
+  max_candidates: number of ranked poses attempted (default 60).
+  rrt_seconds: maximum transit search time per pose (default 1 second).
+  friction_coefficient: cone coefficient (default 0.5; not read from material).
+  collision_margin: default 2 mm.
+  joint_resolution: reduce for finer edge checks at increased cost.
+  tcp_offset: default (0.025, 0, 0); must remain inside the supplied pad.
+  lift_distance: set to 0 to stop after verified closure.
+
+The code targets the supplied modified Fetch box fingers and checks their gap
+and dimensions. If you change the finger collision geometry, update its model
+and validation rather than assuming width/2 equals the finger-joint position.
+
+Validation performed here:
+  12 geometry, RRT, and follower tests passed; all delivered Python files compile.
+  2 PyBullet smoke tests were skipped because PyBullet was unavailable and could
+  not be installed in this environment. The Fetch mesh assets were not attached,
+  so there was no end-to-end Fetch collision or physical grasp validation.
+
+Run tests locally:
+  Place test_grasp.py beside grasp.py, then from that directory run:
+    python -m unittest discover -s . -p test_grasp.py -v
+  For the two PyBullet tests, set FETCH_URDF to your fetch.urdf or place a copy
+  beside test_grasp.py. They intentionally strip mesh shapes while preserving
+  kinematics/inertials and box fingers; they test fixed-base IK/FK and state
+  restoration, not the missing full-robot mesh collision model.
