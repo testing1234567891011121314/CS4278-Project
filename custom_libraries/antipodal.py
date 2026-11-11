@@ -6,7 +6,7 @@ configuration is applied to the live robot.
 
 THIS FILE IS NOT YET A RUNNABLE GRASP CONTROLLER.
 Implement the four numbered TODO functions, in order:
-    1. _load_robot_model()       Parse URDF into the data classes below.
+    1. _read_robot_model()       Build model from live read-only metadata.
     2. _forward_kinematics()     Link transforms from arbitrary joint values.
     3. _read_scene_geometry()    Read-only scene snapshot as geometry records.
     4. _geometry_distance()      Signed distances between geometric primitives.
@@ -19,7 +19,7 @@ Cartesian approach/lift, and the per-step execution state machine. These depend
 on your TODO implementations before they can execute a complete grasp.
 
 Recommended implementation milestones:
-    A. Parse the URDF and test transforms on a small known two-joint chain.
+    A. Read robot metadata and test transforms on a known two-joint chain.
     B. At the live qpos, compare every FK link pose with getLinkState()[4:6].
        _snapshot() also verifies the end-effector automatically.
     C. Implement a minimal primitive distance backend and test separated,
@@ -37,14 +37,14 @@ Geometry conventions:
 
 Integration AFTER implementing the TODOs::
     planner = AntipodalGraspPlanner(
-        robot_id, gripper_link_index, "assets/fetch/fetch.urdf",
+        robot_id=robot_id, ee_link_index=gripper_link_index,
         physics_client_id=client_id, action_joint_ids=action_joint_ids)
     ok = planner.start(obs, object_id)  # once, parked and settled
     action = planner.step(obs)         # once each simulation timestep
     # Return this ABSOLUTE position target to the environment.
     # Enter CARRY only when planner.done; inspect failure_reason on failure.
 
-Dependencies: NumPy and PyBullet; stdlib XML parsing is sufficient for TODO 1.
+Dependencies: NumPy and PyBullet. No URDF file is read by this planner.
 No SciPy is required. Mesh collision handling may need an optional library or
 conservative primitive approximations. Use accurate finger/palm geometry.
 The model assumes a stationary scene and fixed base/torso during each grasp.
@@ -52,7 +52,6 @@ Discrete edge sampling is not continuous collision detection. Grasp holding
 force still depends on the environment's position-motor settings.
 """
 from dataclasses import dataclass, replace
-from pathlib import Path
 import time
 import numpy as np
 import pybullet as p
@@ -165,9 +164,9 @@ def _pose(position, quaternion):
 
 @dataclass
 class JointModel:
-    """One URDF joint, in parent-before-child order in RobotModel.joints.
+    """One reconstructed joint, parent-before-child in RobotModel.joints.
 
-    origin: T_parent_joint at q=0, including URDF xyz AND rpy.
+    origin: T_parent_joint at q=0, reconstructed in LINK frames.
     axis: unit motion axis expressed in the joint frame.
     action_index: index in obs['qpos']; None for fixed joints.
     kind: 'fixed', 'revolute', 'continuous', or 'prismatic'.
@@ -229,7 +228,7 @@ class AntipodalGraspPlanner:
     allowed_self_pairs contains live link-index pairs, e.g. (link_a, link_b).
     obstacle_ids=None snapshots every other collision body; [] means none.
     """
-    def __init__(self, robot_id, ee_link_index, robot_urdf_path,
+    def __init__(self, robot_id, ee_link_index, *,
                  physics_client_id=0, action_joint_ids=None,
                  arm_joint_ids=None, finger_joint_ids=None,
                  obstacle_ids=None, allowed_self_pairs=(), config=None):
@@ -282,7 +281,8 @@ class AntipodalGraspPlanner:
         self.allowed_self_pairs = {tuple(sorted(pair)) for pair in allowed_self_pairs}
         if not 0 <= self.ee_link_index < len(self.info):
             raise ValueError('ee_link_index must identify the gripper link')
-        self.robot_urdf_path = str(Path(robot_urdf_path).resolve())
+        # robot_id selects the environment's existing robot. No file path.
+        self.description = None
         # Lazy loading allows sampling to be explored before TODO 1 is complete.
         self.model = None
         self.scene = None
@@ -305,7 +305,7 @@ class AntipodalGraspPlanner:
 
     def close(self):
         """Release Python references only; there is no simulator to disconnect."""
-        self.model, self.scene = None, None
+        self.model, self.scene, self.description = None, None, None
         self._closed = True
 
     def __enter__(self):
@@ -333,31 +333,136 @@ class AntipodalGraspPlanner:
     # The remainder of the planner calls these interfaces directly.
     # ================================================================
 
-    def _load_robot_model(self, urdf_path: str) -> RobotModel:
-        """TODO 1: parse the URDF without loading a PyBullet body.
+    def _read_robot_description(self) -> dict:
+        """Collect raw metadata; this dictionary is NOT an FK-ready RobotModel.
 
-        Suggested steps (xml.etree.ElementTree is sufficient):
-        1. Read all <link> and <joint> elements. Match joint NAME to
-           self.info[j][1].decode(); never assume XML order equals joint IDs.
-           Use child-link names to map links to those IDs, with root=-1.
-        2. Parse <origin xyz=... rpy=...>. URDF rpy gives Rz(yaw) @ Ry(pitch)
-           @ Rx(roll). Missing origin means identity. Parse and normalize
-           each motion axis; handle URDF defaults. Retain fixed joints.
-        3. Map a movable joint to self.action_joint_ids.index(joint_id).
-           Topologically sort joints so parents precede their children.
-        4. Read ALL <collision> elements, including each collision's origin.
-           Convert into CollisionPrimitive records in the URDF link frame.
-           For a box use size/2 as half_extents. Respect mesh scale/origin.
-           Approximate meshes conservatively, or use an exact geometry backend.
-           Do not silently drop geometry you cannot parse.
-        5. Return RobotModel(joints, collisions). Include base/torso/head/finger
-           links: even stationary links can be self-collision obstacles.
-
-        Do not include inertial-origin transforms in the kinematic joint chain;
-        URDF joint/link frames and COM frames are different. _snapshot handles
-        the root COM offset explicitly. Reject a mismatched robot description.
+        Uses only the existing self.robot_id/self.client. No file reads, robot
+        creation, resets, or stepping. Raw joint frames are intentionally named
+        *_raw: they must be reconciled with link/inertial frames in TODO 1.
         """
-        raise NotImplementedError('TODO 1: implement _load_robot_model')
+        action_index = {j: k for k, j in enumerate(self.action_joint_ids)}
+        joints = {}
+        for info in self.info:  # getJointInfo results cached by __init__
+            j = info[0]
+            joints[j] = {
+                "name": info[1].decode(),
+                "type": info[2],
+                "q_index": info[3],
+                "action_index": action_index.get(j),
+                "lower": info[8],
+                "upper": info[9],
+                "model_max_force": info[10],
+                "model_max_velocity": info[11],
+                "child_link_name": info[12].decode(),
+                "axis_raw": np.asarray(info[13], dtype=float),
+                "parent_frame_position_raw": np.asarray(info[14], dtype=float),
+                "parent_frame_orientation_raw": np.asarray(info[15], dtype=float),
+                "parent_link": info[16],
+            }
+
+        links = {}
+        for link_id in range(-1, len(self.info)):
+            dynamics = p.getDynamicsInfo(
+                self.robot_id, link_id, physicsClientId=self.client)
+            shapes = p.getCollisionShapeData(
+                self.robot_id, link_id, physicsClientId=self.client)
+            links[link_id] = {
+                "mass": dynamics[0],
+                "lateral_friction": dynamics[1],
+                "inertia_diagonal": np.asarray(dynamics[2], dtype=float),
+                "inertial_position": np.asarray(dynamics[3], dtype=float),
+                "inertial_orientation": np.asarray(dynamics[4], dtype=float),
+                "collision_shapes": [
+                    {
+                        "type": shape[2],
+                        "dimensions_raw": np.asarray(shape[3], dtype=float),
+                        # Metadata only; do not open this filename.
+                        "mesh_filename": shape[4],
+                        "position_in_inertial_frame": np.asarray(shape[5], dtype=float),
+                        "orientation_in_inertial_frame": np.asarray(shape[6], dtype=float),
+                    }
+                    for shape in (shapes or ())
+                ],
+            }
+        return {"joints": joints, "links": links}
+
+    def _read_robot_model(self) -> RobotModel:
+        """TODO 1: convert read-only metadata into a mathematical RobotModel.
+
+        Called lazily by _snapshot() during start(); Solver must not call it.
+        _read_robot_description() is implemented, but the conversion below is
+        still your implementation task. Never return that raw dict as the model.
+
+        1. Build JointModel records from description['joints']. Preserve fixed
+           joints, parent IDs, and action_index. Sort parents before children.
+           q_index is a PyBullet state index, NOT an env action index.
+        2. Reconstruct origin and axis in the link/joint convention expected by
+           _forward_kinematics. Do NOT blindly copy parent_frame_*_raw to origin.
+           Use the inertial offsets and, if needed, read-only getJointState /
+           getLinkState(..., computeForwardKinematics=True) to reconcile frames.
+           For a consistently defined motion M(q), a reference pose gives:
+             origin = inv(T_world_parent) @ T_world_child @ inv(M(q_current))
+           This requires the correct local motion axis FIRST. Validate FK at
+           additional normally reached configurations, not only the reference.
+        3. Build ALL robot collision primitives, including stationary links.
+           For each shape, convert its COM-local offset to link-local:
+             T_link_shape = T_link_inertial @ T_inertial_shape
+           Dynamics supplies T_link_inertial; shape metadata supplies the other.
+           Interpret dimensions by geometry type (box extents -> half-extents).
+        4. Mesh filenames are not mesh vertices. Use permitted geometry queries
+           or conservative primitives; do not read mesh files or drop shapes.
+           A live world AABB cannot simply be reused as a link-local box: any
+           approximation must contain the shape and transform with the link.
+        5. Return RobotModel(joints, collisions). Keep GraspConfig separate:
+           metadata does not determine planner tolerances/approach distances,
+           and model force/velocity limits are not active motor settings.
+
+        _snapshot() handles the root COM-to-link transform and compares FK with
+        the actual gripper pose. All hypothetical configurations stay in NumPy.
+        """
+        self.description = self._read_robot_description()
+        # print("joints = ", self.description['joints'])
+        # print("links = ", self.description['links'])
+        joint_models = []
+        collision_shapes = []
+        links = self.description['links']
+        joints = self.description['joints']
+
+        kind_map = {
+            p.JOINT_FIXED: "fixed",
+            p.JOINT_REVOLUTE: "revolute",
+            p.JOINT_PRISMATIC: "prismatic",
+        }
+        for joint_id, joint_data in joints.items():
+            name = joint_data["name"]
+            joint_type = joint_data["type"]
+
+            if joint_type not in kind_map:
+                raise NotImplementedError(
+                    f"Unsupported joint type: {joint_type}"
+                )
+
+            kind = kind_map[joint_type]
+            origin = self.quat()
+            axis = self._quat()
+
+            # Construct this joint's JointModel here.
+            joint_models.append(
+                JointModel(
+                    joint_id=joint_id, 
+                    parent_link=joint_data["parent_link"], 
+                    child_link=joint_id, 
+                    kind=kind,
+                    origin=origin,
+                    axis=axis 
+                    action_index=joint_data["action_index"]
+                ))
+
+
+        return RobotModel(
+            joints=joint_models,
+            collisions=collision_shapes
+        )
 
     def _forward_kinematics(self, q: np.ndarray,
                             root_pose: np.ndarray) -> dict:
@@ -366,7 +471,7 @@ class AntipodalGraspPlanner:
         Inputs:
           q: full action-order joint vector (not only the seven arm joints).
           root_pose: T_world_root_URDF_link, already corrected for COM offset.
-          self.model.joints: parsed parent-before-child JointModel records.
+          self.model.joints: reconstructed parent-before-child JointModel records.
 
         Algorithm:
           poses = {-1: root_pose.copy()}
@@ -388,7 +493,16 @@ class AntipodalGraspPlanner:
         Never reset joints or advance physics. _ik already finite-differences
         this function, so an analytical Jacobian is optional, not required.
         """
-        raise NotImplementedError('TODO 2: implement _forward_kinematics')
+        q = np.asarray(q, dtype=float)
+        if q.ndim != 1 or not np.all(np.isfinite(q)):
+            raise ValueError("q must be a finite one-dimensional action vector")
+        poses = {-1: np.asarray(root_pose, dtype=float).copy()}
+        for joint in self.model.joints:
+            value = 0.0 if joint.kind == "fixed" else q[joint.action_index]
+            poses[joint.child_link] = (
+                poses[joint.parent_link] @ joint.origin
+                @ motion(joint.kind, joint.axis, value))
+        return poses
 
     def _read_scene_geometry(self, object_id: int) -> SceneSnapshot:
         """TODO 3: describe the CURRENT scene using read-only queries.
@@ -494,7 +608,7 @@ class AntipodalGraspPlanner:
     def _snapshot(self, object_id):
         """Read current frames and scene; all hypothetical poses stay in NumPy."""
         if self.model is None:
-            self.model = self._load_robot_model(self.robot_urdf_path)
+            self.model = self._read_robot_model()
             if not self.model.collisions:
                 raise ValueError('Robot model must contain collision geometry')
             self._build_collision_pairs()

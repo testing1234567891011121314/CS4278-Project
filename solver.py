@@ -16,7 +16,8 @@ class Solver:
         if not np.isfinite(self.robot_radius) or self.robot_radius <= 0:
             raise ValueError("robot_radius must be a positive number in metres.")
         
-        self.action = env.agent_qpos # np.zeros(self.env.action_size)
+        # self.action = env.agent_qpos # np.zeros(self.env.action_size)
+        self.action = np.asarray(env.agent_qpos, dtype=float).copy()
         self.action_scale = np.array([0.01] * env.action_size)
         self.action_scale[:3] = 0.02  # root movement
         self.action_scale[-2:] = 0.005  # gripper
@@ -39,7 +40,26 @@ class Solver:
 
         self.create_map(env) # stores self.occupancy, self.cell_size, self.x_min, self.y_max
         self.inflated_occupancy = self.create_navigable_map() # returns inflated occupancy grid
-        self.grasp_planner = AntipodalGraspPlanner(physics_client_id=env.pb_physics_client)    # need to add gripper_max_width
+        
+        client_id = env.pb_physics_client
+
+        gripper_link_index = next(
+            j
+            for j in range(
+                p.getNumJoints(env.robot_id, physicsClientId=client_id)
+            )
+            if p.getJointInfo(
+                env.robot_id, j, physicsClientId=client_id
+            )[12].decode() == "gripper_link"
+        )
+
+        self.grasp_planner = AntipodalGraspPlanner(
+            robot_id=env.robot_id,
+            ee_link_index=gripper_link_index,
+            physics_client_id=client_id,
+            action_joint_ids=env.joint_indices,
+        )
+
         self.curved_nav = CurvedNavigator(self)
         self.navigate_grasp = NavigateToGrasp(env, self.grasp_planner)
 
@@ -76,31 +96,17 @@ class Solver:
             goal = self.convert_to_grid(decision["navigation_goal"])
             return self.navigate(env, goal)
         
-        if self.state == 1:
+        if self.state == 1: # plan grasp. dont move until planning is done
             print("solver state:", self.state)
-            action = self.execute_grasp(obs)
-            if action is None:
-                # IK proved this parked pose cannot grasp the object:
-                # blacklist the cell and navigate to another approach pose.
-                # Only when IK was actually attempted -- an empty candidate
-                # list or an airborne object says nothing about the cell.
-                # Clear the cached grasp so it re-samples from the next cell.
-                if (getattr(self, "grasp_proved_unreachable", False)
-                        and getattr(self, "grasp_attempt_goal", None) is not None):
-                    self.navigate_grasp.mark_goal_failed(self.grasp_attempt_goal)
-                self.grasp_attempt_goal = None
-                self.grasp_path = None
-                self.navigate_grasp.grasp = None
-                self.grasp_motion_complete = False
-                self.state = 0
-                self.path = None
-                self._path_goal = None
-                self.waypoint_index = 0
-                self.curved_nav.reset()
-                return np.asarray(obs["qpos"]).copy()
-            return action
+            if self.grasp_planner.start(obs, object_id=env.object_id):
+                self.state = 2
+            return self.action.copy()
         
-        if self.state == 2:    
+        if self.state == 2: # actual grasping
+            print("solver state:", self.state)
+            return None
+        
+        if self.state == 3:    
             print("solver state:", self.state)
             goal = self.convert_to_grid(obs["goal_pos"][:2])
             return self.navigate(env, goal)
