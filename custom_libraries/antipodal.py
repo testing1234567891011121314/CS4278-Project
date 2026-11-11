@@ -1,1084 +1,561 @@
-"""CS4278 antipodal planner: mathematical-model implementation scaffold.
-
-NO second robot/client is created. PyBullet is used only for read-only queries
-on the live environment and stateless quaternion conversions. No hypothetical
-configuration is applied to the live robot.
-
-THIS FILE IS NOT YET A RUNNABLE GRASP CONTROLLER.
-Implement the four numbered TODO functions, in order:
-    1. _read_robot_model()       Build model from live read-only metadata.
-    2. _forward_kinematics()     Link transforms from arbitrary joint values.
-    3. _read_scene_geometry()    Read-only scene snapshot as geometry records.
-    4. _geometry_distance()      Signed distances between geometric primitives.
-They deliberately raise NotImplementedError. Never replace them with a dummy
-identity transform or an unconditional collision-free result.
-
-Already implemented: contact sampling, frame construction, finite-difference
-arm-only IK, collision-policy orchestration, edge sampling, RRT-Connect,
-Cartesian approach/lift, and the per-step execution state machine. These depend
-on your TODO implementations before they can execute a complete grasp.
-
-Recommended implementation milestones:
-    A. Read robot metadata and test transforms on a known two-joint chain.
-    B. At the live qpos, compare every FK link pose with getLinkState()[4:6].
-       _snapshot() also verifies the end-effector automatically.
-    C. Implement a minimal primitive distance backend and test separated,
-       touching, penetrating, and rotated shapes. Unsupported pairs must raise.
-    D. Test robot-table, self-collision and finger-object contact policies.
-    E. Integrate with solver.py and validate one slow grasp before carrying.
-
-Geometry conventions:
-    * All distances are metres; angles are radians; quaternions use xyzw.
-    * A transform T_A_B maps coordinates from frame B into frame A.
-    * Robot geometry is stored in its URDF link frame, never the inertial frame.
-    * Scene obstacles are world-frame. Target geometry is object-frame.
-    * Joint IDs/link IDs match PyBullet; action indices may have another order.
-    * Fetch +x is forward along fingers and y is the closing direction.
-
-Integration AFTER implementing the TODOs::
-    planner = AntipodalGraspPlanner(
-        robot_id=robot_id, ee_link_index=gripper_link_index,
-        physics_client_id=client_id, action_joint_ids=action_joint_ids)
-    ok = planner.start(obs, object_id)  # once, parked and settled
-    action = planner.step(obs)         # once each simulation timestep
-    # Return this ABSOLUTE position target to the environment.
-    # Enter CARRY only when planner.done; inspect failure_reason on failure.
-
-Dependencies: NumPy and PyBullet. No URDF file is read by this planner.
-No SciPy is required. Mesh collision handling may need an optional library or
-conservative primitive approximations. Use accurate finger/palm geometry.
-The model assumes a stationary scene and fixed base/torso during each grasp.
-Discrete edge sampling is not continuous collision detection. Grasp holding
-force still depends on the environment's position-motor settings.
 """
-from dataclasses import dataclass, replace
-import time
+Antipodal Grasp Planner for Fetch robot and YCB objects in PyBullet.
+
+  1. sample_antipodal_grasps: vectorized antipodal pair search on the caller's
+     point cloud (friction cone + antiparallel normals + point-plane distance),
+     geometric composite scoring, greedy center+axis diversity filter.
+     Returns best-first tuples (p1, p2, center, quaternion, score) -- score is
+     lower-is-better, so candidates[0] is the best geometric grasp.
+  2. select_optimal_grasp: IK validation by a hand-rolled damped-least-squares
+     Newton loop over the 7 arm joints only -- the stock
+     calculateInverseKinematics optimizes every movable DOF and "solves"
+     unreachable targets by sliding the free base joint metres sideways, so
+     its numeric output cannot be trusted. Base/torso/head/fingers are
+     structurally untouched; every solution is FK-verified with an axis-only
+     orientation tolerance (parallel-jaw roll about the grasp axis is
+     irrelevant), two strategies: "greedy_first" and "score_all".
+     Returns the best reachable grasp dict, or None (never raises).
+     After each call, self.ik_stats reports calls/ik_fail/fk_fail per
+     strategy and per-candidate failure points in "reasons".
+
+Grasp convention: the finger prismatic joints translate along gripper_link
+y (+-0.015..0.065 measured), so the jaws CLOSE along y and the fingers
+extend FORWARD along x. The quaternion maps y onto the grasp axis (p2-p1)
+and x onto the approach direction; the ee sits one offset BEHIND the pads.
+"""
+
 import numpy as np
 import pybullet as p
 
-
-@dataclass
-class GraspConfig:
-    mu: float = 0.5
-    max_width: float = 0.08
-    min_width: float = 0.012
-    max_points: int = 1024
-    max_candidates: int = 20
-    max_axis_z: float = 0.25
-    normal_angle_deg: float = 40.0
-    pad_center_offset: float = 0.025
-    pregrasp_distance: float = 0.08
-    lift_distance: float = 0.10
-    cartesian_step: float = 0.008
-    joint_resolution: float = 0.035
-    prismatic_resolution: float = 0.002
-    rrt_step: float = 0.18
-    rrt_iterations: int = 1200
-    planning_seconds: float = 25.0
-    ik_iterations: int = 100
-    ik_random_seeds: int = 5
-    position_tolerance: float = 0.003
-    rotation_tolerance: float = np.deg2rad(5.0)
-    max_ik_jump: float = 0.35
-    collision_margin: float = 0.001
-    allowed_pad_penetration: float = 0.002
-    contact_distance: float = 0.0015
-    arm_step: float = 0.012
-    finger_step: float = 0.0004
-    joint_tolerance: float = 0.025
-    finger_tolerance: float = 0.0015
-    waypoint_timeout: int = 350
-    close_timeout: int = 240
-    contact_hold_steps: int = 12
-    verify_steps: int = 20
-    minimum_lift: float = 0.04
-    slip_tolerance: float = 0.025
-    object_move_tolerance: float = 0.015
-    max_settle_speed: float = 0.03
-    max_settle_angular_speed: float = 0.15
-    require_support_contact: bool = True
-    seed: int = 0
-
-    def __post_init__(self):
-        positive = ('mu', 'max_width', 'min_width', 'max_points',
-                    'max_candidates', 'pregrasp_distance', 'lift_distance',
-                    'cartesian_step', 'joint_resolution', 'prismatic_resolution', 'rrt_step',
-                    'planning_seconds', 'ik_iterations', 'position_tolerance',
-                    'rotation_tolerance', 'max_ik_jump', 'arm_step',
-                    'finger_step', 'waypoint_timeout', 'close_timeout',
-                    'contact_hold_steps', 'verify_steps', 'minimum_lift')
-        for name in positive:
-            if not np.isfinite(getattr(self, name)) or getattr(self, name) <= 0:
-                raise ValueError(name + ' must be finite and positive')
-        if not 0 <= self.max_axis_z < 1 or self.min_width >= self.max_width:
-            raise ValueError('Invalid closing-axis/width limits')
-        if self.minimum_lift > self.lift_distance:
-            raise ValueError('minimum_lift cannot exceed lift_distance')
+ARM_NAME_PREFIXES = (
+    b"shoulder", b"upperarm", b"elbow", b"forearm", b"wrist",
+)
 
 
-def _unit(v):
-    v = np.asarray(v, dtype=float)
-    n = np.linalg.norm(v)
-    if not np.isfinite(n) or n < 1e-10:
-        raise ValueError('Degenerate vector')
-    return v / n
+def _mat_to_quat(mats):
+    """Batched rotation matrices (N,3,3) -> quaternions (N,4) in xyzw order."""
+    quats = np.empty((len(mats), 4))
+    for n, m in enumerate(mats):
+        tr = m.trace()
+        if tr > 0:
+            s = np.sqrt(tr + 1.0) * 2
+            w, x, y, z = (0.25 * s,
+                          (m[2, 1] - m[1, 2]) / s,
+                          (m[0, 2] - m[2, 0]) / s,
+                          (m[1, 0] - m[0, 1]) / s)
+        else:
+            axis = int(np.argmax([m[0, 0], m[1, 1], m[2, 2]]))
+            i, k = (axis + 1) % 3, (axis + 2) % 3
+            s = np.sqrt(1.0 + m[axis, axis] - m[i, i] - m[k, k]) * 2
+            comp = [0.0, 0.0, 0.0]
+            comp[axis] = 0.25 * s
+            comp[i] = (m[i, axis] + m[axis, i]) / s
+            comp[k] = (m[k, axis] + m[axis, k]) / s
+            w = (m[k, i] - m[i, k]) / s
+            x, y, z = comp
+        quats[n] = (x, y, z, w)
+    return quats / np.linalg.norm(quats, axis=1, keepdims=True)
 
 
-def _rot(q):
-    return np.asarray(p.getMatrixFromQuaternion(q), dtype=float).reshape(3, 3)
-
-
-def _quat(r):
-    """Rotation matrix to xyzw; stable at pi rotations."""
-    r = np.asarray(r, dtype=float)
-    t = np.trace(r)
-    if t > 0:
-        s = 2 * np.sqrt(t + 1)
-        q = [(r[2, 1]-r[1, 2])/s, (r[0, 2]-r[2, 0])/s,
-             (r[1, 0]-r[0, 1])/s, s/4]
-    else:
-        i = int(np.argmax(np.diag(r)))
-        j, k = (i+1) % 3, (i+2) % 3
-        s = 2 * np.sqrt(max(1+r[i, i]-r[j, j]-r[k, k], 0))
-        q = np.zeros(4)
-        q[i], q[j], q[k], q[3] = s/4, (r[j, i]+r[i, j])/s, (r[k, i]+r[i, k])/s, (r[k, j]-r[j, k])/s
-    return _unit(q)
-
-
-def _rotation_error(target, actual):
-    """World-frame SO(3) log; unlike sin(theta), nonzero at 180 degrees."""
-    q = _quat(target @ actual.T)
-    if q[3] < 0:
-        q = -q
-    n = np.linalg.norm(q[:3])
-    if n < 1e-10:
-        return 2*q[:3]
-    return q[:3] * (2*np.arctan2(n, max(q[3], 0)) / n)
-
-
-def _pose(position, quaternion):
-    t = np.eye(4)
-    t[:3, :3], t[:3, 3] = _rot(quaternion), position
-    return t
-
-
-@dataclass
-class JointModel:
-    """One reconstructed joint, parent-before-child in RobotModel.joints.
-
-    origin: T_parent_joint at q=0, reconstructed in LINK frames.
-    axis: unit motion axis expressed in the joint frame.
-    action_index: index in obs['qpos']; None for fixed joints.
-    kind: 'fixed', 'revolute', 'continuous', or 'prismatic'.
-    child_link is normally the PyBullet joint index; the root link is -1.
-    """
-    joint_id: int
-    parent_link: int
-    child_link: int
-    kind: str
-    origin: np.ndarray
-    axis: np.ndarray
-    action_index: object
-
-
-@dataclass
-class CollisionPrimitive:
-    """A shape plus its pose in the containing frame.
-
-    kind: choose supported kinds such as 'sphere', 'capsule', 'box', 'plane'.
-    parameters examples:
-      sphere:  {'radius': float}
-      capsule: {'radius': float, 'half_length': float} along local z
-      box:     {'half_extents': np.ndarray of shape (3,)}
-      plane:   local z=0, free side +z (define distance semantics consistently)
-    pose: 4x4 transform, local or world as documented by the containing list.
-    link_id/body_id identify contact exemptions; they are NOT array indices.
-    Arrays are treated as immutable. Transforming a shape creates a new record.
-    """
-    kind: str
-    parameters: dict
-    pose: np.ndarray
-    link_id: int
-    body_id: int
-
-
-@dataclass
-class RobotModel:
-    joints: list  # JointModel records, parent before child, INCLUDING fixed joints
-    collisions: list  # CollisionPrimitive records in their own URDF link frames
-
-
-@dataclass
-class SceneSnapshot:
-    obstacles: list  # CollisionPrimitive records with WORLD poses
-    target: list  # CollisionPrimitive records with OBJECT-LOCAL poses
-    object_pose: np.ndarray  # T_world_object (use object's base/COM frame)
-
-
-class _PlanningTimeout(Exception):
-    pass
+def _quat_to_mat(quat):
+    """xyzw quaternion -> rotation matrix (3,3)."""
+    x, y, z, w = quat
+    return np.array([
+        [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+        [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+        [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+    ])
 
 
 class AntipodalGraspPlanner:
-    """Scaffold for planning plus OPEN/TRANSIT/APPROACH/CLOSE/LIFT/VERIFY execution.
+    def __init__(self, gripper_max_width=0.08, physics_client_id=0,
+                 mu=0.5, ee_forward_offset=0.04):
+        self.rng = np.random.default_rng(0)
+        self.client = physics_client_id
+        self.gripper_max_width = gripper_max_width
+        self.mu = mu
+        self.ee_forward_offset = ee_forward_offset
+        self.ik_stats = {}
 
-    This is a new execution interface, not a drop-in replacement for the old
-    select_optimal_grasp-only API. Read the integration example above.
-    Explicit arm_joint_ids/finger_joint_ids override Fetch name discovery.
-    allowed_self_pairs contains live link-index pairs, e.g. (link_a, link_b).
-    obstacle_ids=None snapshots every other collision body; [] means none.
-    """
-    def __init__(self, robot_id, ee_link_index, *,
-                 physics_client_id=0, action_joint_ids=None,
-                 arm_joint_ids=None, finger_joint_ids=None,
-                 obstacle_ids=None, allowed_self_pairs=(), config=None):
-        self.client = int(physics_client_id)
-        self.robot_id = int(robot_id)
-        self.ee_link_index = int(ee_link_index)
-        self.cfg = config or GraspConfig()
-        self.rng = np.random.default_rng(self.cfg.seed)
-        self.obstacle_ids = obstacle_ids
-        self.info = [p.getJointInfo(robot_id, j, physicsClientId=self.client)
-                     for j in range(p.getNumJoints(robot_id, physicsClientId=self.client))]
-        movable = sorted((i for i in self.info if i[3] >= 0), key=lambda i: i[3])
-        if any(i[2] not in (p.JOINT_REVOLUTE, p.JOINT_PRISMATIC) for i in movable):
-            raise ValueError('Only single-DOF joints are supported')
-        self.action_joint_ids = list(action_joint_ids if action_joint_ids is not None
-                                     else [i[0] for i in movable])
-        if (len(set(self.action_joint_ids)) != len(self.action_joint_ids)
-                or set(self.action_joint_ids) != {i[0] for i in movable}):
-            raise ValueError('action_joint_ids must contain every movable joint exactly once')
-        names = {i[0]: i[1].decode() for i in self.info}
-        self.arm_ids = list(arm_joint_ids if arm_joint_ids is not None else
-                            [j for j in self.action_joint_ids if names[j].startswith(
-                                ('shoulder', 'upperarm', 'elbow', 'forearm', 'wrist'))])
-        self.finger_ids = list(finger_joint_ids if finger_joint_ids is not None else
-                               [j for j in self.action_joint_ids if 'gripper_finger_joint' in names[j]])
-        if len(self.arm_ids) != 7 or len(self.finger_ids) != 2:
-            raise ValueError('Expected 7 arm and 2 finger joints; pass explicit IDs')
-        if len(set(self.arm_ids + self.finger_ids)) != 9:
-            raise ValueError('Arm/finger IDs must be distinct')
-        self.arm_ix = np.array([self.action_joint_ids.index(j) for j in self.arm_ids])
-        self.finger_ix = np.array([self.action_joint_ids.index(j) for j in self.finger_ids])
-        self.lower, self.upper = [], []
-        for j in self.action_joint_ids:
-            lo, hi = self.info[j][8:10]
-            if hi < lo:  # URDF continuous revolute joint
-                if self.info[j][2] != p.JOINT_REVOLUTE:
-                    raise ValueError('Invalid prismatic limits')
-                lo, hi = -np.inf, np.inf
-            self.lower.append(lo)
-            self.upper.append(hi)
-        self.lower, self.upper = np.array(self.lower), np.array(self.upper)
-        self.prismatic_ix = np.array([k for k, j in enumerate(self.action_joint_ids)
-                                      if self.info[j][2] == p.JOINT_PRISMATIC], dtype=int)
-        if not np.all(np.isfinite(self.upper[self.finger_ix])):
-            raise ValueError('Finger limits must be finite')
-        if any(self.info[j][2] != p.JOINT_PRISMATIC for j in self.finger_ids):
-            raise ValueError('Expected Fetch prismatic fingers (lower=closed, upper=open)')
-        self.fixed_ix = np.array([i for i in range(len(self.action_joint_ids))
-                                  if i not in set(self.arm_ix) | set(self.finger_ix)], dtype=int)
-        self.allowed_self_pairs = {tuple(sorted(pair)) for pair in allowed_self_pairs}
-        if not 0 <= self.ee_link_index < len(self.info):
-            raise ValueError('ee_link_index must identify the gripper link')
-        # robot_id selects the environment's existing robot. No file path.
-        self.description = None
-        # Lazy loading allows sampling to be explored before TODO 1 is complete.
-        self.model = None
-        self.scene = None
-        self._attachment = None
-        self._closed = False
-        self.state = 'IDLE'
-        self.failure_reason = ''
-        self.diagnostics = {}
-        self.plan = None
-        self.command = None
-        self._deadline = np.inf
+    # ------------------------------------------------------------------
+    # 1. Contact pair generation + ranking (no physics calls, pure point cloud)
+    # ------------------------------------------------------------------
 
-    @property
-    def done(self):
-        return self.state == 'DONE'
+    def sample_antipodal_grasps(self, object_id=None, num_samples=500,
+                                points=None, normals=None,
+                                min_width=0.015, normal_tol_deg=35.0,
+                                plane_tol=0.015, min_center_sep=0.03,
+                                min_axis_sep_deg=30.0, outer_tol=0.03,
+                                level_tol=0.1):
+        """Return best-first list of (p1, p2, center, quat, score)."""
+        if points is None:
+            raise ValueError("Pass obs['object_pc'].")
+        if normals is None:
+            raise ValueError("Pass obs['object_normals'].")
 
-    @property
-    def failed(self):
-        return self.state == 'FAILED'
-
-    def close(self):
-        """Release Python references only; there is no simulator to disconnect."""
-        self.model, self.scene, self.description = None, None, None
-        self._closed = True
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_):
-        self.close()
-
-    def _check_time(self):
-        if time.monotonic() > self._deadline:
-            raise _PlanningTimeout()
-
-    def _read_q(self):
-        return np.array([p.getJointState(self.robot_id, j, physicsClientId=self.client)[0]
-                         for j in self.action_joint_ids])
-
-    def _obs_q(self, obs):
-        q = np.asarray(obs['qpos'], dtype=float)
-        if q.shape != self.lower.shape or not np.all(np.isfinite(q)):
-            raise ValueError('obs[qpos] shape/values do not match action_joint_ids')
-        return q
-
-    # ================================================================
-    # TODO 1-4: implement your own kinematic and collision model here.
-    # The remainder of the planner calls these interfaces directly.
-    # ================================================================
-
-    def _read_robot_description(self) -> dict:
-        """Collect raw metadata; this dictionary is NOT an FK-ready RobotModel.
-
-        Uses only the existing self.robot_id/self.client. No file reads, robot
-        creation, resets, or stepping. Raw joint frames are intentionally named
-        *_raw: they must be reconciled with link/inertial frames in TODO 1.
-        """
-        action_index = {j: k for k, j in enumerate(self.action_joint_ids)}
-        joints = {}
-        for info in self.info:  # getJointInfo results cached by __init__
-            j = info[0]
-            joints[j] = {
-                "name": info[1].decode(),
-                "type": info[2],
-                "q_index": info[3],
-                "action_index": action_index.get(j),
-                "lower": info[8],
-                "upper": info[9],
-                "model_max_force": info[10],
-                "model_max_velocity": info[11],
-                "child_link_name": info[12].decode(),
-                "axis_raw": np.asarray(info[13], dtype=float),
-                "parent_frame_position_raw": np.asarray(info[14], dtype=float),
-                "parent_frame_orientation_raw": np.asarray(info[15], dtype=float),
-                "parent_link": info[16],
-            }
-
-        links = {}
-        for link_id in range(-1, len(self.info)):
-            dynamics = p.getDynamicsInfo(
-                self.robot_id, link_id, physicsClientId=self.client)
-            shapes = p.getCollisionShapeData(
-                self.robot_id, link_id, physicsClientId=self.client)
-            links[link_id] = {
-                "mass": dynamics[0],
-                "lateral_friction": dynamics[1],
-                "inertia_diagonal": np.asarray(dynamics[2], dtype=float),
-                "inertial_position": np.asarray(dynamics[3], dtype=float),
-                "inertial_orientation": np.asarray(dynamics[4], dtype=float),
-                "collision_shapes": [
-                    {
-                        "type": shape[2],
-                        "dimensions_raw": np.asarray(shape[3], dtype=float),
-                        # Metadata only; do not open this filename.
-                        "mesh_filename": shape[4],
-                        "position_in_inertial_frame": np.asarray(shape[5], dtype=float),
-                        "orientation_in_inertial_frame": np.asarray(shape[6], dtype=float),
-                    }
-                    for shape in (shapes or ())
-                ],
-            }
-        return {"joints": joints, "links": links}
-
-    def _read_robot_model(self) -> RobotModel:
-        """TODO 1: convert read-only metadata into a mathematical RobotModel.
-
-        Called lazily by _snapshot() during start(); Solver must not call it.
-        _read_robot_description() is implemented, but the conversion below is
-        still your implementation task. Never return that raw dict as the model.
-
-        1. Build JointModel records from description['joints']. Preserve fixed
-           joints, parent IDs, and action_index. Sort parents before children.
-           q_index is a PyBullet state index, NOT an env action index.
-        2. Reconstruct origin and axis in the link/joint convention expected by
-           _forward_kinematics. Do NOT blindly copy parent_frame_*_raw to origin.
-           Use the inertial offsets and, if needed, read-only getJointState /
-           getLinkState(..., computeForwardKinematics=True) to reconcile frames.
-           For a consistently defined motion M(q), a reference pose gives:
-             origin = inv(T_world_parent) @ T_world_child @ inv(M(q_current))
-           This requires the correct local motion axis FIRST. Validate FK at
-           additional normally reached configurations, not only the reference.
-        3. Build ALL robot collision primitives, including stationary links.
-           For each shape, convert its COM-local offset to link-local:
-             T_link_shape = T_link_inertial @ T_inertial_shape
-           Dynamics supplies T_link_inertial; shape metadata supplies the other.
-           Interpret dimensions by geometry type (box extents -> half-extents).
-        4. Mesh filenames are not mesh vertices. Use permitted geometry queries
-           or conservative primitives; do not read mesh files or drop shapes.
-           A live world AABB cannot simply be reused as a link-local box: any
-           approximation must contain the shape and transform with the link.
-        5. Return RobotModel(joints, collisions). Keep GraspConfig separate:
-           metadata does not determine planner tolerances/approach distances,
-           and model force/velocity limits are not active motor settings.
-
-        _snapshot() handles the root COM-to-link transform and compares FK with
-        the actual gripper pose. All hypothetical configurations stay in NumPy.
-        """
-        self.description = self._read_robot_description()
-        # print("joints = ", self.description['joints'])
-        # print("links = ", self.description['links'])
-        joint_models = []
-        collision_shapes = []
-        links = self.description['links']
-        joints = self.description['joints']
-
-        kind_map = {
-            p.JOINT_FIXED: "fixed",
-            p.JOINT_REVOLUTE: "revolute",
-            p.JOINT_PRISMATIC: "prismatic",
-        }
-        for joint_id, joint_data in joints.items():
-            name = joint_data["name"]
-            joint_type = joint_data["type"]
-
-            if joint_type not in kind_map:
-                raise NotImplementedError(
-                    f"Unsupported joint type: {joint_type}"
-                )
-
-            kind = kind_map[joint_type]
-            origin = self.quat()
-            axis = self._quat()
-
-            # Construct this joint's JointModel here.
-            joint_models.append(
-                JointModel(
-                    joint_id=joint_id, 
-                    parent_link=joint_data["parent_link"], 
-                    child_link=joint_id, 
-                    kind=kind,
-                    origin=origin,
-                    axis=axis 
-                    action_index=joint_data["action_index"]
-                ))
-
-
-        return RobotModel(
-            joints=joint_models,
-            collisions=collision_shapes
-        )
-
-    def _forward_kinematics(self, q: np.ndarray,
-                            root_pose: np.ndarray) -> dict:
-        """TODO 2: return {link_id: T_world_link} for EVERY robot link.
-
-        Inputs:
-          q: full action-order joint vector (not only the seven arm joints).
-          root_pose: T_world_root_URDF_link, already corrected for COM offset.
-          self.model.joints: reconstructed parent-before-child JointModel records.
-
-        Algorithm:
-          poses = {-1: root_pose.copy()}
-          for joint in self.model.joints:
-              motion = identity(4)
-              fixed:      leave motion as identity
-              revolute/continuous:
-                  theta = q[joint.action_index]
-                  rotation = Rodrigues(joint.axis, theta)
-              prismatic:
-                  translation = joint.axis * q[joint.action_index]
-              poses[joint.child_link] = (
-                  poses[joint.parent_link] @ joint.origin @ motion)
-          return poses
-
-        Rodrigues: R = I + sin(theta)*K + (1-cos(theta))*K@K,
-        where K@v = axis cross v. Joint axes are LOCAL to the joint frame.
-        Never read the current gripper pose as a substitute: q is hypothetical.
-        Never reset joints or advance physics. _ik already finite-differences
-        this function, so an analytical Jacobian is optional, not required.
-        """
-        q = np.asarray(q, dtype=float)
-        if q.ndim != 1 or not np.all(np.isfinite(q)):
-            raise ValueError("q must be a finite one-dimensional action vector")
-        poses = {-1: np.asarray(root_pose, dtype=float).copy()}
-        for joint in self.model.joints:
-            value = 0.0 if joint.kind == "fixed" else q[joint.action_index]
-            poses[joint.child_link] = (
-                poses[joint.parent_link] @ joint.origin
-                @ motion(joint.kind, joint.axis, value))
-        return poses
-
-    def _read_scene_geometry(self, object_id: int) -> SceneSnapshot:
-        """TODO 3: describe the CURRENT scene using read-only queries.
-
-        1. Enumerate self.obstacle_ids, or all live bodies if it is None.
-           Exclude self.robot_id and object_id from the obstacle list.
-        2. Read per-link collision geometry with getCollisionShapeData.
-           Convert collision-local poses to world using the relevant COM frame:
-             base: getBasePositionAndOrientation
-             link: getLinkState(..., computeForwardKinematics=True)[0:2]
-           Collision-shape offsets are in inertial/COM frames; do not multiply
-           them directly by the URDF link pose from [4:6].
-        3. If using getAABB as a conservative box fallback: center=(lo+hi)/2,
-           half_extents=(hi-lo)/2, WORLD axes. This may fill free space under
-           a whole-table AABB; prefer individual tabletop/leg shapes.
-           Record such approximations in diagnostics['geometry_fallbacks'].
-        4. Read object_pose = _pose(*getBasePositionAndOrientation(object_id)).
-           Build target geometry in this OBJECT frame:
-             T_object_shape = inverse(object_pose) @ T_world_shape.
-           Preserve target geometry even while excluding it from obstacles.
-        5. Return SceneSnapshot(obstacles, target, object_pose).
-
-        Each record must use the same primitive conventions as TODO 4.
-        Do not create collision bodies/shapes, load another URDF, or modify
-        the live scene. Static obstacle data may be cached between attempts.
-        """
-        raise NotImplementedError('TODO 3: implement _read_scene_geometry')
-
-    def _geometry_distance(self, a: CollisionPrimitive,
-                           b: CollisionPrimitive) -> float:
-        """TODO 4: signed distance between two WORLD-POSE primitives, metres.
-
-        Return >0 for separation, 0 for touching, <0 for penetration.
-        Suggested first backend: capsules for arm links, boxes for palm,
-        fingers/table/walls; spheres for simple obstacles. Implement EVERY
-        shape-pair combination emitted by TODOs 1 and 3 (both argument orders).
-
-        Examples:
-          sphere/sphere = norm(center_a-center_b) - radius_a - radius_b
-          capsule/capsule = segment_distance(seg_a, seg_b) - radius_a-radius_b
-        For capsule endpoints, transform local (0,0,+/-half_length) by pose.
-        For box pairs, use oriented geometry, not only their centers. SAT can
-        test box overlap, but a boolean alone does not provide signed distance:
-        the caller uses metric clearance and small penetration allowances.
-        Define and test consistent conservative distances or use a geometry
-        library. Include any plane/mesh combinations you choose to emit.
-
-        An AABB broad phase can accelerate rejection of distant shape pairs;
-        its lower-bound distance alone does NOT resolve overlapping AABBs.
-        Do not call getClosestPoints on the live robot: it would test the live
-        joint configuration, not the hypothetical poses supplied here.
-        Raise NotImplementedError for unsupported pairs; never report them
-        collision-free. Test rotated boxes, degenerate/parallel capsules,
-        containment, contact, and small penetration before planning motions.
-        """
-        raise NotImplementedError('TODO 4: implement _geometry_distance')
-
-    # Completed adapters: keep these unless changing the contracts above.
-    def _fk(self, q):
-        """Provide the existing IK solver with the hypothetical gripper pose."""
-        poses = self._forward_kinematics(q, self.root_pose)
-        t = poses[self.ee_link_index]
-        return t[:3, 3].copy(), t[:3, :3].copy()
-
-    def _robot_geometry(self, poses):
-        """Convert link-local primitives to world poses using YOUR FK."""
-        return [replace(shape, pose=poses[shape.link_id] @ shape.pose)
-                for shape in self.model.collisions]
-
-    def _live_ee(self):
-        s = p.getLinkState(self.robot_id, self.ee_link_index,
-                          computeForwardKinematics=True, physicsClientId=self.client)
-        return _pose(s[4], s[5])
-
-    def _build_collision_pairs(self):
-        # Collapse fixed joints into rigid groups. Adjacent groups normally
-        # overlap at their joint housings; other pairs remain collision-tested.
-        groups = {-1: -1}
-        for i in self.info:
-            groups[i[0]] = groups[i[16]] if i[2] == p.JOINT_FIXED else i[0]
-        adjacent = {tuple(sorted((groups[i[0]], groups[i[16]])))
-                    for i in self.info if groups[i[0]] != groups[i[16]]}
-        self.moving_links = set()
-        for j in range(len(self.info)):
-            k = j
-            while k >= 0:
-                if k in self.arm_ids or k in self.finger_ids:
-                    self.moving_links.add(j)
-                    break
-                k = self.info[k][16]
-        self.collision_links = sorted({shape.link_id for shape in self.model.collisions})
-        self.self_pairs = []
-        for i, a in enumerate(self.collision_links):
-            for b in self.collision_links[i+1:]:
-                if a not in self.moving_links and b not in self.moving_links:
-                    continue
-                pair = tuple(sorted((a, b)))
-                if (groups[a] != groups[b]
-                        and tuple(sorted((groups[a], groups[b]))) not in adjacent
-                        and pair not in self.allowed_self_pairs):
-                    self.self_pairs.append(pair)
-
-    def _snapshot(self, object_id):
-        """Read current frames and scene; all hypothetical poses stay in NumPy."""
-        if self.model is None:
-            self.model = self._read_robot_model()
-            if not self.model.collisions:
-                raise ValueError('Robot model must contain collision geometry')
-            self._build_collision_pairs()
-        # PyBullet base pose is the COM/inertial frame. URDF FK starts from the
-        # root LINK frame, so remove the local inertial offset exactly once.
-        base_com = _pose(*p.getBasePositionAndOrientation(
-            self.robot_id, physicsClientId=self.client))
-        dynamics = p.getDynamicsInfo(self.robot_id, -1, physicsClientId=self.client)
-        link_to_com = _pose(dynamics[3], dynamics[4])
-        self.root_pose = base_com @ np.linalg.inv(link_to_com)
-        live = self._live_ee()
-        pos, rot = self._fk(self.start_q)
-        if (np.linalg.norm(pos-live[:3, 3]) > 1e-4
-                or np.linalg.norm(_rotation_error(live[:3, :3], rot)) > 1e-3):
-            raise ValueError('Mathematical FK differs from live robot; check frames/joint mapping')
-        self.scene = self._read_scene_geometry(object_id)
-        if not self.scene.target:
-            raise ValueError('Scene model must contain target collision geometry')
-        self._attachment = None
-
-    def _target_geometry(self, ee=None):
-        """Transform target shapes without moving any simulator object."""
-        world_object = self.scene.object_pose
-        if ee is not None:
-            if self._attachment is None:
-                raise ValueError('Attached-object prediction requires an attachment transform')
-            world_object = ee @ self._attachment
-        return [replace(shape, pose=world_object @ shape.pose) for shape in self.scene.target]
-
-    def _valid(self, q, allow_contact=False, attached=False, closing=False):
-        """Completed collision policy; TODO 4 supplies the geometric distances.
-
-        Exemptions depend on execution phase. Never globally ignore the object
-        or the table just to obtain a path. Edge checks call this repeatedly.
-        """
-        self._check_time()
-        if (not np.all(np.isfinite(q)) or np.any(q < self.lower-1e-7)
-                or np.any(q > self.upper+1e-7)):
-            return False
-        poses = self._forward_kinematics(q, self.root_pose)
-        robot = self._robot_geometry(poses)
-        target = self._target_geometry(poses[self.ee_link_index] if attached else None)
-        by_link = {}
-        for shape in robot:
-            by_link.setdefault(shape.link_id, []).append(shape)
-        margin = self.cfg.collision_margin
-        # Signed distance semantics are enforced: NaN is an implementation
-        # error, not evidence that a configuration is free of collisions.
-        def distance(a, b):
-            d = float(self._geometry_distance(a, b))
-            if not np.isfinite(d):
-                raise ValueError('Geometry backend returned a non-finite distance')
-            return d
-        for a, b in self.self_pairs:
-            if any(distance(x, y) <= margin for x in by_link[a] for y in by_link[b]):
-                return False
-        for shape in robot:
-            if shape.link_id in self.moving_links:
-                if any(distance(shape, obstacle) <= margin for obstacle in self.scene.obstacles):
-                    return False
-            for obj in target:
-                d = distance(shape, obj)
-                if shape.link_id not in self.moving_links:
-                    if d < 0:
-                        return False
-                elif allow_contact and shape.link_id in self.finger_ids:
-                    # During closure only, overlap predicts where real object
-                    # contact will stop the fingers. Table/self checks still run.
-                    if not closing and d < -self.cfg.allowed_pad_penetration:
-                        return False
-                elif d <= margin:
-                    return False
-        if attached:
-            # The object initially touches its support: allow numerical-scale
-            # penetration but no meaningful intersection during the lift.
-            if any(distance(obj, obstacle) < -0.0005
-                   for obj in target for obstacle in self.scene.obstacles):
-                return False
-        return True
-
-    def _edge(self, a, b, **kw):
-        resolution = np.full(len(a), self.cfg.joint_resolution)
-        resolution[getattr(self, 'prismatic_ix', self.finger_ix)] = self.cfg.prismatic_resolution
-        n = max(1, int(np.ceil(np.max(np.abs(b-a)/resolution))))
-        return all(self._valid(a+(b-a)*(i/n), **kw) for i in range(n+1))
-
-    def _ik(self, position, rotation, seed):
-        """Bounded arm-only DLS with a finite-difference geometric Jacobian."""
-        q = seed.copy()
-        lo, hi = self.search_lower, self.search_upper
-        q[self.arm_ix] = np.clip(q[self.arm_ix], lo, hi)
-        weight, damping = 0.12, 0.025
-        for _ in range(self.cfg.ik_iterations):
-            self._check_time()
-            pos, rot = self._fk(q)
-            ep, er = position-pos, _rotation_error(rotation, rot)
-            if (np.linalg.norm(ep) <= self.cfg.position_tolerance
-                    and np.linalg.norm(er) <= self.cfg.rotation_tolerance):
-                return q
-            err = np.r_[ep, weight*er]
-            jac = np.empty((6, 7))
-            for k, ix in enumerate(self.arm_ix):
-                eps = 1e-4 if q[ix]+1e-4 <= hi[k] else -1e-4
-                if q[ix]+eps < lo[k]:
-                    jac[:, k] = 0
-                    continue
-                other = q.copy()
-                other[ix] += eps
-                pp, rr = self._fk(other)
-                jac[:, k] = np.r_[(pp-pos)/eps, weight*_rotation_error(rr, rot)/eps]
-            dq = jac.T @ np.linalg.solve(jac@jac.T+damping*damping*np.eye(6), err)
-            dq *= min(1.0, 0.25/max(np.max(np.abs(dq)), 1e-12))
-            accepted = False
-            for alpha in (1, .5, .25, .125, .0625):
-                trial = q.copy()
-                trial[self.arm_ix] = np.clip(q[self.arm_ix]+alpha*dq, lo, hi)
-                pp, rr = self._fk(trial)
-                cost = np.linalg.norm(np.r_[position-pp, weight*_rotation_error(rotation, rr)])
-                if cost < np.linalg.norm(err)-1e-10:
-                    q, accepted = trial, True
-                    break
-            if not accepted:
-                return None
-        return None
-
-    def sample_antipodal_grasps(self, object_id=None, num_samples=None,
-                                points=None, normals=None):
-        """Return (p1,p2,center,xyzw,score), best first; outward world normals.
-
-        Uses width, opposing friction cones and near-horizontal closing axes.
-        The old global convex-shell veto is intentionally absent: it rejects
-        legitimate concavities and tilted surfaces. Collision tests validate
-        gripper occupancy; execution verifies that both pads actually engage.
-        """
-        pts, ns = np.asarray(points, float), np.asarray(normals, float)
-        if pts.ndim != 2 or pts.shape[1:] != (3,) or ns.shape != pts.shape:
-            raise ValueError('points and normals must have matching (N,3) shape')
-        good = np.isfinite(pts).all(axis=1) & np.isfinite(ns).all(axis=1)
-        good &= np.linalg.norm(ns, axis=1) > 1e-8
-        pts, ns = pts[good], ns[good]
-        if len(pts) > self.cfg.max_points:
-            ix = self.rng.choice(len(pts), self.cfg.max_points, replace=False)
-            pts, ns = pts[ix], ns[ix]
-        self.sample_stats = {'points': len(pts)}
-        if len(pts) < 2:
+        points = np.asarray(points, dtype=float)
+        normals = np.asarray(normals, dtype=float)
+        if len(points) < 2 or len(points) != len(normals):
             return []
-        ns /= np.linalg.norm(ns, axis=1, keepdims=True)
-        ii, jj = np.triu_indices(len(pts), 1)
-        d = pts[jj]-pts[ii]
-        width = np.linalg.norm(d, axis=1)
-        axis = d/np.maximum(width[:, None], 1e-12)
-        cone = 1/np.sqrt(1+self.cfg.mu**2)
-        keep = ((width >= self.cfg.min_width) & (width <= self.cfg.max_width)
-                & (np.abs(axis[:, 2]) <= self.cfg.max_axis_z)
-                & (np.sum(-ns[ii]*axis, axis=1) >= cone)
-                & (np.sum(ns[jj]*axis, axis=1) >= cone)
-                & (np.sum(ns[ii]*ns[jj], axis=1) <= -np.cos(np.deg2rad(self.cfg.normal_angle_deg))))
-        ix = np.flatnonzero(keep)
-        self.sample_stats['antipodal_pairs'] = len(ix)
-        center = (pts[ii]+pts[jj])/2
-        mid = (pts.min(axis=0)+pts.max(axis=0))/2
-        scale = max(np.linalg.norm(np.ptp(pts, axis=0)), .01)
-        scores = (np.linalg.norm(center-mid, axis=1)/scale
-                  + 0.5*np.abs(axis[:, 2])
-                  + 0.3*np.abs(center[:, 2]-mid[2])/scale)
-        result = []
-        for k in ix[np.argsort(scores[ix])]:
-            y = axis[k]
-            x = _unit(np.array([0., 0., -1.])-y*(-y[2]))
-            rot = np.column_stack((x, y, np.cross(x, y)))
-            if any(np.linalg.norm(center[k]-c[2]) < .008
-                   and abs(y @ _unit(c[1]-c[0])) > np.cos(np.deg2rad(15)) for c in result):
-                continue
-            result.append((pts[ii[k]].copy(), pts[jj[k]].copy(), center[k].copy(),
-                           _quat(rot), float(scores[k])))
-            if len(result) >= (num_samples or self.cfg.max_candidates):
+
+        normals = normals / np.maximum(np.linalg.norm(normals, axis=1, keepdims=True), 1e-12)
+
+        com = points.mean(axis=0)
+        ext = points.max(axis=0) - points.min(axis=0)
+
+        # Surface-extremum filter: a point is on the outer shell only if no
+        # sampled geometry lies beyond its tangent plane. Hollow-box models
+        # (folded flaps, inner walls) put samples INSIDE the silhouette;
+        # pairs built on them close the jaws on air and push the object over.
+        beyond = (points[None, :, :] - points[:, None, :])
+        outward = (beyond * normals[:, None, :]).sum(axis=2).max(axis=1)
+        outer_shell = outward <= outer_tol
+
+        diff = points[:, None, :] - points[None, :, :]
+        dist = np.linalg.norm(diff, axis=2)
+        safe_dist = np.maximum(dist, 1e-12)
+
+        # Each filter is a named mask so the cascade count says WHICH filter
+        # starved the sampler (the tilted coacd mesh sits on a knife edge).
+        m_dist = (dist > min_width) & (dist <= min(
+            self.gripper_max_width, np.nanmax(ext) + plane_tol))
+        m_shell = m_dist & outer_shell[:, None] & outer_shell[None, :]
+
+        axis = diff / safe_dist[:, :, None]
+
+        # Antiparallel normals: n1 . n2 <= -cos(tol)
+        n_dot = normals @ normals.T
+        m_anti = m_shell & (n_dot <= -np.cos(np.radians(normal_tol_deg)))
+
+        # Friction cone at both contacts: the contact normal must face the
+        # opposing finger, i.e. -n1 within atan(mu) of the p1->p2 direction.
+        cone_cos = np.cos(np.arctan(self.mu))
+        n1_dir = (normals[:, None, :] * axis).sum(axis=2)    #  n1 . (p2-p1)/d
+        n2_dir = -(normals[None, :, :] * axis).sum(axis=2)   # -n2 . (p2-p1)/d
+        m_cone = m_anti & (n1_dir >= cone_cos) & (n2_dir >= cone_cos)
+
+        # Point-plane contact: p2 lies on the tangent plane at p1 (and vice
+        # versa) -- |n1 . (p2-p1)| must equal the full separation.
+        n1_gap = np.abs((normals[:, None, :] * diff).sum(axis=2))
+        n2_gap = np.abs((normals[None, :, :] * diff).sum(axis=2))
+        m_plane = m_cone & (np.abs(n1_gap - dist) < plane_tol) & (np.abs(n2_gap - dist) < plane_tol)
+
+        # Level-contact filter: a top-down pinch needs contacts at similar
+        # height. A bottom-face/top-face pair is antiparallel and passes the
+        # cone, but its lower finger would have to slide under the object
+        # (into the table) -- ungraspable.
+        dz = np.abs(diff[:, :, 2])
+        valid = m_plane & (dz <= level_tol * dist)
+
+        self.sample_stats = {
+            "points": len(points),
+            "outer_shell_pts": int(outer_shell.sum()),
+            "m_dist": int(m_dist.sum()),
+            "m_shell": int(m_shell.sum()),
+            "m_anti": int(m_anti.sum()),
+            "m_cone": int(m_cone.sum()),
+            "m_plane": int(m_plane.sum()),
+            "m_level": int(valid.sum()),
+        }
+
+        i_idx, j_idx = np.triu_indices(len(points), k=1)
+        keep = valid[i_idx, j_idx]
+        i_idx, j_idx = i_idx[keep], j_idx[keep]
+        if len(i_idx) == 0:
+            return []
+
+        p1 = points[i_idx]
+        p2 = points[j_idx]
+        center = (p1 + p2) / 2.0
+        sep = dist[i_idx, j_idx]
+        grasp_axis = axis[i_idx, j_idx]
+
+        # Geometric composite (lower is better):
+        #  lever   - horizontal distance from COM to the grasp center line
+        #  closz   - closing axis near-horizontal (|axis.z|~0): top-down pick,
+        #            jaws around the sides. A vertical closing axis means
+        #            pinching from above+below -- through the table.
+        #  width   - prefer mid-opening: closing margin on both sides
+        to_com = center - com
+        horizontal = to_com - (to_com * grasp_axis).sum(axis=1, keepdims=True) * grasp_axis
+        lever = np.linalg.norm(horizontal, axis=1) / max(float(np.linalg.norm(ext)), 1e-6)
+        closz = np.abs(grasp_axis[:, 2])
+        width = 2.0 * np.abs(sep / self.gripper_max_width - 0.5)
+        score = 1.0 * lever + 0.8 * closz + 0.4 * width
+
+        order = np.argsort(score)
+        # Descent direction (ee -> object), perpendicular to the closing
+        # axis: from above for center-through-COM grasps.
+        descent = com - center[order]
+        descent = descent - (descent * grasp_axis[order]).sum(axis=1, keepdims=True) * grasp_axis[order]
+        norm = np.linalg.norm(descent, axis=1, keepdims=True)
+        fallback = np.tile(np.array([0.0, 0.0, -1.0]), (len(descent), 1))
+        approaches = np.where(norm > 1e-6, descent / np.maximum(norm, 1e-12), fallback)
+        quats = self._contact_orientations(grasp_axis[order], approaches)
+
+        # Greedy diversity filter on (center, axis): same-center grasps with
+        # genuinely different axes (top-down vs side on a cylinder) survive.
+        cos_axis_tol = np.cos(np.radians(min_axis_sep_deg))
+        kept = []
+        kept_c, kept_a = [], []
+        for rank, o in enumerate(order):
+            c, a = center[o], grasp_axis[o]
+            if kept_c:
+                csep = np.linalg.norm(np.array(kept_c) - c, axis=1)
+                close = csep < min_center_sep
+                if close.any():
+                    adot = np.abs(np.array(kept_a)[close] @ a)
+                    if (adot >= cos_axis_tol).any():
+                        continue
+            kept.append(o)
+            kept_c.append(c)
+            kept_a.append(a)
+            if len(kept) >= num_samples:
                 break
-        self.sample_stats['diverse_candidates'] = len(result)
-        return result
 
-    def _seeds(self, q):
-        yield q.copy()
-        for arm in ([0, 1, 0, -1.6, 0, 1.2, 0],
-                    [0, -.6, 1.1, .9, -.7, 1.9, -1.7],
-                    [-.4, -.6, -1.1, 1.6, -2.8, -1., -1.8]):
-            candidate = q.copy()
-            candidate[self.arm_ix] = np.clip(arm, self.search_lower, self.search_upper)
-            yield candidate
-        for _ in range(self.cfg.ik_random_seeds):
-            candidate = q.copy()
-            candidate[self.arm_ix] = self.rng.uniform(self.search_lower, self.search_upper)
-            yield candidate
+        return [
+            (p1[o], p2[o], center[o], quats[k], float(score[o]))
+            for k, o in enumerate(kept)
+        ]
 
-    def _cartesian(self, seed, start, end, rotation, **kw):
-        n = max(1, int(np.ceil(np.linalg.norm(end-start)/self.cfg.cartesian_step)))
-        path, previous = [], seed
-        for i in range(1, n+1):
-            q = self._ik(start+(end-start)*i/n, rotation, previous)
-            if (q is None or np.max(np.abs(q[self.arm_ix]-previous[self.arm_ix])) > self.cfg.max_ik_jump
-                    or not self._edge(previous, q, **kw)):
-                return None
-            path.append(q)
-            previous = q
-        return path
+    def _contact_orientations(self, axes, approaches):
+        """Quaternions whose y-axis is each grasp axis and x-axis each approach.
 
-    def _transit(self, start, goal):
-        if self._edge(start, goal):
-            return [start.copy(), goal.copy()]
-        # Bidirectional RRT-Connect. Each tree stores full q but samples arm only.
-        trees = [([start.copy()], [-1]), ([goal.copy()], [-1])]
-        def extend(tree, target):
-            nodes, parents = tree
-            near = int(np.argmin([np.linalg.norm(q[self.arm_ix]-target[self.arm_ix]) for q in nodes]))
-            diff = target-nodes[near]
-            norm = np.linalg.norm(diff[self.arm_ix])
-            if norm < 1e-8:
-                return near, True
-            q = nodes[near]+diff*min(1., self.cfg.rrt_step/norm)
-            if not self._edge(nodes[near], q):
-                return None, False
-            nodes.append(q)
-            parents.append(near)
-            return len(nodes)-1, norm <= self.cfg.rrt_step
-        def trace(tree, index):
-            nodes, parents = tree
-            out = []
-            while index != -1:
-                out.append(nodes[index])
-                index = parents[index]
-            return out[::-1]
-        for it in range(self.cfg.rrt_iterations):
-            self._check_time()
-            side = it % 2
-            a, b = trees[side], trees[1-side]
-            sample = b[0][0].copy()
-            if self.rng.random() > .2:
-                sample[self.arm_ix] = self.rng.uniform(self.search_lower, self.search_upper)
-            ia, _ = extend(a, sample)
-            if ia is None:
-                continue
-            for _ in range(100):
-                ib, reached = extend(b, a[0][ia])
-                if ib is None:
+        The jaws close along gripper_link y, so the grasp axis (line between
+        contacts) must map onto y; x is the approach direction the ee travels
+        along. Roll is fully determined by both vectors.
+        """
+        y_axis = axes / np.linalg.norm(axes, axis=1, keepdims=True)
+        x_axis = approaches - (approaches * y_axis).sum(axis=1, keepdims=True) * y_axis
+        x_axis /= np.linalg.norm(x_axis, axis=1, keepdims=True)
+        z_axis = np.cross(x_axis, y_axis)
+        mats = np.stack([x_axis, y_axis, z_axis], axis=2)
+        return _mat_to_quat(mats)
+
+    # ------------------------------------------------------------------
+    # 2. IK validation + selection
+    # ------------------------------------------------------------------
+
+    def solve_ik(self, robot_id, ee_link_index, arm_ids,
+                 lower, upper, target_pos, target_rot, seed,
+                 max_iterations=200, damping=0.05,
+                 pos_tol=1e-4, rot_tol=1e-3):
+        """Damped least squares Newton IK over the ARM JOINTS ONLY.
+
+        The stock calculateInverseKinematics optimizes every movable DOF
+        and happily "solves" an out-of-reach target by sliding the free
+        mobile-base joint metres sideways, so its numeric output cannot
+        be trusted. Restricting the search to the 7 arm joints makes the
+        base/torso/head/fingers structurally immobile. The Jacobian is
+        finite-differenced through the same FK the verifier uses.
+        Backtracking guarantees monotone descent; returns the best arm
+        configuration found (caller must FK-verify -- never trust these
+        numbers directly).
+        """
+        lower = np.asarray(lower, dtype=float)
+        upper = np.asarray(upper, dtype=float)
+        target_pos = np.asarray(target_pos, dtype=float)
+        target_rot = np.asarray(target_rot, dtype=float)
+        a = np.clip(np.asarray(seed, dtype=float), lower, upper)
+
+        def fk_error(a_vec):
+            for j, v in zip(arm_ids, a_vec):
+                p.resetJointState(robot_id, j, float(v),
+                                  physicsClientId=self.client)
+            state = p.getLinkState(robot_id, ee_link_index,
+                                   computeForwardKinematics=True,
+                                   physicsClientId=self.client)
+            pos = np.asarray(state[4], dtype=float)
+            rot = _quat_to_mat(np.asarray(state[5], dtype=float))
+            rot_err = 0.5 * (
+                np.cross(rot[:, 0], target_rot[:, 0])
+                + np.cross(rot[:, 1], target_rot[:, 1])
+                + np.cross(rot[:, 2], target_rot[:, 2])
+            )
+            return np.concatenate([target_pos - pos, rot_err])
+
+        eps = 1e-5
+        err = fk_error(a)
+        best_a, best_err = a.copy(), float(np.linalg.norm(err))
+        for _ in range(max_iterations):
+            if np.linalg.norm(err[:3]) < pos_tol and np.linalg.norm(err[3:]) < rot_tol:
+                return a
+            jac = np.empty((6, len(arm_ids)))
+            for i in range(len(arm_ids)):
+                perturbed = a.copy()
+                perturbed[i] = min(perturbed[i] + eps, upper[i])
+                jac[:, i] = (fk_error(perturbed) - err) / max(
+                    perturbed[i] - a[i], 1e-12)
+            step = -jac.T @ np.linalg.solve(
+                jac @ jac.T + (damping ** 2) * np.eye(6), err)
+            scale = 1.0
+            for _ in range(5):
+                candidate = np.clip(a + scale * step, lower, upper)
+                if np.linalg.norm(fk_error(candidate)) <= np.linalg.norm(err):
                     break
-                if reached:
-                    first, second = trace(a, ia), trace(b, ib)
-                    path = first+second[::-1][1:]
-                    return path if side == 0 else path[::-1]
-        return None
+                scale *= 0.5
+            else:
+                break
+            a = np.clip(a + scale * step, lower, upper)
+            err = fk_error(a)
+            if np.linalg.norm(err) < best_err:
+                best_a, best_err = a.copy(), float(np.linalg.norm(err))
+        return best_a
 
-    def _fail(self, reason, q=None):
-        self.failure_reason, self.state = str(reason), 'FAILED'
-        if q is not None:
-            self.command = q.copy()
-        return False
+    def select_optimal_grasp(self, robot_id, ee_link_index, candidates,
+                             strategy="score_all", max_candidates=25,
+                             pos_tol=0.01, axis_tol_deg=15.0,
+                             min_center_sep=0.03, min_axis_sep_deg=30.0,
+                             joint_damping=0.05, max_iterations=200,
+                             support_z=None):
+        """Return the best IK-verified grasp dict, or None.
 
-    def start(self, obs, object_id, candidates=None):
-        """Plan once at a stationary parked base. Returns bool; reason on failure.
+        candidates: tuples (p1, p2, center, quat, score) from
+        sample_antipodal_grasps. IK runs through solve_ik (arm joints
+        only, hand-rolled DLS), so the base can never drift while
+        "reaching"; every solution is FK-verified before acceptance.
+        Rejected candidates are recorded with their failure points in
+        self.ik_stats[strategy]["failures"]. joint_angles in the result
+        are the 7 arm values.
 
-        The four TODOs raise NotImplementedError until implemented. Other
-        missing/invalid interfaces raise ValueError. Ordinary infeasibility,
-        unsettled objects and planning timeout return False. A failed attempt
-        does not prove the parking cell is impossible; inspect diagnostics.
+        support_z: height of the surface the object rests on (e.g. the
+        point cloud's minimum z). When given, the descent depth is chosen
+        so the pad tips hug the surface -- pads engaging only the rim of
+        a short object slip off on the lift.
         """
-        if self._closed:
-            raise RuntimeError('Planner is closed')
-        self.state, self.failure_reason = 'IDLE', ''
-        self.plan = None
-        self.start_q = self._obs_q(obs).copy()
-        self.command = self.start_q.copy()
-        if not np.allclose(self.start_q, self._read_q(), atol=1e-4, rtol=0):
-            raise ValueError('obs[qpos] is stale or action_joint_ids order is wrong')
-        self.object_id = int(object_id)
-        if self.object_id == self.robot_id:
-            raise ValueError('Object and robot IDs must differ')
-        self.diagnostics = {'geometry_fallbacks': [], 'candidate_failures': [], 'ik_calls': 0}
-        speed, angular = p.getBaseVelocity(object_id, physicsClientId=self.client)
-        if (np.linalg.norm(speed) > self.cfg.max_settle_speed
-                or np.linalg.norm(angular) > self.cfg.max_settle_angular_speed):
-            return self._fail('Object is still moving; wait for it to settle')
-        if self.cfg.require_support_contact:
-            support = p.getContactPoints(bodyA=object_id, physicsClientId=self.client)
-            if not any(h[2] not in (object_id, self.robot_id) and h[9] > 0 for h in support):
-                return self._fail('Object has no support contact yet; wait for the spawn/drop to settle')
-        self.object_start = np.asarray(p.getBasePositionAndOrientation(object_id, physicsClientId=self.client)[0])
-        self._snapshot(object_id)
-        self.search_lower = np.maximum(self.lower[self.arm_ix], self.start_q[self.arm_ix]-np.pi)
-        self.search_upper = np.minimum(self.upper[self.arm_ix], self.start_q[self.arm_ix]+np.pi)
-        self._deadline = time.monotonic()+self.cfg.planning_seconds
-        opened = self.start_q.copy()
-        opened[self.finger_ix] = self.upper[self.finger_ix]
-        try:
-            if not self._edge(self.start_q, opened):
-                return self._fail('Opening fingers at current pose is obstructed')
-            if candidates is None:
-                candidates = self.sample_antipodal_grasps(points=obs['object_pc'], normals=obs['object_normals'])
-            if not candidates:
-                return self._fail('No antipodal candidates; inspect sample_stats')
-            for index, cand in enumerate(candidates[:self.cfg.max_candidates]):
-                self._check_time()
-                center, rotation = np.asarray(cand[2]), _rot(cand[3])
-                grasp_pos = center-self.cfg.pad_center_offset*rotation[:, 0]
-                pre_pos = grasp_pos-self.cfg.pregrasp_distance*rotation[:, 0]
-                lift_pos = grasp_pos+np.array([0., 0., self.cfg.lift_distance])
-                reason = 'No valid pregrasp IK'
-                # Parallel jaws admit a second orientation, with y,z both flipped.
-                for symmetric in (False, True):
-                    rot = rotation @ np.diag([1., -1., -1.]) if symmetric else rotation
-                    for seed in self._seeds(opened):
-                        self.diagnostics['ik_calls'] += 1
-                        pre = self._ik(pre_pos, rot, seed)
-                        if pre is None or not self._valid(pre):
-                            continue
-                        approach = self._cartesian(pre, pre_pos, grasp_pos, rot)
-                        if approach is None:
-                            reason = 'Approach IK/continuity/collision failure'
-                            continue
-                        closed = approach[-1].copy()
-                        closed[self.finger_ix] = self.lower[self.finger_ix]
-                        # Validate the whole potential closing sweep against the
-                        # table, other links and obstacles. Finger-object overlap
-                        # is exempt ONLY here: real contact stops the fingers.
-                        if not self._edge(approach[-1], closed,
-                                          allow_contact=True, closing=True):
-                            reason = 'Finger closing sweep intersects robot/environment'
-                            continue
-                        transit = self._transit(opened, pre)
-                        if transit is None:
-                            reason = 'No collision-free transit within budget'
-                            continue
-                        # Initial lift feasibility with open fingers. Replanned
-                        # after closure using measured aperture and object pose.
-                        lift = self._cartesian(approach[-1], grasp_pos, lift_pos, rot)
-                        if lift is None:
-                            reason = 'Lift endpoint/path unreachable'
-                            continue
-                        self.plan = {'candidate': cand, 'open': opened,
-                                     'transit': transit[1:], 'approach': approach,
-                                     'grasp_position': grasp_pos, 'rotation': rot}
-                        self._enter('OPEN', [opened])
-                        return True
-                self.diagnostics['candidate_failures'].append({'candidate': index, 'reason': reason})
-            return self._fail('No candidate has a valid approach, transit and lift')
-        except _PlanningTimeout:
-            return self._fail('Planning time budget exhausted; retry/reposition or increase budget')
-        finally:
-            self._deadline = np.inf
+        if strategy not in ("greedy_first", "score_all"):
+            raise ValueError("strategy must be 'greedy_first' or 'score_all'")
+        if not candidates:
+            self.ik_stats[strategy] = {"calls": 0, "ik_fail": 0, "fk_fail": 0,
+                                       "reasons": [], "failures": []}
+            return None
 
-    def _enter(self, state, path=()):
-        self.state, self.path = state, list(path)
-        self.path_index, self.ticks, self.stable_ticks = 0, 0, 0
+        movable_ids, arm_ids = self._movable_and_arm_ids(robot_id)
+        if len(arm_ids) != 7:
+            raise ValueError(
+                f"Expected 7 arm joints, found {len(arm_ids)}: check robot URDF naming"
+            )
+        arm_pos = [movable_ids.index(j) for j in arm_ids]
 
-    def _contacts(self):
-        hits = p.getContactPoints(self.robot_id, self.object_id, physicsClientId=self.client)
-        return {h[3] for h in hits if h[3] in self.finger_ids
-                and h[8] <= self.cfg.contact_distance and h[9] > 0}
+        current = np.array([
+            p.getJointState(robot_id, j, physicsClientId=self.client)[0]
+            for j in movable_ids
+        ])
 
-    def _ramp(self, target):
-        limits = np.zeros(len(target))
-        limits[self.arm_ix], limits[self.finger_ix] = self.cfg.arm_step, self.cfg.finger_step
-        self.command += np.clip(target-self.command, -limits, limits)
-        self.command[self.fixed_ix] = self.start_q[self.fixed_ix]
-        self.command = np.clip(self.command, self.lower, self.upper)
-        return self.command.copy()
+        # This URDF claims +-314 rad for the three roll joints; a roll has
+        # no identity beyond a full turn, so clamp the search to +-pi.
+        arm_lower = np.empty(len(arm_ids))
+        arm_upper = np.empty(len(arm_ids))
+        for k, j in enumerate(arm_ids):
+            info = p.getJointInfo(robot_id, j, physicsClientId=self.client)
+            arm_lower[k] = np.clip(float(info[8]), -np.pi, np.pi)
+            arm_upper[k] = np.clip(float(info[9]), -np.pi, np.pi)
+            if arm_upper[k] <= arm_lower[k]:
+                arm_lower[k] = arm_upper[k] = current[arm_pos[k]]
 
-    def _plan_lift(self, q):
-        # Refresh scene data at actual contact. Predict rigid object motion
-        # mathematically for collision checks; no physical attachment is made.
-        self.start_q = q.copy()
-        self._snapshot(self.object_id)
-        pos, rot = self._fk(q)
-        ee = np.eye(4)
-        ee[:3, 3], ee[:3, :3] = pos, rot
-        self._attachment = np.linalg.inv(ee) @ self.scene.object_pose
-        self.grasp_relative = np.linalg.inv(self._live_ee()) @ np.r_[p.getBasePositionAndOrientation(
-            self.object_id, physicsClientId=self.client)[0], 1.]
-        self.lift_start_z = p.getBasePositionAndOrientation(self.object_id, physicsClientId=self.client)[0][2]
-        self._deadline = time.monotonic()+self.cfg.planning_seconds
-        try:
-            path = self._cartesian(q, pos, pos+np.array([0, 0, self.cfg.lift_distance]), rot,
-                                   allow_contact=True, attached=True)
-        except _PlanningTimeout:
-            path = None
-        finally:
-            self._deadline = np.inf
-        if path is None:
-            return self._fail('Measured grasp has no collision-free attached-object lift', q)
-        # Geometry used the MEASURED aperture; command keeps closing pressure.
-        for waypoint in path:
-            waypoint[self.finger_ix] = self.lower[self.finger_ix]
-        self._enter('LIFT', path)
-        return True
+        # Dedup candidates spatially BEFORE spending IK calls on them.
+        ranked = sorted(candidates, key=lambda c: c[4])
+        picked, picked_c, picked_a = [], [], []
+        cos_axis_tol = np.cos(np.radians(min_axis_sep_deg))
+        for cand in ranked:
+            c = np.asarray(cand[2], dtype=float)
+            a = self._grasp_axis(cand)
+            if picked_c:
+                csep = np.linalg.norm(np.array(picked_c) - c, axis=1)
+                close = csep < min_center_sep
+                if close.any() and (np.abs(np.array(picked_a)[close] @ a) >= cos_axis_tol).any():
+                    continue
+            picked.append(cand)
+            picked_c.append(c)
+            picked_a.append(a)
+            if len(picked) >= max_candidates:
+                break
 
-    def step(self, obs):
-        """Return one absolute action. Caller alone advances live simulation.
+        stats = {"calls": 0, "ik_fail": 0, "fk_fail": 0, "reasons": [],
+                 "failures": []}
+        self.ik_stats[strategy] = stats
+        passing = []
 
-        On FAILED: hold measured configuration (including current finger width).
-        On DONE: hold the successful lift and commanded closure. Caller owns
-        transition to carry and subsequent slip monitoring.
+        # Multi-start Newton needs diverse basins. wrist_flex POSITIVE points
+        # the fingers down (FK: -1.57 leaves gripper x pointing UP, and
+        # negative-wrist starts only reach "x down" by wrapping through +-pi);
+        # shoulder_lift runs both signs -- the verified solution lives at
+        # negative lift, which none of the original seeds sampled.
+        seed_arm_poses = [
+            np.array([0.0, 1.0, 0.0, -1.6, 0.0, 1.0, 0.0]),
+            np.array([0.0, 1.3, 0.0, -1.5, 0.0, 1.5, 0.0]),
+            np.array([0.0, -0.6, 1.1, 0.9, -0.7, 1.9, -1.7]),
+            np.array([-0.4, -0.6, -1.1, 1.6, -2.8, -1.0, -1.8]),
+            current[arm_pos],
+        ]
+
+        for p1, p2, center, quat, score in picked:
+            center = np.asarray(center, dtype=float)
+            axis = self._grasp_axis((p1, p2, center, quat, score))
+            # Parallel jaws are symmetric: fix the sign for determinism.
+            if axis[2] < 0:
+                axis = -axis
+            # Descent direction: the direction the ee travels toward the
+            # object, perpendicular to the closing axis. Always downward:
+            # com-center points UP for contacts below the object's middle,
+            # which parks the hand body under the table (motor stall one
+            # finger-length short of target). A vertical closing axis has
+            # no downward approach (jaws above and below the object -- one
+            # finger through the table); reject it.
+            descent = np.array([0.0, 0.0, -1.0])
+            descent = descent - (descent * axis).sum() * axis
+            if np.linalg.norm(descent) < 1e-3:
+                stats["failures"].append({
+                    "center": np.round(center, 3).tolist(),
+                    "reason": "vertical closing axis: no downward approach",
+                })
+                if len(stats["reasons"]) < 5:
+                    stats["reasons"].append(
+                        f"vertical closing axis at center {np.round(center, 3)}")
+                stats["ik_fail"] += 1
+                continue
+            descent /= np.linalg.norm(descent)
+            quat = self._contact_orientations(axis[None, :], descent[None, :])[0]
+            # The gripper's +x (pad tips, ee_forward_offset ahead of the
+            # wrist) points along descent, so the wrist sits depth ABOVE
+            # center and the tips land at center_z + depth - offset. The
+            # nominal depth (offset) puts tips at the contact centre; for a
+            # short object on a table that engages only the rim and slips
+            # off on the lift, so when support_z is known drop the tips to
+            # ~5 mm above the surface (never below it).
+            if support_z is None:
+                depth = self.ee_forward_offset
+            else:
+                depth = max(0.0, self.ee_forward_offset + support_z + 0.005 - center[2])
+            ee_target = center - depth * descent
+
+            target_rot = _quat_to_mat(np.asarray(quat, dtype=float))
+
+            best = None  # (pos_err, axis_err_deg, arm_sol)
+            try:
+                for seed_arm in seed_arm_poses:
+                    sol = self.solve_ik(
+                        robot_id, ee_link_index, arm_ids,
+                        arm_lower, arm_upper, ee_target, target_rot, seed_arm,
+                        max_iterations=max_iterations, damping=joint_damping,
+                    )
+                    stats["calls"] += 1
+                    pos_err, axis_err, approach_err = self._fk_verify(
+                        robot_id, ee_link_index, movable_ids,
+                        arm_ids, arm_pos, current, sol,
+                        ee_target, quat, axis, descent)
+                    if best is None or (pos_err, axis_err) < (best[0], best[1]):
+                        best = (pos_err, axis_err, sol, approach_err)
+                    if (pos_err <= pos_tol and axis_err <= axis_tol_deg
+                            and approach_err <= axis_tol_deg):
+                        break
+            finally:
+                for j, v in zip(movable_ids, current):
+                    p.resetJointState(robot_id, j, float(v),
+                                      physicsClientId=self.client)
+
+            if (best is None or best[0] > pos_tol or best[1] > axis_tol_deg
+                    or best[3] > axis_tol_deg):
+                pos_err, axis_err, sol, approach_err = best
+                # Store the failure point: where the best attempt landed.
+                # The approach error catches the 180-degrees-about-the-axis
+                # solution the y-axis test alone cannot see: fingers pointing
+                # UP (backhand) instead of down along the descent.
+                stats["failures"].append({
+                    "center": np.round(center, 3).tolist(),
+                    "ee_target": np.round(ee_target, 3).tolist(),
+                    "pos_err": round(float(pos_err), 4),
+                    "axis_err_deg": round(float(axis_err), 1),
+                    "approach_err_deg": round(float(approach_err), 1),
+                    "arm": np.round(sol, 2).tolist(),
+                })
+                reason = (f"pos_err={pos_err:.3f}m axis_err={axis_err:.1f}deg "
+                          f"approach_err={approach_err:.1f}deg "
+                          f"at center {np.round(center, 3)}")
+                if pos_err > pos_tol:
+                    stats["ik_fail"] += 1  # never got the wrist there
+                else:
+                    stats["fk_fail"] += 1  # there, but jaws misaligned
+                if len(stats["reasons"]) < 5:
+                    stats["reasons"].append(reason)
+                continue
+
+            arm_sol = best[2]
+
+            result = {
+                "p1": p1, "p2": p2,
+                "grasp_center": center,
+                "ee_quat": quat,
+                "ee_target": ee_target,
+                "arm_joint_ids": arm_ids,
+                "joint_angles": arm_sol,
+                "score": float(score),
+                "strategy": strategy,
+            }
+            if strategy == "greedy_first":
+                return result
+            # min-effort tiebreak: stability + distance from current arm pose
+            result["_effort"] = result["score"] + joint_damping * np.linalg.norm(arm_sol - current[arm_pos])
+            passing.append(result)
+
+        if not passing:
+            return None
+        return min(passing, key=lambda r: r["_effort"])
+
+    def _grasp_axis(self, candidate):
+        p1, p2 = np.asarray(candidate[0], float), np.asarray(candidate[1], float)
+        axis = p2 - p1
+        return axis / max(np.linalg.norm(axis), 1e-12)
+
+    def _movable_and_arm_ids(self, robot_id):
+        movable, arm = [], []
+        for j in range(p.getNumJoints(robot_id, physicsClientId=self.client)):
+            info = p.getJointInfo(robot_id, j, physicsClientId=self.client)
+            if info[2] not in (p.JOINT_REVOLUTE, p.JOINT_PRISMATIC):
+                continue
+            movable.append(j)
+            if info[1].startswith(ARM_NAME_PREFIXES):
+                arm.append(j)
+        return movable, arm
+
+    def _fk_verify(self, robot_id, ee_link_index, movable_ids,
+                   arm_ids, arm_pos, current, arm_sol,
+                   target_pos, target_quat, grasp_axis, descent):
+        """IK always returns numbers; command the solution and measure the truth.
+
+        Returns (pos_err_m, axis_err_deg, approach_err_deg) measured at the
+        commanded pose. Both rotation errors are needed: the y-axis test is
+        sign-symmetric, so a wrist rolled 180 deg about the grasp axis --
+        fingers pointing UP, pads above the pads' target band -- still has
+        y parallel to the contact line. The x-axis (finger/pad direction)
+        must point along the descent.
         """
-        q = self._obs_q(obs)
-        if self.state == 'IDLE':
-            raise RuntimeError('Call start(obs, object_id) before step')
-        if self.failed or self.done:
-            return self.command.copy()
-        self.ticks += 1
-        obj = np.asarray(p.getBasePositionAndOrientation(self.object_id, physicsClientId=self.client)[0])
-        if self.state in ('OPEN', 'TRANSIT', 'APPROACH'):
-            if np.linalg.norm(obj-self.object_start) > self.cfg.object_move_tolerance:
-                self._fail('Object moved before closure; generate a fresh plan', q)
-                return self.command.copy()
-        if len(self.fixed_ix) and np.max(np.abs(q[self.fixed_ix]-self.start_q[self.fixed_ix])) > .025:
-            self._fail('Base/torso/head moved during fixed-base grasp execution', q)
-            return self.command.copy()
-        if self.state == 'CLOSE':
-            target = self.command.copy()
-            target[self.finger_ix] = self.lower[self.finger_ix]
-            action = self._ramp(target)
-            both = set(self.finger_ids).issubset(self._contacts())
-            self.stable_ticks = self.stable_ticks+1 if both else 0
-            # Wait until the command has reached closed, even if the object
-            # prevents measured joints from reaching zero.
-            closed_command = np.max(np.abs(action[self.finger_ix]-self.lower[self.finger_ix])) < 1e-6
-            if both and closed_command and self.stable_ticks >= self.cfg.contact_hold_steps:
-                if not self._plan_lift(q):
-                    return self.command.copy()
-            elif self.ticks > self.cfg.close_timeout:
-                self._fail('Closure did not establish sustained contact on both fingers', q)
-                return self.command.copy()
-            return action
-        if self.state in ('LIFT', 'VERIFY'):
-            rel = np.linalg.inv(self._live_ee()) @ np.r_[obj, 1.]
-            if np.linalg.norm(rel[:3]-self.grasp_relative[:3]) > self.cfg.slip_tolerance:
-                self._fail('Object slipped relative to the gripper during lift', q)
-                return self.command.copy()
-        if self.state == 'VERIFY':
-            good = (obj[2]-self.lift_start_z >= self.cfg.minimum_lift
-                    and set(self.finger_ids).issubset(self._contacts()))
-            self.stable_ticks = self.stable_ticks+1 if good else 0
-            if self.stable_ticks >= self.cfg.verify_steps:
-                self.state = 'DONE'
-            elif self.ticks > self.cfg.waypoint_timeout:
-                self._fail('Lift verification failed: object height/contact not sustained', q)
-            return self.command.copy()
-        target = self.path[self.path_index]
-        arm_ok = np.max(np.abs(q[self.arm_ix]-target[self.arm_ix])) < self.cfg.joint_tolerance
-        fingers_ok = (self.state == 'LIFT' or np.max(np.abs(q[self.finger_ix]-target[self.finger_ix]))
-                      < self.cfg.finger_tolerance)
-        # Compare command as well as measured q: never skip a waypoint merely
-        # because measured q entered a broad tolerance before the ramp got there.
-        command_ok = np.max(np.abs(self.command-target)) < 1e-6
-        if arm_ok and fingers_ok and command_ok:
-            self.stable_ticks += 1
-        else:
-            self.stable_ticks = 0
-        if self.stable_ticks >= 2:
-            self.path_index += 1
-            self.ticks, self.stable_ticks = 0, 0
-            if self.path_index == len(self.path):
-                if self.state == 'OPEN':
-                    self._enter('TRANSIT', self.plan['transit'])
-                elif self.state == 'TRANSIT':
-                    self._enter('APPROACH', self.plan['approach'])
-                elif self.state == 'APPROACH':
-                    self._enter('CLOSE')
-                elif self.state == 'LIFT':
-                    self._enter('VERIFY')
-                return self.command.copy()
-            target = self.path[self.path_index]
-        if self.ticks > self.cfg.waypoint_timeout:
-            self._fail('Timed out tracking '+self.state+' waypoint', q)
-            return self.command.copy()
-        return self._ramp(target)
+        try:
+            for j, v in zip(movable_ids, current):
+                p.resetJointState(robot_id, j, float(v), physicsClientId=self.client)
+            for j, v in zip(arm_ids, arm_sol):
+                p.resetJointState(robot_id, j, float(v), physicsClientId=self.client)
+            state = p.getLinkState(
+                robot_id, ee_link_index,
+                computeForwardKinematics=True,
+                physicsClientId=self.client,
+            )
+            # With computeForwardKinematics the computed pose is at [4:6];
+            # [0:2] is the stale pose from the last stepSimulation.
+            pos, orn = state[4], state[5]
+        finally:
+            for j, v in zip(movable_ids, current):
+                p.resetJointState(robot_id, j, float(v), physicsClientId=self.client)
+
+        pos_err = float(np.linalg.norm(np.asarray(pos) - target_pos))
+        rot = _quat_to_mat(np.asarray(orn, dtype=float))
+        achieved_y = rot[:, 1]
+        # The jaws close along y: it must span the contact line (sign-free,
+        # the pair is symmetric).
+        cos_y = abs(float(achieved_y @ grasp_axis))
+        axis_err = float(np.degrees(np.arccos(min(max(cos_y, -1.0), 1.0))))
+        # The pads extend along +x, toward the object: SIGNED comparison --
+        # fingers-up (x = -descent) is exactly the roll-180 failure.
+        cos_x = float(rot[:, 0] @ descent)
+        approach_err = float(np.degrees(np.arccos(min(max(cos_x, -1.0), 1.0))))
+        return pos_err, axis_err, approach_err
