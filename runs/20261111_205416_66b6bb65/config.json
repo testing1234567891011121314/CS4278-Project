@@ -1,0 +1,96 @@
+{
+  "workers": 15,
+  "max_steps": 1000,
+  "maze_seed": 42,
+  "seed": 42,
+  "repeats": 1,
+  "gpu": 0,
+  "gpus": [
+    0,
+    1
+  ],
+  "objects": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14
+  ],
+  "trials": 15,
+  "gpu_pool": [
+    0,
+    1
+  ],
+  "objects_resolved": [
+    {
+      "index": 0,
+      "name": "002_master_chef_can"
+    },
+    {
+      "index": 1,
+      "name": "004_sugar_box"
+    },
+    {
+      "index": 2,
+      "name": "005_tomato_soup_can"
+    },
+    {
+      "index": 3,
+      "name": "006_mustard_bottle"
+    },
+    {
+      "index": 4,
+      "name": "010_potted_meat_can"
+    },
+    {
+      "index": 5,
+      "name": "011_banana"
+    },
+    {
+      "index": 6,
+      "name": "012_strawberry"
+    },
+    {
+      "index": 7,
+      "name": "013_apple"
+    },
+    {
+      "index": 8,
+      "name": "021_bleach_cleanser"
+    },
+    {
+      "index": 9,
+      "name": "024_bowl"
+    },
+    {
+      "index": 10,
+      "name": "025_mug"
+    },
+    {
+      "index": 11,
+      "name": "029_plate"
+    },
+    {
+      "index": 12,
+      "name": "040_large_marker"
+    },
+    {
+      "index": 13,
+      "name": "048_hammer"
+    },
+    {
+      "index": 14,
+      "name": "061_foam_brick"
+    }
+  ]
+}

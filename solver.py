@@ -54,11 +54,19 @@ class Solver:
 
         ## used for planning
         self.path = None
-        self.state = 0
+        self.state = 999
+        self.wait = 200
 
     ## This function is called every time step.
     def get_action(self,env):
         obs = env._get_obs()
+        if self.state == 999:    ## wait for object to spawn
+            # The object spawns at z=5 and needs ~200 steps to land on the table;
+            # planning against the falling cloud produced unreachable-airborne goals.
+            self.wait -= 1
+            if self.wait == 0:
+                self.state = 0
+            return np.zeros(env.action_size)
 
         if self.state == 0:
             decision = self.navigate_grasp.update(obs, self.inflated_occupancy, self.convert_to_grid, self.convert_to_world, self.cell_size)
