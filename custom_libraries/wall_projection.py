@@ -90,8 +90,12 @@ def inflate_walls(walls, offsets):
     return blocked.astype(np.uint8)
 
 
-def robot_xy_polygons(env):
+def robot_xy_polygons(env, z_range=None):
     """Read robot collision geometry at its CURRENT pose; do not mutate it.
+
+    z_range=(z_lo, z_hi): keep only links whose world AABB overlaps that height
+    band (used for obstacles that only some links can touch, e.g. a table top).
+    With z_range set, an empty result is returned instead of raising.
 
     The base reference is the physical base_link frame origin. Returned XY
     polygons keep current world yaw, with world translation removed.
@@ -142,6 +146,8 @@ def robot_xy_polygons(env):
                 local_rotation=np.asarray(p.getMatrixFromQuaternion(shape[6])).reshape(3,3)
                 groups.append(corners@local_rotation.T+np.asarray(shape[5]))
         lower,upper=map(np.asarray,p.getAABB(robot,link,physicsClientId=client))
+        if z_range is not None and (upper[2] < z_range[0] or lower[2] > z_range[1]):
+            continue
         for vertices in groups:
             world=vertices@rotation.T+position
             if np.any(world<lower-1e-3) or np.any(world>upper+1e-3):
@@ -149,13 +155,18 @@ def robot_xy_polygons(env):
             polygons.append(convex_hull(world[:,:2]-base_xy))
         included.append(name)
     if not polygons:
+        if z_range is not None:
+            return []
         raise RuntimeError('Robot has no usable collision geometry')
     print('Projected collision links:', ', '.join(included))
     return polygons
 
 
-def build_wall_collision_grid(env, wall_occupancy, cell_size, safety_margin=0.05):
-    polygons=robot_xy_polygons(env)
+def build_wall_collision_grid(env, wall_occupancy, cell_size, safety_margin=0.05,
+                              z_range=None):
+    polygons=robot_xy_polygons(env, z_range)
+    if not polygons:
+        return np.zeros(np.asarray(wall_occupancy).shape, np.uint8)
     offsets=footprint_offsets(polygons,cell_size,safety_margin)
     all_points=np.vstack(polygons)
     print('Robot XY footprint bounds relative to base:',

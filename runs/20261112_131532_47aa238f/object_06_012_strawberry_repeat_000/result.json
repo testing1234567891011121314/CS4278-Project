@@ -1,0 +1,24 @@
+{
+  "trial": "object_06_012_strawberry_repeat_000",
+  "seed": 42,
+  "object_idx": 6,
+  "object_name": "012_strawberry",
+  "repeat_id": 0,
+  "gpu": 0,
+  "max_steps": 1000,
+  "directory": "/home/hejun/GitHub/CS4278-Project/runs/20261112_131532_47aa238f/object_06_012_strawberry_repeat_000",
+  "task_success": false,
+  "navigation_success": false,
+  "status": "recording_completed",
+  "maze_seed": 42,
+  "maze_sha256": "5b567d2e02ec17d7d7cd8844f744ffe4f9852328bd53aefc3aa6abc1b9fcb922",
+  "maze_path": "/home/hejun/GitHub/CS4278-Project/runs/20261112_131532_47aa238f/maze.urdf",
+  "navigation_status": "unplanned",
+  "final_info": {
+    "dist_to_goal": 17.709034024594207,
+    "success": false
+  },
+  "waypoint_index": 0,
+  "path_length": null,
+  "wall_seconds": 124.68365256499965
+}

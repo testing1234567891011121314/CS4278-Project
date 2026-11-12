@@ -1,0 +1,19 @@
+{
+  "trial": "object_13_048_hammer_repeat_000",
+  "seed": 42,
+  "object_idx": 13,
+  "object_name": "048_hammer",
+  "repeat_id": 0,
+  "gpu": 1,
+  "max_steps": 1000,
+  "directory": "/home/hejun/GitHub/CS4278-Project/runs/20261112_131532_47aa238f/object_13_048_hammer_repeat_000",
+  "task_success": null,
+  "navigation_success": null,
+  "status": "error",
+  "maze_seed": 42,
+  "maze_sha256": "5b567d2e02ec17d7d7cd8844f744ffe4f9852328bd53aefc3aa6abc1b9fcb922",
+  "maze_path": "/home/hejun/GitHub/CS4278-Project/runs/20261112_131532_47aa238f/maze.urdf",
+  "error": "float() argument must be a string or a real number, not 'type'",
+  "traceback": "Traceback (most recent call last):\n  File \"/home/hejun/GitHub/CS4278-Project/trial_worker.py\", line 76, in run_trial\n    record_navigation(\n  File \"/home/hejun/GitHub/CS4278-Project/custom_libraries/recording.py\", line 149, in record_navigation\n    obs, info = env.step(action)\n  File \"/home/hejun/GitHub/CS4278-Project/pick_nav_reach_env.py\", line 279, in step\n    action = np.asarray(action, dtype=np.float32).reshape(-1)\nTypeError: float() argument must be a string or a real number, not 'type'\n",
+  "wall_seconds": 69.12868012300169
+}

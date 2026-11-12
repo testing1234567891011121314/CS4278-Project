@@ -8,7 +8,7 @@ from custom_libraries.navigate_to_grasp import NavigateToGrasp
 from custom_libraries.grasp import GraspPlanner, GraspFollower
 from custom_libraries.grasp import PlanningError
 from custom_libraries.a_star import a_star
-from custom_libraries.wall_projection import build_wall_collision_grid
+from custom_libraries.wall_projection import build_wall_collision_grid, robot_xy_polygons
 
 class Solver:
     def __init__(self, env):
@@ -57,6 +57,12 @@ class Solver:
         self.state = 999
         self.wait = 200
 
+        ## final approach (see fine_approach): creep from the coarse grid goal
+        ## to a standoff of grasp_standoff metres from the grasp point.
+        self.grasp_standoff = 0.60      # base origin -> grasp centre, metres
+        self.table_margin = 0.03        # continuous clearance kept to obstacles
+        self._fine_active = False
+
     ## This function is called every time step.
     def get_action(self,env):
         obs = env._get_obs()
@@ -69,6 +75,21 @@ class Solver:
             return np.zeros(env.action_size)
 
         if self.state == 0:
+            if self._fine_active:
+                action, done = self.fine_approach(obs)
+                if not done:
+                    return action
+                self._fine_active = False
+                self.state = 1
+                self._grasp_settle_ticks = 0
+                self._grasp_last_object_pos = None
+                self.grasp_attempt_goal = self._fine_goal_key
+                self.path = None
+                self._path_goal = None
+                self.waypoint_index = 0
+                self.curved_nav.reset()
+                return np.asarray(obs["qpos"]).copy()
+
             decision = self.navigate_grasp.update(obs, self.inflated_occupancy, self.convert_to_grid, self.convert_to_world, self.cell_size)
             goal_world = decision["navigation_goal"]
             base_xy = np.array([obs["qpos"][0] - 2.0, obs["qpos"][1]])
@@ -78,6 +99,22 @@ class Solver:
                 goal_world is not None
                 and np.linalg.norm(base_xy - goal_world) < 0.10
             )
+            if (decision["state"] == "GRASP" or arrived) and not self._fine_active:
+                # Coarse (0.1 m grid) navigation is done. Creep closer before
+                # grasp planning: the grid keeps the base ~0.25 m further from
+                # the table than it needs to be, i.e. at the edge of arm reach.
+                grasp_xy = decision.get("grasp_position_world")
+                if grasp_xy is None:
+                    grasp_xy = obs["object_pos"]
+                self._fine_goal_key = (
+                    tuple(np.round(np.asarray(goal_world), 3))
+                    if goal_world is not None else None
+                )
+                self.start_fine_approach(obs, np.asarray(grasp_xy, float)[:2])
+                action, done = self.fine_approach(obs)
+                if not done:
+                    return action
+                self._fine_active = False
             if decision["state"] == "GRASP" or arrived:
                 self.state = 1
                 self._grasp_settle_ticks = 0
@@ -124,6 +161,24 @@ class Solver:
             # Planning starts only after settling.
             started = time.monotonic()
             print("[PLAN] Starting grasp planning", flush=True)
+
+            ### THE BELOW BLOCK IS FOR DEBUG ###
+            from pathlib import Path
+            import json
+
+            pose_path = Path("/home/hejun/GitHub/CS4278-Project/parked_qpos.json")
+            measured_pose = {
+                name: float(value)
+                for name, value in zip(
+                    self.grasp_planner.action_names, obs["qpos"]
+                )
+            }
+            pose_path.write_text(
+                json.dumps(measured_pose, indent=2),
+                encoding="utf-8",
+            )
+            print(f"[DEBUG] Saved pre-grasp posture to {pose_path}", flush=True)
+            ### THE ABOVE BLOCK IS FOR DEBUG ###
 
             plan = self.grasp_planner.plan(obs)
 
@@ -241,6 +296,79 @@ class Solver:
             self.action_upper_bound,
         )
         return self.action.copy()
+
+    ### Final approach: exact (continuous) clearance instead of the 0.1 m grid ###
+    def _footprint_boxes(self):
+        """[(obstacle_lower, obstacle_upper, footprint_min_xy, footprint_max_xy)].
+
+        footprint = XY extent, relative to the base origin, of the robot links
+        in that obstacle's height band at the robot's current pose.
+        """
+        boxes = []
+        z_pad = 0.03
+        for lower, upper in self.extra_bounds:
+            polys = robot_xy_polygons(
+                self.env, (lower[2] - z_pad, upper[2] + z_pad)
+            )
+            if not polys:
+                continue
+            pts = np.vstack(polys)
+            boxes.append((lower, upper, pts.min(axis=0), pts.max(axis=0)))
+        return boxes
+
+    def _pose_clear(self, base_xy, boxes, margin):
+        base_xy = np.asarray(base_xy, float)
+        for lower, upper, fmin, fmax in boxes:
+            lo, hi = base_xy + fmin, base_xy + fmax
+            if (lo[0] < upper[0] + margin and hi[0] > lower[0] - margin
+                    and lo[1] < upper[1] + margin and hi[1] > lower[1] - margin):
+                return False
+        r, c = self.convert_to_grid(base_xy)
+        rows, cols = self._wall_blocked.shape
+        if not (0 <= r < rows and 0 <= c < cols) or self._wall_blocked[r, c]:
+            return False
+        return True
+
+    def start_fine_approach(self, obs, grasp_xy):
+        """Pick the closest safe standoff pose on the line base -> grasp.
+
+        Desired pose: base y aligned with the grasp, base x grasp_standoff short
+        of it (the arm points along +x). The straight segment from the current
+        base is walked in 1 cm steps and cut at the first pose that would
+        come within table_margin of an obstacle in the torso/arm height band
+        (or enter a wall-blocked cell), so the target is never unsafe.
+        """
+        qpos = np.asarray(obs["qpos"], float)
+        start = np.array([qpos[0] - 2.0, qpos[1]])
+        desired = np.array([grasp_xy[0] - self.grasp_standoff, grasp_xy[1]])
+        boxes = self._footprint_boxes()
+        n = max(2, int(np.ceil(np.linalg.norm(desired - start) / 0.01)))
+        target = start.copy()
+        if self._pose_clear(start, boxes, self.table_margin):
+            for t in np.linspace(0.0, 1.0, n + 1):
+                point = start + t * (desired - start)
+                if not self._pose_clear(point, boxes, self.table_margin):
+                    break
+                target = point
+        self._fine_target = target
+        self._fine_active = True
+        print(f"Fine approach: start={np.round(start, 3)} "
+              f"desired={np.round(desired, 3)} target={np.round(target, 3)}")
+
+    def fine_approach(self, obs, max_step=0.04):
+        """Move the base (absolute joint targets) to _fine_target. -> (action, done)."""
+        qpos = np.asarray(obs["qpos"], float)
+        base = np.array([qpos[0] - 2.0, qpos[1]])
+        error = self._fine_target - base
+        distance = np.linalg.norm(error)
+        speed = np.linalg.norm(np.asarray(obs["qvel"], float)[:2])
+        if distance < 0.01 and speed < 0.02:
+            return qpos.copy(), True
+        step = error if distance <= max_step else error * (max_step / distance)
+        action = qpos.copy()          # hold every other joint where it is
+        action[:2] = qpos[:2] + step
+        action = np.clip(action, self.action_lower_bound, self.action_upper_bound)
+        return action, False
 
     def moving_pose(self, obs):
         """Move gradually toward a fixed test pose while holding the base still."""
@@ -466,6 +594,7 @@ class Solver:
         # Keep table/additional obstacles separate.
         self.extra_occupancy = np.zeros_like(occupancy)
         extra_bounds = self.get_extra_obstacle_bounds(cube_positions)
+        self.extra_bounds = extra_bounds          # kept (with z extents) for create_navigable_map
         self.mark_obstacle_bounds(self.extra_occupancy, extra_bounds)
 
         self.occupancy = (
@@ -484,27 +613,26 @@ class Solver:
             self.cell_size,
             safety_margin=safety_margin,
         )
+        self._wall_blocked = wall_blocked.astype(bool)
 
-        # Additional obstacles: retain the existing base-radius treatment
-        # temporarily. This is NOT whole-arm table collision checking.
-        radius_cells = int(np.ceil(
-            (self.robot_radius + safety_margin) / self.cell_size
-        ))
-
+        # Additional obstacles (table, ...): inflate each one by the XY
+        # footprint of ONLY the robot links that share its height band. The
+        # table has a single 0.05 m top slab (z 0.574-0.626, no legs), so the
+        # low base/wheels pass underneath, but torso_lift_link / torso_fixed_link
+        # (z ~0.4-0.98, reaching +0.09 m ahead of the base origin) would hit it.
+        # Footprints use the robot's current (travel) pose, so call this again
+        # after the torso/arm settles (navigate() already does).
         rows, cols = self.extra_occupancy.shape
-        padded = np.pad(
-            self.extra_occupancy.astype(bool),
-            radius_cells,
-            mode="constant",
-        )
         extra_blocked = np.zeros((rows, cols), dtype=bool)
-
-        for dr in range(2 * radius_cells + 1):
-            for dc in range(2 * radius_cells + 1):
-                extra_blocked |= padded[
-                    dr:dr + rows,
-                    dc:dc + cols,
-                ]
+        z_pad = 0.03
+        for lower, upper in self.extra_bounds:
+            single = np.zeros((rows, cols), dtype=np.uint8)
+            self.mark_obstacle_bounds(single, [(lower, upper)])
+            extra_blocked |= build_wall_collision_grid(
+                self.env, single, self.cell_size,
+                safety_margin=safety_margin,
+                z_range=(lower[2] - z_pad, upper[2] + z_pad),
+            ).astype(bool)
 
         return (
             wall_blocked.astype(bool) | extra_blocked
@@ -575,13 +703,11 @@ class Solver:
                 lower, upper = p.getAABB(
                     body_id, link, physicsClientId=client
                 )
-                # The 2-D map plans the BASE only. A box entirely above base
-                # height (table top underside ~0.59 m vs base ~0.2 m tall)
-                # does not block it -- inflating those footprints sealed the
-                # reach annulus around the table and stranded the robot 1.0 m
-                # out. Table legs start at z=0 and still count.
-                if lower[2] >= 0.35:
-                    continue
+                # Do NOT discard obstacles that sit above base height. The
+                # table is only a top slab (z 0.574-0.626) with no collision
+                # legs, so a "lower z >= 0.35" filter removed it entirely and
+                # the base/torso were routed straight into it. Height is
+                # handled per obstacle in create_navigable_map().
                 link_bounds.append((
                     np.asarray(lower),
                     np.asarray(upper),
