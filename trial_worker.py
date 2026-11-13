@@ -25,7 +25,7 @@ def run_trial(project_dir, trial_dir, seed, max_steps, gpu,
     import time
     import numpy as np
     import pybullet as p
-    from pick_nav_reach_env import PickNavReachEnv
+    from pick_nav_reach_env_multi import PickNavReachEnv
     from solver import Solver
     from custom_libraries.recording import record_navigation
 
