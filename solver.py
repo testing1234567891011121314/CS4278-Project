@@ -88,6 +88,11 @@ class Solver:
     ## This function is called every time step.
     def get_action(self,env):
         obs = env._get_obs()
+
+        collisions = self.detect_collisions()
+
+        for contact in collisions:
+            print("CONTACT/COLLISION:", contact)
         
         if self.state == 999:    ## wait for object to spawn
             # The object spawns at z=5 and needs ~200 steps to land on the table;
@@ -756,3 +761,22 @@ class Solver:
         return float(
             distances.min() - half_cell_diagonal - self.robot_radius
         )
+
+    def detect_collisions(self, ignore_bodies=()):
+        contacts = p.getContactPoints(
+            bodyA=self.env.robot_id,
+            physicsClientId=self.env.pb_physics_client,
+        )
+
+        return [
+            {
+                "other_body": c[2],
+                "robot_link": c[3],
+                "other_link": c[4],
+                "distance": c[8],       # metres; negative = penetration
+                "normal_force": c[9],   # newtons
+            }
+            for c in contacts
+            if c[2] not in ignore_bodies
+            and (c[8] <= 0.0 or c[9] > 0.0)
+        ]
