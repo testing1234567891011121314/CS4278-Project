@@ -8,6 +8,7 @@ from pathlib import Path
 from maze_utils import generate_maze_map, add_left_room_to_maze, create_maze_urdf
 from copy import deepcopy
 from keyboard_control import KeyBoardController
+from solver import Solver
 from utils import closest_joint_values
 
 class PickNavReachEnv:
@@ -370,22 +371,53 @@ class PickNavReachEnv:
         return qpos.copy()
 
 
+
 if __name__ == "__main__":
     env = PickNavReachEnv(seed=42)
     env.reset()
     print(f"Action size: {env.action_size}, Obs size: {env.obs_size}")
-    
-    keyboard_controller = KeyBoardController(env)
-    
-    # for i in range (10000):
+
+    # Set camera angle
+    p.resetDebugVisualizerCamera(
+        cameraDistance=8.0,              # Distance from the target, in metres
+        cameraYaw=90,                    # Horizontal viewing angle, in degrees
+        cameraPitch=-60,                 # Downward viewing angle, in degrees
+        cameraTargetPosition=[0, 0, 0],   # World position to look at
+        physicsClientId=env.pb_physics_client,
+    )
+    steps_taken = 0 # Track the number of steps taken in the simulation
+
+    solver = Solver(env)
+    # keyboard_controller = KeyBoardController(env)
+
     import time
-    while True:
+    for i in range (900):
+    # while True:
         # random_action = np.random.uniform(-1.0, 1.0, size=(env.action_size,))
-        action = keyboard_controller.get_action()
+        action = solver.get_action(env)
         obs, info = env.step(action)
         for k, v in info.items():
             print(f"{k}: {v}")
-        # p.stepSimulation()
-        # time.sleep(1./240.)
+        p.stepSimulation()
+        time.sleep(1./240.)
+
+
+# if __name__ == "__main__":
+#     env = PickNavReachEnv(seed=42)
+#     env.reset()
+#     print(f"Action size: {env.action_size}, Obs size: {env.obs_size}")
+    
+#     keyboard_controller = KeyBoardController(env)
+    
+#     # for i in range (10000):
+#     import time
+#     while True:
+#         # random_action = np.random.uniform(-1.0, 1.0, size=(env.action_size,))
+#         action = keyboard_controller.get_action()
+#         obs, info = env.step(action)
+#         for k, v in info.items():
+#             print(f"{k}: {v}")
+#         # p.stepSimulation()
+#         # time.sleep(1./240.)
 
 

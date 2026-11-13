@@ -130,3 +130,5 @@ tmp/
 outputs/
 
 tests/results/
+
+runs/
