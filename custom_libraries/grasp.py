@@ -90,8 +90,12 @@ class GraspConfig:
     torso_goal_tolerance: float = 0.001  # metres
     rrt_step: float = 0.20
     rrt_iterations: int = 2500
-    rrt_seconds: float = 1.0  # per candidate, within total budget
-    planning_seconds: float = 30.0
+    # Budgets are CPU seconds and cost no simulation steps. One collision check
+    # takes ~30 ms, so even the straight start-to-pregrasp edge (50-70 samples)
+    # needs 1-2.5 s on a slow or busy machine; at 1 s per candidate every transit
+    # was rejected there and the plan failed or fell back to a worse grasp.
+    rrt_seconds: float = 8.0  # per candidate, within total budget
+    planning_seconds: float = 60.0  # per grasp depth in tcp_offsets
     ik_restarts: int = 8
     position_tolerance: float = 0.003
     orientation_tolerance: float = 0.04
