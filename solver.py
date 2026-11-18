@@ -458,14 +458,13 @@ class Solver:
 
     def _solve_reach(self, obs, seconds=20.0):
         """Return a collision-checked torso+arm path to the place pose, or None."""
-        import time as _time
         from scipy.spatial.transform import Rotation
-        from custom_libraries.grasp import _ManipulatorIK, RRTConnect, edge_samples
+        from custom_libraries.grasp import _ManipulatorIK, RRTConnect, edge_samples, planning_clock
         planner = self.grasp_planner
         env = self.env
         client = planner.client
         qpos = np.asarray(obs["qpos"], dtype=float)
-        deadline = _time.monotonic() + seconds
+        deadline = planning_clock() + seconds
         state = p.getLinkState(planner.robot, planner.ee, computeForwardKinematics=True,
                                physicsClientId=client)
         g_pos, g_rot = np.asarray(state[4]), Rotation.from_quat(state[5])
@@ -511,11 +510,11 @@ class Solver:
                                         ((-1, 0, 0), (0, 0, 1), (0, 1, 0), (0, -1, 0), (0, 0, -1))]
                 candidates = [(rot, aim) for aim in aims for rot in rotations]
                 for rot, aim in candidates:
-                    if _time.monotonic() >= deadline:
+                    if planning_clock() >= deadline:
                         break
                     target = goal + aim - rot.apply(offset_local)
                     q = ik.solve(target, rot.as_quat(), start, lower, upper,
-                                 min(deadline, _time.monotonic() + 2.0), restarts=12)
+                                 min(deadline, planning_clock() + 2.0), restarts=12)
                     if q is None:
                         print("Reach: IK failed for orientation", np.round(rot.as_euler("xyz"), 2))
                         continue
@@ -531,7 +530,7 @@ class Solver:
                                      max_iterations=planner.config.rrt_iterations,
                                      rng=planner.rng)
                     path = rrt.plan(start / scale, q / scale,
-                                    deadline=min(deadline, _time.monotonic() + 6.0))
+                                    deadline=min(deadline, planning_clock() + 6.0))
                     if path is not None:
                         return np.asarray(path)[1:] * scale
                     print("Reach: RRT found no path", planner._last_invalid)

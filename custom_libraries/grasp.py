@@ -113,6 +113,13 @@ class GraspPlan:
     stats: dict
 
 
+# Clock for every planning budget (seconds). CPU time of this process, not
+# wall time: with wall-clock deadlines a busy machine (parallel trials, a
+# loaded grader) ran out of budget after ~20 candidates and returned no plan
+# for grasps that plan in a few seconds on an idle one.
+planning_clock = time.process_time
+
+
 class PlanningError(RuntimeError):
     pass
 
@@ -186,7 +193,7 @@ class RRTConnect:
         self.rng = rng if rng is not None else np.random.default_rng(0)
 
     def edge_valid(self, a, b, deadline=float('inf')):
-        return all(time.monotonic() < deadline and self.valid(q)
+        return all(planning_clock() < deadline and self.valid(q)
                    for q in edge_samples(a, b, self.resolution))
 
     def plan(self, start, goal, *, deadline=float('inf')):
@@ -195,7 +202,7 @@ class RRTConnect:
             if (q.shape != self.lower.shape or not np.isfinite(q).all()
                     or np.any(q < self.lower) or np.any(q > self.upper)):
                 return None
-        if time.monotonic() >= deadline or not self.valid(start) or not self.valid(goal):
+        if planning_clock() >= deadline or not self.valid(start) or not self.valid(goal):
             return None
         if self.edge_valid(start, goal, deadline):
             return edge_samples(start, goal, self.resolution)
@@ -224,12 +231,12 @@ class RRTConnect:
             return chain[::-1]
 
         for _ in range(self.max_iterations):
-            if time.monotonic() >= deadline:
+            if planning_clock() >= deadline:
                 return None
             sample = b[0][0] if self.rng.random() < 0.15 else self.rng.uniform(self.lower, self.upper)
             ia, _ = extend(a, sample)
             if ia is not None:
-                while time.monotonic() < deadline:
+                while planning_clock() < deadline:
                     ib, reached = extend(b, a[0][ia])
                     if ib is None:
                         break
@@ -317,7 +324,7 @@ class _ManipulatorIK:
         for attempt in range(restarts):
             q = np.asarray(seed, float).copy() if attempt == 0 else owner.rng.uniform(lower, upper)
             for _ in range(4):
-                if time.monotonic() >= deadline:
+                if planning_clock() >= deadline:
                     return None
                 for j, value in zip(self.ids, q):
                     p.resetJointState(self.robot, j, float(value), physicsClientId=self.client)
@@ -632,7 +639,7 @@ class GraspPlanner:
     def _valid(self, q, *, touch=False, attached=None, deadline=float('inf')):
         cfg = self.config
         self._last_invalid = None
-        if time.monotonic() >= deadline:
+        if planning_clock() >= deadline:
             self._last_invalid = {'reason': 'time_budget'}
             return False
         if not np.isfinite(q).all():
@@ -726,7 +733,7 @@ class GraspPlanner:
                 print(
                     f"[FAIL {stage}] Cartesian IK",
                     "position=", np.round(position, 4),
-                    "budget_left=", round(deadline - time.monotonic(), 2),
+                    "budget_left=", round(deadline - planning_clock(), 2),
                     flush=True,
                 )
                 return None
@@ -792,7 +799,7 @@ class GraspPlanner:
         actual = np.array([s[0] for s in p.getJointStates(self.robot, self.action_ids, physicsClientId=self.client)])
         if not np.allclose(actual, parked, atol=1e-4, rtol=0):
             raise PlanningError('Observation is stale; acquire it after navigation stops.')
-        deadline = time.monotonic() + cfg.planning_seconds
+        deadline = planning_clock() + cfg.planning_seconds
         stats = self.last_stats = dict(candidates=0, tried=0, ik_fail=0, transit_fail=0,
                                       approach_fail=0, opening_fail=0, closure_fail=0,
                                       lift_fail=0, reason='search_exhausted',
@@ -842,7 +849,7 @@ class GraspPlanner:
                                 key = (body, c[4])
                                 self.support_contacts[key] = min(self.support_contacts.get(key, 0.), c[8])
                 for candidate in candidates[:cfg.max_candidates]:
-                    if time.monotonic() >= deadline:
+                    if planning_clock() >= deadline:
                         stats['reason'] = 'time_budget'
                         break
                     p.resetBasePositionAndOrientation(self.object, *object_pose, physicsClientId=self.client)
@@ -877,7 +884,7 @@ class GraspPlanner:
                         print(
                             "[FAIL pregrasp IK]",
                             "target=", np.round(pre_pos, 4),
-                            "budget_left=", round(deadline - time.monotonic(), 2),
+                            "budget_left=", round(deadline - planning_clock(), 2),
                             flush=True,
                         )
                         continue
@@ -894,7 +901,7 @@ class GraspPlanner:
                                      resolution=resolution, step_size=cfg.rrt_step,
                                      max_iterations=cfg.rrt_iterations, rng=self.rng)
                     transit = rrt.plan(start / scale, pre / scale,
-                                      deadline=min(deadline, time.monotonic()+cfg.rrt_seconds))
+                                      deadline=min(deadline, planning_clock()+cfg.rrt_seconds))
                     if transit is not None:
                         transit = transit * scale
                     if transit is None:

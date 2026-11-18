@@ -158,8 +158,11 @@ r.update(
     reach_phase=getattr(solver, "_reach_phase", None),
     nav=getattr(solver.curved_nav, "status", None),
     states=states,
+    plan={k: v for k, v in (planner.last_stats or {}).items()
+          if k in ("reason", "tried", "candidates", "ik_fail", "transit_fail", "approach_fail", "opening_fail",
+                   "closure_fail", "lift_fail", "tcp_attempts", "tcp_offset")},
     wall_s=round(time.perf_counter() - t0, 1),
 )
 with contextlib.suppress(OSError):
     os.remove(maze)
-print("SCORE:" + json.dumps(r, default=str), flush=True)
+print("\nSCORE:" + json.dumps(r, default=str), flush=True)

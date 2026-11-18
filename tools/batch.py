@@ -45,8 +45,10 @@ def run(job):
 
 
 def load(log):
-    lines = [l for l in open(log, errors="replace").read().splitlines() if l.startswith("SCORE:")]
-    return json.loads(lines[-1][6:]) if lines else None
+    # Bullet's URDF warnings do not end with a newline, so SCORE: may be mid-line.
+    text = open(log, errors="replace").read()
+    at = text.rfind("SCORE:")
+    return json.loads(text[at + 6:].splitlines()[0]) if at >= 0 else None
 
 
 if not args.report:
