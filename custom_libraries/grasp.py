@@ -60,16 +60,18 @@ class GraspConfig:
     pad_length: float = 0.063
     pad_height: float = 0.024
     tcp_offset: tuple = (0.025, 0.0, 0.0)  # contact near pad tips, ahead of link origin
-    opening_clearance: float = 0.008  # total gap, metres
-    squeeze: float = 0.001  # total gap reduction in motor command after contact
+    opening_clearance: float = 0.024  # total gap, metres
+    min_opening_clearance: float = 0.008  # used when travel cannot fit the full clearance (wide objects)
+    squeeze: float = 0.004  # total gap reduction in motor command after contact
     min_width: float = 0.005
+    finger_thickness: float = 0.015  # finger body beyond the pad surface, for the obstruction test
     max_cloud_points: int = 800
     max_candidates: int = 60
     pregrasp_distance: float = 0.08
     cartesian_step: float = 0.005
     lift_distance: float = 0.08  # set 0 to end after closing
     collision_margin: float = 0.002
-    contact_penetration: float = 0.0015
+    contact_penetration: float = 0.006
     joint_resolution: float = 0.025  # max joint delta per collision sample, rad
     torso_resolution: float = 0.005  # metres per collision sample
     torso_metric_scale: float = 0.20  # metres equivalent to one radian in RRT
@@ -509,7 +511,7 @@ class GraspPlanner:
         i, j = np.triu_indices(len(pts), 1)
         vectors = pts[j] - pts[i]
         widths = np.linalg.norm(vectors, axis=1)
-        ok = (widths >= cfg.min_width) & (widths + cfg.opening_clearance <= cfg.closed_gap + 2*cfg.finger_travel)
+        ok = (widths >= cfg.min_width) & (widths + cfg.min_opening_clearance <= cfg.closed_gap + 2*cfg.finger_travel)
         i, j, vectors, widths = i[ok], j[ok], vectors[ok], widths[ok]
         directions = vectors / widths[:, None]
         a = -np.einsum('ij,ij->i', ns[i], directions)
@@ -537,7 +539,13 @@ class GraspPlanner:
                     rotation = np.column_stack((approach, closing, np.cross(approach, closing)))
                     local = (cloud - centre) @ rotation + np.asarray(cfg.tcp_offset)
                     in_pad = (np.abs(local[:, 0]) <= cfg.pad_length/2) & (np.abs(local[:, 2]) <= cfg.pad_height/2)
-                    if np.any(np.abs(local[in_pad, 1]) > widths[k]/2 + 0.002):
+                    # Only points the open fingers would sweep through obstruct the grasp:
+                    # just outside the contact span, within opening clearance + finger
+                    # thickness. Points further out (e.g. the far wall of a bowl when
+                    # pinching its rim) are beyond the fingers and do not collide.
+                    side = np.abs(local[in_pad, 1])
+                    reach = widths[k]/2 + cfg.opening_clearance/2 + cfg.finger_thickness
+                    if np.any((side > widths[k]/2 + 0.002) & (side < reach)):
                         continue  # Other object points obstruct the proposed opening.
                     quat = Rotation.from_matrix(rotation).as_quat()
                     key = tuple(np.round(np.r_[centre / 0.01, approach / 0.2, closing / 0.2]).astype(int))
@@ -807,7 +815,12 @@ class GraspPlanner:
                     p1, p2, centre, quat, _ = candidate
                     width = np.linalg.norm(p2-p1)
                     nominal = np.full(2, (width-cfg.closed_gap)/2)
-                    opened = nominal + cfg.opening_clearance/2
+                    # Open by the full clearance when the fingers can; wide objects fall
+                    # back to whatever travel is left (at least min_opening_clearance).
+                    opened = np.minimum(nominal + cfg.opening_clearance/2,
+                                        self.upper[self.finger_indices])
+                    if np.any(opened - nominal < cfg.min_opening_clearance/2 - 1e-9):
+                        continue
                     squeezed = np.maximum(self.lower[self.finger_indices], nominal - cfg.squeeze/2)
                     if np.any(opened > self.upper[self.finger_indices]):
                         continue
@@ -917,6 +930,9 @@ class GraspFollower:
                                 if i not in set(planner.motion_indices) | set(planner.finger_indices)])
         self.contact_stable = 0
         self.lost_contact_ticks = 0
+        # The environment's P-only position controller sags under gravity; an
+        # integral term on the commanded arm/torso targets removes the offset.
+        self.integral = np.zeros(len(planner.action_ids))
 
     def _contacts(self):
         owner = self.planner
@@ -975,6 +991,9 @@ class GraspFollower:
         error = target-q
         scale = max(1., float(np.max(np.abs(error)/limits)))
         action = q + error/scale
+        lifted = np.r_[owner.torso_index, owner.arm_indices]
+        self.integral[lifted] = np.clip(self.integral[lifted] + 0.05*error[lifted], -0.15, 0.15)
+        action[lifted] += self.integral[lifted]
         action[self.pinned] = target[self.pinned]
         if phase == 'lift':
             action[owner.finger_indices] = target[owner.finger_indices]

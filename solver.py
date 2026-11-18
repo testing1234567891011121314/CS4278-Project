@@ -38,8 +38,14 @@ class Solver:
         self.wrist_flex = 0
         self.wrist_roll = 0
         self.gripper_open = 0
+        self.hold_before_transport = 60   # ticks holding the lifted object before moving
+        self.retreat_distance = 1.0       # metres backed away so the held object clears the table before tucking
+        self.carry_speed = 0.004          # max base displacement per tick while holding the object
+        self.reach_backoff_cells = 7      # cells to back off along the path before reaching to the goal
 
         # Travel targets retained; navigation rebuilds the map after preparation.
+        # Pose used while driving to the table: arm forward, ready to plan a
+        # grasp from (the grasp planner's transit search starts here).
         self.travel_joint_targets = {
             "torso_lift_joint": 0.1,
             "shoulder_pan_joint": 0.0,
@@ -49,6 +55,23 @@ class Solver:
             "forearm_roll_joint": 0.0,
             "wrist_flex_joint": 1.0,
             "wrist_roll_joint": 0.0,
+        }
+        # Pose used while carrying the object through the maze, found by a
+        # search over joint space: every link stays inside the base footprint
+        # (<= 0.29 m forward/sideways) and the gripper is held up at ~1.5 m,
+        # >= 0.2 m clear of the body. The drive-to-table pose above reaches
+        # 0.84 m forward, which seals the maze bottleneck once the fixed-yaw
+        # footprint is inflated; the standard Fetch tuck fits but swings the
+        # gripper down beside the base and knocks the object out.
+        self.carry_joint_targets = {
+            "torso_lift_joint": 0.23,
+            "shoulder_pan_joint": -0.59,
+            "shoulder_lift_joint": -1.21,
+            "upperarm_roll_joint": -2.59,
+            "elbow_flex_joint": 1.50,
+            "forearm_roll_joint": -1.32,
+            "wrist_flex_joint": 1.15,
+            "wrist_roll_joint": -0.10,
         }
 
         if travel_joint_targets is not None:
@@ -79,6 +102,10 @@ class Solver:
 
         self.curved_nav = CurvedNavigator(self)
         self.navigate_grasp = NavigateToGrasp(env, self.grasp_planner)
+        self.navigate_grasp.set_overhead_obstacles(
+            [(lo[0], lo[1], hi[0], hi[1]) for lo, hi in self.overhead_bounds],
+            self.overhead_link_reach(self.overhead_bounds),
+        )
 
         ## used for planning
         self.path = None
@@ -103,13 +130,22 @@ class Solver:
             return np.zeros(env.action_size)
 
         if self.state == 0:
-            decision = self.navigate_grasp.update(
-                obs,
-                self.inflated_occupancy,
-                self.convert_to_grid,
-                self.convert_to_world,
-                self.cell_size,
-            )
+            try:
+                decision = self.navigate_grasp.update(
+                    obs,
+                    self.inflated_occupancy,
+                    self.convert_to_grid,
+                    self.convert_to_world,
+                    self.cell_size,
+                )
+            except RuntimeError as exc:
+                # No usable grasp (e.g. no antipodal pair, or the object fell off
+                # the table). Fail into state 4 holding the current pose instead of
+                # crashing the whole episode.
+                print("Grasp selection failed:", exc)
+                self.state = 4
+                self.action = np.asarray(obs["qpos"], dtype=float).copy()
+                return self.action.copy()
 
             decision_state = decision["state"]
             print(
@@ -142,7 +178,13 @@ class Solver:
                 self.waypoint_index = 0
                 self.curved_nav.reset()
 
-                return np.asarray(obs["qpos"], dtype=float).copy()
+                # Latch ONE hold target for the settling phase. Re-commanding the
+                # measured qpos every tick lets gravity win: the arm sagged ~28 cm
+                # until the gripper rested on the table, and only then counted as
+                # "settled", so planning always began from a colliding start state.
+                self._grasp_hold_target = np.asarray(obs["qpos"], dtype=float).copy()
+                self.action = self._grasp_hold_target.copy()
+                return self.action.copy()
 
             if decision_state in {
                 "NAVIGATE_TO_OBJECT",
@@ -166,8 +208,8 @@ class Solver:
             from pprint import pprint
             import time
 
-            # Hold the measured pose while waiting for settling.
-            self.action = np.asarray(obs["qpos"], dtype=float).copy()
+            # Hold the pose latched on entry to this state (see GRASP transition).
+            self.action = self._grasp_hold_target.copy()
             object_pos = np.asarray(obs["object_pos"], dtype=float)
 
             previous = getattr(self, "_grasp_last_object_pos", None)
@@ -224,17 +266,52 @@ class Solver:
 
         if self.state == 3:
             print("solver state:", self.state)
-            # Terminal hold. Payload-aware transport is a separate planning
-            # task; the previous transition reopened the grasp and reset the
-            # arm to an unchecked travel pose.
+            # Hold the lifted grasp briefly (confirms the object is secure), then
+            # back away from the table before tucking the arm for travel.
             if hasattr(self, "grasp_follower"):
                 self.action = self.grasp_follower.hold.copy()
+                self._finger_hold = self.grasp_follower.hold[13:15].copy()
+            self._hold_ticks = getattr(self, "_hold_ticks", 0) + 1
+            if self._hold_ticks >= self.hold_before_transport:
+                qpos = np.asarray(obs["qpos"], dtype=float)
+                base_xy = np.array([qpos[0] - 2.0, qpos[1]])
+                away = base_xy - np.asarray(obs["object_pos"])[:2]
+                away /= max(np.linalg.norm(away), 1e-6)
+                # Retreat target in qpos coordinates (base x = qpos[0] - 2).
+                self._retreat_goal = qpos[:2] + self.retreat_distance * away
+                self.state = 5
+            return self.action.copy()
+
+        if self.state == 5:
+            # Straight-line retreat with the arm and fingers frozen at the hold
+            # pose, so the tuck motion cannot sweep the object into the table.
+            qpos = np.asarray(obs["qpos"], dtype=float)
+            error = self._retreat_goal - qpos[:2]
+            step = error * min(1.0, self.carry_speed / max(np.linalg.norm(error), 1e-9))
+            self.action[:2] = qpos[:2] + step
+            if np.linalg.norm(error) < 0.03:
+                self.action[:2] = qpos[:2]
+                self.state = 67
+                self.path = None
+                self._path_goal = None
+                # Re-tuck the arm (now carrying the object) and rebuild the
+                # navigation map for that pose; the flags are left over from
+                # the drive to the table.
+                self._travel_pose_complete = False
+                self.travel_joint_targets.update(self.carry_joint_targets)
+                self._tuck_rate = 0.003   # slow tuck so the held object is not flung
+                # The parking map leaves the tabletop out so the base can tuck
+                # under it; for transport the whole table must be an obstacle.
+                self.create_map(env, False)
+                if hasattr(self, "_moving_pose_target"):
+                    del self._moving_pose_target
+                print("Retreat complete; navigating to goal with object.")
             return self.action.copy()
         # During grasp debugging, retain the failure hold target.
         if self.state == 4:
             print("solver state:", self.state)
-            # return self.action.copy() 
-            return None       
+            # env.step() needs a (15,) target array; None crashed the episode.
+            return self.action.copy()
         # if self.state == 4:
         #     print("solver state:", self.state)
         #     print("Transition to exit")
@@ -270,10 +347,101 @@ class Solver:
         #     goal = self.convert_to_grid(self._exit_table_goal)
         #     return self.navigate(env, goal) 
         
+        if self.state == 68:
+            return self.reach_goal(obs)
+
         if self.state == 67:
             print("EXIT 67")
             goal = self.convert_to_grid(obs["goal_pos"][:2])
-            return self.navigate(env, goal)
+            action = self.navigate(env, goal)
+            if (getattr(self, "_finger_hold", None) is not None
+                    and self.curved_nav.status == "reached" and self.path):
+                # Arrived at the goal cell with the object: back off along our
+                # own path, then place the object on the goal with the arm.
+                back = self.path[max(0, len(self.path) - 1 - self.reach_backoff_cells)]
+                self._reach_base_goal = self.convert_to_world(back) + np.array([2.0, 0.0])
+                self._reach_phase = "backoff"
+                self.state = 68
+                print("Goal cell reached; backing off to place the object.")
+            finger_hold = getattr(self, "_finger_hold", None)
+            if finger_hold is not None:
+                # Carrying: cap the commanded base displacement per tick. The
+                # navigator's waypoint steps (up to ~0.4 m/tick) are fine for an
+                # empty gripper but jerk a friction-held object loose.
+                qpos = np.asarray(obs["qpos"], dtype=float)
+                delta = action[:2] - qpos[:2]
+                norm = np.linalg.norm(delta)
+                if norm > self.carry_speed:
+                    action[:2] = qpos[:2] + delta * (self.carry_speed / norm)
+                # Keep squeezing the object; travel poses and navigation steps
+                # otherwise command the fingers to their measured (unsqueezed) width.
+                action[13:15] = finger_hold
+                self.action = action.copy()
+            return action
+
+    def reach_goal(self, obs):
+        """State 68: put the held object on the goal sphere.
+
+        1. back the base off along the arrival path (straight, slow);
+        2. IK (planner's private torso+arm model) for a gripper pose that puts
+           the object -- not the gripper -- at the goal, keeping the object's
+           offset in the gripper frame fixed;
+        3. move the arm there slowly with the fingers still squeezing.
+        """
+        qpos = np.asarray(obs["qpos"], dtype=float)
+        action = self.action.copy()
+        action[13:15] = self._finger_hold
+        if self._reach_phase == "backoff":
+            error = self._reach_base_goal - qpos[:2]
+            step = error * min(1.0, self.carry_speed / max(np.linalg.norm(error), 1e-9))
+            action[:2] = qpos[:2] + step
+            if np.linalg.norm(error) < 0.03:
+                action[:2] = qpos[:2]
+                self._reach_target = self._solve_reach(obs)
+                self._reach_phase = "arm" if self._reach_target is not None else "hold"
+                print("Reach IK:", "solved" if self._reach_target is not None else "failed")
+        elif self._reach_phase == "arm":
+            idx = self.grasp_planner.motion_indices
+            error = self._reach_target - qpos[idx]
+            action[idx] = qpos[idx] + np.clip(error, -0.003, 0.003)
+            if np.max(np.abs(error)) < 0.01:
+                self._reach_phase = "hold"
+                print("Object placed at goal.")
+        self.action = np.clip(action, self.action_lower_bound, self.action_upper_bound)
+        return self.action.copy()
+
+    def _solve_reach(self, obs):
+        import time as _time
+        from scipy.spatial.transform import Rotation
+        from custom_libraries.grasp import _ManipulatorIK
+        planner = self.grasp_planner
+        qpos = np.asarray(obs["qpos"], dtype=float)
+        robot, client = planner.robot, planner.client
+        ee = next(j for j in range(p.getNumJoints(robot, physicsClientId=client))
+                  if p.getJointInfo(robot, j, physicsClientId=client)[12].decode() == "gripper_link")
+        state = p.getLinkState(robot, ee, computeForwardKinematics=True, physicsClientId=client)
+        g_pos, g_rot = np.asarray(state[4]), Rotation.from_quat(state[5])
+        offset_local = g_rot.inv().apply(np.asarray(obs["object_pos"]) - g_pos)
+        goal = np.asarray(obs["goal_pos"], dtype=float)
+        idx = planner.motion_indices
+        lower, upper = planner.lower[idx].copy(), planner.upper[idx].copy()
+        seed = qpos[idx].copy()
+        lower[planner.wrap] = np.maximum(lower[planner.wrap], seed[planner.wrap] - np.pi)
+        upper[planner.wrap] = np.minimum(upper[planner.wrap], seed[planner.wrap] + np.pi)
+        ik = _ManipulatorIK(planner, qpos)
+        try:
+            # Current gripper orientation first, then level/forward variants.
+            candidates = [g_rot] + [Rotation.from_euler("xyz", [r, 0, y])
+                                    for y in (0.0, 0.5, -0.5) for r in (0.0, np.pi/2, -np.pi/2)]
+            for rot in candidates:
+                target = goal - rot.apply(offset_local)
+                q = ik.solve(target, rot.as_quat(), seed, lower, upper,
+                             _time.monotonic() + 2.0, restarts=12)
+                if q is not None:
+                    return q
+        finally:
+            ik.close()
+        return None
 
     def navigate(self, env, goal):
         obs = env._get_obs()
@@ -383,7 +551,13 @@ class Solver:
         ]
         action = target.copy()
         error = target[arm] - qpos[arm]
-        action[arm] = qpos[arm] + np.clip(error, -0.05, 0.05)
+        rate = getattr(self, "_tuck_rate", 0.05)
+        action[arm] = qpos[arm] + np.clip(error, -rate, rate)
+        if hasattr(self, "_tuck_rate"):
+            # Carrying: lower the torso gradually too, instead of jumping to
+            # the travel height with the object still in hand.
+            t = self._travel_torso_index
+            action[t] = qpos[t] + np.clip(target[t] - qpos[t], -0.002, 0.002)
         qvel = np.asarray(obs["qvel"], dtype=float)
         self.moving_pose_ready = bool(
             np.max(np.abs(error)) < 0.03
@@ -646,6 +820,10 @@ class Solver:
         """Read additional obstacle bounds without changing the simulation."""
         client = self.env.pb_physics_client
         obstacles = []
+        # Boxes skipped by the 2-D base map because the base fits underneath
+        # (e.g. the table top). The torso does NOT fit underneath, so these are
+        # kept for the parking clearance check in NavigateToGrasp.
+        self.overhead_bounds = []
 
         excluded = {
             self.env.robot_id,
@@ -683,6 +861,7 @@ class Solver:
                 # reach annulus around the table and stranded the robot 1.0 m
                 # out. Table legs start at z=0 and still count.
                 if is_2d and lower[2] >= 0.35:  # allow parking under table if navigating to object, disallow when navigating to exit
+                        self.overhead_bounds.append((np.asarray(lower), np.asarray(upper)))
                         continue
                 link_bounds.append((
                     np.asarray(lower),
@@ -712,6 +891,29 @@ class Solver:
             obstacles.extend(link_bounds)
 
         return obstacles
+
+    def overhead_link_reach(self, overhead_bounds):
+        """Horizontal forward reach (m) from the base centre of every robot link
+        whose height overlaps an overhead obstacle (in practice: the torso at
+        table-top height). Measured once from the actual collision geometry."""
+        if not overhead_bounds:
+            return 0.0
+        client, robot = self.env.pb_physics_client, self.env.robot_id
+        z_lo = min(lo[2] for lo, _ in overhead_bounds)
+        z_hi = max(hi[2] for _, hi in overhead_bounds)
+        base_xy = np.array([self.env.agent_qpos[0] - 2.0, self.env.agent_qpos[1]])
+        yaw = float(self.env.agent_qpos[2])
+        forward = np.array([np.cos(yaw), np.sin(yaw)])
+        reach = 0.0
+        for link in range(-1, p.getNumJoints(robot, physicsClientId=client)):
+            if not p.getCollisionShapeData(robot, link, physicsClientId=client):
+                continue
+            lo, hi = p.getAABB(robot, link, physicsClientId=client)
+            if hi[2] < z_lo or lo[2] > z_hi:
+                continue
+            corners = np.array([[x, y] for x in (lo[0], hi[0]) for y in (lo[1], hi[1])])
+            reach = max(reach, float(np.max((corners - base_xy) @ forward)))
+        return reach
 
     def mark_obstacle_bounds(self, occupancy, obstacle_bounds):
         rows, cols = occupancy.shape

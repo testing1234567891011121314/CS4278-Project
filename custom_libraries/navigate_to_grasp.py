@@ -76,6 +76,36 @@ class NavigateToGrasp:
         self.grasp = None
         self.navigation_goal = None
         self.failed_goals = set()
+        self.overhead_rects = []       # (xmin, ymin, xmax, ymax) the base fits under
+        self.overhead_reach = 0.0      # how far tall links (torso) reach forward
+        self.overhead_margin = 0.03
+
+    def set_overhead_obstacles(self, rects, link_reach, margin=0.03):
+        """Obstacles the base can drive under but the torso cannot (table top).
+
+        The 2-D occupancy map deliberately omits these so the base may tuck
+        under the table; without this check the robot parked with its torso
+        touching the table edge, making every grasp start state invalid.
+        """
+        self.overhead_rects = [tuple(map(float, r)) for r in rects]
+        self.overhead_reach = float(link_reach)
+        self.overhead_margin = float(margin)
+
+    def _overhead_distance(self, xy):
+        """Distance from base centre xy to the nearest overhead footprint."""
+        if not self.overhead_rects:
+            return np.inf
+        x, y = float(xy[0]), float(xy[1])
+        best = np.inf
+        for xmin, ymin, xmax, ymax in self.overhead_rects:
+            dx = max(xmin - x, 0.0, x - xmax)
+            dy = max(ymin - y, 0.0, y - ymax)
+            best = min(best, np.hypot(dx, dy))
+        return best
+
+    def _overhead_clear(self, xy, extra=0.0):
+        required = self.overhead_reach + self.overhead_margin + extra
+        return self._overhead_distance(xy) >= required
 
     def select_grasp(self, obs):
         """
@@ -254,8 +284,12 @@ class NavigateToGrasp:
             raise RuntimeError("No connected free parking cells.")
         world = np.asarray([convert_to_world(tuple(c)) for c in cells], float)
         distances = np.linalg.norm(world - np.asarray(object_xy), axis=1)
+        # Goals also keep the torso clear of overhead obstacles even if the base
+        # stops up to position_tolerance short of the goal.
         allowed = ((distances >= self.min_reach) & (distances <= self.max_reach)
-                   & np.array([not self._failed(xy) for xy in world]))
+                   & np.array([not self._failed(xy) for xy in world])
+                   & np.array([self._overhead_clear(xy, self.position_tolerance)
+                               for xy in world]))
         if not np.any(allowed):
             raise RuntimeError("No untried connected parking cell in the configured "
                                "distance range; this does not prove the grasp impossible.")
@@ -298,8 +332,12 @@ class NavigateToGrasp:
                        and np.isfinite(velocity).all()
                        and np.max(np.abs(velocity)) < 0.01)
         self._previous_q = q.copy()
-        held_error = q - self._prepare_target
-        held_error[2] = 0  # yaw has its own target and tolerance
+        # Only base x/y are "held" by this alignment step. The snapshot is taken
+        # on the first tick, often while joints are still moving, so requiring
+        # fingers/arm to return to it can deadlock (a finger settling 2 cm away
+        # blocked readiness forever). Arm and fingers only need to be still,
+        # which `settled` already checks.
+        held_error = (q - self._prepare_target)[:2]
         ready = (abs(error) <= self.yaw_tolerance and settled
                  and np.max(np.abs(held_error)) < 0.01)
         self._stable = self._stable + 1 if ready else 0
@@ -347,7 +385,8 @@ class NavigateToGrasp:
         distance = np.linalg.norm(target-base[:2])
         current_ok = (self.min_reach <= distance <= self.max_reach
                       and not self._failed(base[:2])
-                      and self._free_cell(base[:2], occupancy, convert_to_grid))
+                      and self._free_cell(base[:2], occupancy, convert_to_grid)
+                      and self._overhead_clear(base[:2]))
         result = dict(grasp_position_base=grasp_pos, grasp_orientation_base=grasp_quat,
                       grasp_position_world=self.grasp["position_world"],
                       grasp_orientation_world=self.grasp["orientation_world"])
