@@ -718,7 +718,12 @@ class Solver:
                 # aim at the centre first, then at points 5 cm away from it.
                 aims = [np.zeros(3)] + [0.05 * np.asarray(d, float) for d in
                                         ((-1, 0, 0), (0, 0, 1), (0, 1, 0), (0, -1, 0), (0, 0, -1))]
-                candidates = [(rot, aim) for aim in aims for rot in rotations]
+                # Least gripper rotation first: turning the gripper over with
+                # the object in it is what loses objects in this move, so an
+                # off-centre aim in the current orientation beats a centred
+                # one that needs a flip.
+                rotations.sort(key=lambda rot: (g_rot.inv() * rot).magnitude())
+                candidates = [(rot, aim) for rot in rotations for aim in aims]
                 # Pass 1: IK for every candidate, taking the first one whose
                 # straight joint-space move is collision free (cheap). Running
                 # a 6 s RRT for each candidate as it came used up the budget
