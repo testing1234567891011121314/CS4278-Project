@@ -31,6 +31,11 @@ Headless runs on seeds 42 and 7. A success is the planner's own state 3, holding
 | Route through the maze exists | never (A* always failed) | yes |
 | Object delivered within 10 cm of goal (5 pickable objects × 2 seeds) | 0 | 2 / 10 (banana and strawberry, seed 42) |
 
+Current state (session 3, 380d21a), scored with `tools/score.py` on the
+reference batch (objects 5, 6, 7, 14, 2 × seeds 42 and 7): **7 / 10
+delivered, 35.2 / 40 mean rubric points** per trial. See handoff.md, Session
+3, for the full table.
+
 The objects that pick reliably are banana, strawberry, apple, foam brick and tomato soup can. Runs are not deterministic, so expect some run-to-run variation.
 
 ## How it was debugged
@@ -141,7 +146,9 @@ State 3 used to be a terminal hold. The new sequence is:
 6. **Reach** (state 68):
    - back off 7 cells along the arrival path;
    - solve IK (the planner's private torso + arm model) for a gripper pose that puts the *object*, not the gripper, on the goal;
-   - move the arm there slowly.
+   - move the arm there along a collision-checked path (see §14, and §19 and
+     §20 for later fixes). The first version was a slow joint-space
+     interpolation, which swung the object into the walls.
 
 ## Session 2: holding the object through transport
 
@@ -174,18 +181,91 @@ contact; `grasp_error` records where the object was lost.
 Not used, by team decision: PyBullet's `frictionAnchor` on the finger links.
 It removes the creep completely but changes the robot's contact model.
 
+## Session 3: scoring, lift height, planning budgets and the goal reach
+
+Measured with `tools/score.py` and `tools/batch.py` on the reference batch.
+Delivered 5 / 10 (25.4 points) with only fix 16, 6 / 10 (34.0) after 17 and
+18, 7 / 10 (35.2) after 19 and 20.
+
+### 16. Planning deadlines used wall time (`grasp.py`, `solver.py`)
+**Symptom.** Six parallel banana trials all returned "No plan found" with
+reason `time_budget` after about 20 candidates; a first baseline batch run
+6-wide scored 2 / 10, with 3 trials failing at planning.
+**Cause.** The deadlines of the grasp planner and the goal reach counted wall
+time, so a busy machine used up the budget on other processes' work.
+**Fix.** `planning_clock = time.process_time` (CPU time) for every planning
+deadline. Planning time costs no simulation steps.
+
+### 17. Transit and search budgets too small (`grasp.py`)
+**Symptom.** The planner failed, or fell through to a late candidate (the
+banana picked candidate 12 or 23 instead of 1 and was then dropped).
+**Cause.** With a generous budget, 28 of 29 banana transit plans were plain
+straight-line edges, but each took 1–2.5 CPU-s just to collision-check
+(50–70 samples at about 30 ms each), so a 1 s budget rejected them on a busy
+machine.
+**Fix.** `rrt_seconds` 1 → 8 and `planning_seconds` 30 → 60 (per grasp
+depth). No candidate in the reference batch was rejected for transit
+afterwards.
+
+### 18. Lift of 8 cm, accepted at 4 cm (`grasp.py`)
+**Symptom.** The rubric wants the object at least 10 cm up; the lift was
+planned at 8 cm and accepted at 4 cm.
+**Fix.** `lift_distance` 0.08 → 0.15 and the lift is accepted at
+`min_lift_fraction` (0.8) of it, 12 cm. Lifts now measure 14.8–15.5 cm and
+sag at most 3 mm over the 50-step hold.
+
+### 19. The held object blocked its own reach (`solver.py`, `_solve_reach`)
+**Symptom.** Soup can, seed 7: 0 of 6 reach plan calls succeeded.
+**Cause.** Not IK. Held top-down, the can creeps up during the carry until it
+is 0.3 mm from the palm (`gripper_link`), inside the planner's 2 mm collision
+margin. Fingers were exempt from the held-object check but the palm was not,
+and since the object moves rigidly with the gripper in the planner, every
+configuration including the start was invalid.
+**Fix.** The held object is not checked against the gripper links. It is
+still checked against the walls and the rest of the robot. Offline, 0 / 6 →
+8 / 8 plans for this case.
+
+### 20. Reach search spent its budget on one RRT (`solver.py`, `_solve_reach`)
+**Symptom.** Soup can, seed 42: the old search failed 2 of 5 calls.
+**Cause.** One RRT used 6 s of the 20 s budget, so candidates with a clear
+straight-line move were never tried. Standoff distance, base heading and goal
+height were not the cause (the base stops 0.62 m from the goal).
+**Fix.** Solve IK for all candidates first, return the first with a
+collision-free straight move, then run RRT nearest-first. Budget 20 → 60
+CPU-s. Offline, 3 / 5 → 8 / 8 plans, 2.5–7.2 CPU-s each.
+
+### Tried, not kept: squeeze relative to the measured contact
+The hold command was the finger positions measured at the end of the close
+phase minus 2 mm per finger, ramped at 0.2 mm per tick during the lift.
+Delivered 2 / 10 (12.2 points): banana, apple seed 7 and foam brick seed 7
+lost contact during the lift; soup can (both seeds) never rose; apple and
+foam brick seed 42 slid 26–29 mm and were dropped. The finger position gain
+is 0.03 (arm joints 0.3), so a 2 mm offset gives far too little force; the
+committed command (7–9 mm inside the collision hull) gives 45–60 N. Not
+committed; an intermediate value and the ramp alone are untested.
+
 ## Known limitations / next steps
 
-- **Objects still slip during transport** in most runs: during the re-tuck, during navigation, or in the final arm motion. A firmer grasp would be the most useful next fix, for example:
-  - squeeze harder after lifting;
-  - prefer grasps near the object's centre of mass;
-  - re-check finger contact and re-grasp.
+- **Objects are still lost during transport in about 3 of 10 trials.** The
+  drops are intermittent. Two traced apple drops show the object creeping
+  in the gripper while the base drives (3 mm to 9–14 mm of drift), then
+  sliding off the 24 mm-tall finger pads; in the carry pose the closing axis
+  points straight down. Runs that delivered drifted 1–6 mm. A fingers-up
+  carry pose is the next thing to try; see handoff.md, Session 3, and
+  `tools/trace_carry.py`.
 - **Planning still fails for some objects.** Sugar box, large marker and potted meat can mostly end with `ik_fail` / `transit_fail`. Candidate ranking and approach direction for tall boxes need work.
 - **Bleach cleanser never leaves state 0**, with no error. Not yet investigated.
-- **Long runs.** A full episode with transport is about 9,000–10,000 steps.
+- **Long runs.** A full episode with transport is about 10,300–11,800 steps.
+- **Slow grasp execution** in some trials (lift at step 2,425 and 2,494
+  against the 3,000 limit); see handoff.md, next step 5.
 
 ## Files changed
 
-- `solver.py`: fixes 2, 3, 4, 8, 9 and 10.
+- `solver.py`: fixes 2, 3, 4, 8, 9 and 10 (session 1), 14 and 15 (session 2),
+  19 and 20 (session 3; also the CPU-time deadline of fix 16).
 - `custom_libraries/navigate_to_grasp.py`: fixes 1 and 3.
-- `custom_libraries/grasp.py`: fixes 5, 6 and 7.
+- `custom_libraries/grasp.py`: fixes 5, 6 and 7 (session 1), 11–13 (session
+  2), 16, 17 and 18 (session 3).
+- `tools/score.py` (new): scores one trial against the rubric.
+- `tools/batch.py` (new): runs `score.py` over objects × seeds in parallel
+  from a frozen copy of the repo.

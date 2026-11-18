@@ -81,6 +81,7 @@ hold_contact = 0
 lost = still = 0
 last_q = None
 states = []
+exec_steps = {}       # env steps spent in each phase of the grasp execution (state 2)
 t0 = time.perf_counter()
 for step in range(1, max_steps + 1):          # step = number of env.step calls made
     with quiet:
@@ -97,6 +98,10 @@ for step in range(1, max_steps + 1):          # step = number of env.step calls 
         centre, quat = plan.candidate[2], plan.candidate[3]
         planned = (o_rot.inv().apply(centre - plan.object_position), o_rot.inv() * Rotation.from_quat(quat))
         tcp = np.array([planner.last_stats.get("tcp_offset", planner.config.tcp_offset[0]), 0.0, 0.0])
+    if state == 2:
+        fol = solver.grasp_follower
+        ph = fol.plan.phases[fol.index]
+        exec_steps[ph] = exec_steps.get(ph, 0) + 1
     if rest_z is not None and r["lift10_step"] is None and z - rest_z >= LIFT_HEIGHT:
         r["lift10_step"] = step
     if state == 3 and r["lift_step"] is None:
@@ -157,6 +162,9 @@ r.update(
     reach_phase=getattr(solver, "_reach_phase", None),
     nav=getattr(solver.curved_nav, "status", None),
     states=states,
+    exec_steps=exec_steps,
+    exec_waypoints=({ph: solver.grasp_plan.phases.count(ph) for ph in dict.fromkeys(solver.grasp_plan.phases)}
+                    if hasattr(solver, "grasp_plan") else None),
     plan={k: v for k, v in (planner.last_stats or {}).items()
           if k in ("reason", "tried", "candidates", "ik_fail", "transit_fail", "approach_fail", "opening_fail",
                    "closure_fail", "lift_fail", "tcp_attempts", "tcp_offset")},
