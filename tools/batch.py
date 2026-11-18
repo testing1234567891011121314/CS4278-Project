@@ -54,13 +54,20 @@ def load(log):
 if not args.report:
     os.makedirs(out, exist_ok=True)
     shutil.rmtree(snap, ignore_errors=True)
-    skip = shutil.ignore_patterns(".git", ".claude", "pnr", "__pycache__", "pristine", "*.mp4", "*.jsonl", "imgs")
+    # assets/ (150 MB) never changes: link it into the snapshot when the
+    # platform allows, copy it otherwise.
+    skip = shutil.ignore_patterns(".git", ".claude", "pnr", "__pycache__", "pristine", "*.mp4", "*.jsonl", "imgs",
+                                  "assets", "runs", "paper_review")
 
     def ignore(folder, names):
         # OUT_DIR may be inside the repo: never copy it into its own snapshot.
         return set(skip(folder, names)) | {n for n in names if os.path.abspath(os.path.join(folder, n)) == out}
 
     shutil.copytree(repo, snap, ignore=ignore)
+    try:
+        os.symlink(os.path.join(repo, "assets"), os.path.join(snap, "assets"), target_is_directory=True)
+    except OSError:
+        shutil.copytree(os.path.join(repo, "assets"), os.path.join(snap, "assets"))
     jobs = [(o, s, k) for k in range(args.repeat) for o in args.objects for s in args.seeds]
     with cf.ThreadPoolExecutor(args.jobs) as pool:
         list(pool.map(run, jobs))
