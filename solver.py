@@ -40,7 +40,11 @@ class Solver:
         self.gripper_open = 0
         self.hold_before_transport = 60   # ticks holding the lifted object before moving
         self.retreat_distance = 1.0       # metres backed away so the held object clears the table before tucking
-        self.carry_speed = 0.004          # max base displacement per tick while holding the object
+        # Commanded base displacement per tick while holding the object (the
+        # base covers 83 % of it). 0.004 was needed with a 50 N grip and the
+        # fingers across the direction of travel; see carry_grip_extra and
+        # _align_grip.
+        self.carry_speed = 0.024
         # Extra finger closing (metres per finger) commanded once the object is
         # lifted. Grip force is linear in how far the finger command sits inside
         # the object: measured 6.6 N per mm, steady, 50 N at the grasp's own
@@ -48,8 +52,8 @@ class Solver:
         # every speed the hold tolerates, scales with it.
         self.carry_grip_extra = 0.030
         self.carry_accel = 0.0005         # change of that displacement per tick (speed ramp)
-        self.tuck_rate = 0.003            # rad per tick when moving the arm into the carry pose with the object
-        self.reach_rate = 0.003           # rad per tick for the final arm move to the goal
+        self.tuck_rate = 0.02            # rad per tick when moving the arm into the carry pose with the object
+        self.reach_rate = 0.02           # rad per tick for the final arm move to the goal
         self.reach_backoff_cells = 7      # cells to back off along the path before reaching to the goal
 
         # Travel targets retained; navigation rebuilds the map after preparation.
