@@ -31,10 +31,13 @@ Headless runs on seeds 42 and 7. A success is the planner's own state 3, holding
 | Route through the maze exists | never (A* always failed) | yes |
 | Object delivered within 10 cm of goal (5 pickable objects × 2 seeds) | 0 | 2 / 10 (banana and strawberry, seed 42) |
 
-Current state (session 3, 380d21a), scored with `tools/score.py` on the
-reference batch (objects 5, 6, 7, 14, 2 × seeds 42 and 7): **7 / 10
-delivered, 35.2 / 40 mean rubric points** per trial. See handoff.md, Session
-3, for the full table.
+Current state (session 3, part 2, 84202b1), scored with `tools/score.py` on
+the reference batch (objects 5, 6, 7, 14, 2 × seeds 42 and 7): **8 / 10
+delivered, 36.8 / 40 mean rubric points** per trial, with deliveries at
+steps 2,712–3,028 (one, apple seed 7 at 3,028, is over the 3,000-step limit
+the user now requires for the whole episode). Before part 2 it was 7 / 10 and
+35.2 points (380d21a), with deliveries at about 10,300–11,800 steps. See
+handoff.md, Session 3 and Session 3, part 2, for the full table.
 
 The objects that pick reliably are banana, strawberry, apple, foam brick and tomato soup can. Runs are not deterministic, so expect some run-to-run variation.
 
@@ -141,8 +144,8 @@ State 3 used to be a terminal hold. The new sequence is:
 1. **Hold** the lifted object for 60 ticks.
 2. **Retreat** (state 5) 1.0 m straight back, with the arm frozen, so the object clears the table.
 3. **Rebuild the map** with the table as a full obstacle, so the base no longer routes under it.
-4. **Re-tuck slowly** (0.003 rad/tick, torso 2 mm/tick), with the fingers kept squeezing. Faster tucks fling the object.
-5. **Navigate** with the base capped at 4 mm/tick while carrying. The navigator otherwise commands up to about 0.4 m per tick, which jerks a friction-held object loose.
+4. **Re-tuck slowly** (0.003 rad/tick, torso 2 mm/tick), with the fingers kept squeezing. Faster tucks fling the object. (Changed in part 2: see fixes 21–24.)
+5. **Navigate** with the base capped at 4 mm/tick while carrying. The navigator otherwise commands up to about 0.4 m per tick, which jerks a friction-held object loose. (Now 18 mm/tick with a speed ramp and an aligned grip; see fixes 21–24.)
 6. **Reach** (state 68):
    - back off 7 cells along the arrival path;
    - solve IK (the planner's private torso + arm model) for a gripper pose that puts the *object*, not the gripper, on the goal;
@@ -234,7 +237,7 @@ height were not the cause (the base stops 0.62 m from the goal).
 collision-free straight move, then run RRT nearest-first. Budget 20 → 60
 CPU-s. Offline, 3 / 5 → 8 / 8 plans, 2.5–7.2 CPU-s each.
 
-### Tried, not kept: squeeze relative to the measured contact
+### Tried, not kept in session 3: squeeze relative to the measured contact
 The hold command was the finger positions measured at the end of the close
 phase minus 2 mm per finger, ramped at 0.2 mm per tick during the lift.
 Delivered 2 / 10 (12.2 points): banana, apple seed 7 and foam brick seed 7
@@ -244,28 +247,179 @@ is 0.03 (arm joints 0.3), so a 2 mm offset gives far too little force; the
 committed command (7–9 mm inside the collision hull) gives 45–60 N. Not
 committed; an intermediate value and the ramp alone are untested.
 
+
+## Session 3, part 2: a 3,000-step episode
+
+The user requires the whole episode to fit in 3,000 `env.step` calls; it took
+about 10,500. Work of 2026-11-19, measured with `tools/trace_carry.py` and
+the reference batch. Delivered 4 / 10 (30.4 points) after fix 21–23 and 25
+with fast speeds (2db7f27), 7 / 10 (35.2) at the slower speeds of fix 24
+(897a4b2), 8 / 10 (36.8) after fix 29 (84202b1).
+
+### 21. Mid-maze drops: the base kicked the object across the pads (`solver.py`)
+**Symptom.** Objects were lost in about 3 of 10 trials while the base drove.
+Two caught apple drops: smooth base motion at 3.3 mm per step, drift of the
+object in the gripper growing from about 3 mm to 9–14 mm over 2,000–3,000
+steps, then the grip force falling from 50–60 N to zero in about 3 steps.
+**Cause.** The env's position controller moves each joint 30 % of its
+remaining error per physics substep (5 per step), so the base's velocity in
+a step goes 1, 0.7, 0.49, 0.34, 0.24 of its first-substep value and then
+jumps back: a forward kick at the start of every step (about 66 × v m/s for
+v metres per step). In the old carry pose the closing axis pointed straight
+down (world z component −0.96), so the kick ran across the 24 mm-tall pads
+and the object crept off them. This was most likely also the "ejection at
+high squeeze" of session 2.
+**Fix.**
+- A new carry pose (`carry_joint_targets`): gripper straight up at 1.6 m
+  inside the base footprint (0.289 m), found by an IK search (a random
+  joint-space search found none in 180,000 samples; no gripper-down pose
+  fits, best 0.308 m), so creep ends at the palm.
+- `_plan_tuck` / `_tuck_with_object` move the arm into that pose along a
+  collision-checked path with the object attached (a straight joint-space
+  edge if valid, else RRT-Connect), sharing `_held_object_validity` with the
+  goal reach.
+- `_align_grip` turns the wrist roll so the closing axis lies along the
+  direction of travel (modulo pi), during the hold before the retreat and
+  through the maze, at 0.1 rad per tick. The base waits while the error is
+  above 0.3 rad; below that its speed scales with cos² of the error.
+Evidence is from single traced runs, not rates: with the new pose and no
+alignment the banana slid 38 mm into the palm and was delivered; with
+alignment the apple drifted 1.2–1.6 mm (seed 42) and up to 10 mm (seed 7)
+and was delivered; at 6.7 mm per step the drift stayed constant through the
+maze (6.3 and 9.3 mm), so the drift came from the retreat and the arm swing.
+
+### 22. Grip force only 50 N (`solver.py`, state 3)
+**Cause.** Grip force is linear in how far the finger command sits inside
+the object: 6.6 N per mm, steady (min = max over 20 steps) at every level
+measured on the held apple and soup can. 50 N at the planner's squeeze, 76 N
+at +4 mm, 103 N at +8, 129 N at +12, 182 N at +20, 218–248 N with the fingers
+commanded shut (narrow objects such as the banana reach 125–135 N, because
+the command cannot go below 0).
+**Fix.** `carry_grip_extra` = 0.030: during the state 3 hold the finger
+command is ramped a further 30 mm in, at 0.5 mm per tick. With the 50 N grip
+the apple and soup can were lost during the arm swing at 0.012 rad per tick;
+with the tight grip the same speeds delivered the apple (4,215 steps), soup
+can (4,352) and banana (4,079).
+
+### 23. Reach planner rejected the new carry pose (`solver.py`)
+**Symptom.** Every reach from the fingers-up pose failed with "joint_limit"
+on the start state.
+**Cause.** A joint held exactly at a limit is measured a hair past it.
+**Fix.** `shoulder_lift` is kept at −1.20, off its −1.221 limit, and
+`_held_object_validity` clips the start configuration to the limits.
+
+### 24. Carry was slow and unramped (`solver.py`)
+**Fix.** `_ramped_speed` with `carry_accel` = 0.0005 m per tick² for the
+retreat, the maze and the reach backoff; a step-change start flung the apple
+in the first steps of the retreat at 13.3 mm per step. `carry_speed`,
+`tuck_rate` and `reach_rate` became solver attributes. Rates: `carry_speed`
+0.004 → 0.024 → 0.018 m per tick commanded (the base covers 83 % of it),
+`tuck_rate` and `reach_rate` 0.003 → 0.02 → 0.012 rad per tick (2db7f27,
+then 897a4b2). At 24 mm per tick and 0.02 rad per tick single runs delivered
+at 2,308–2,566 steps, but the batch was 4 / 10: the banana slid 3 → 17 mm
+toward the fingertips in about 15 steps during the arm swing with the base
+still, and the apple slid 19 mm across the pads in the swing and then crept
+to 22.6 mm while driving at 19 mm per step with the closing axis aligned and
+230 N per finger. The slower rates give 7 / 10.
+
+### 25. Slow pick (`custom_libraries/grasp.py`, `solver.py`; ec66857, fc56bf5)
+**Symptom.** The lift completed at step 1,035–1,267.
+**Fix.**
+- `GraspFollower` follows the planned path with a moving target point (0.04
+  rad / 6 mm per step in transit, 0.01 rad / 3 mm in approach and lift,
+  ramped over 8 steps), waiting only at phase ends and path corners. The
+  integral term acts only on the error perpendicular to the path. The
+  fingers open during the transit. The close phase ramps the finger command
+  at 0.5 mm per step to the full squeeze and ends after 12 steps of bilateral
+  contact or when the fingers stall with both touching; it fails early with
+  "Fingers stopped closing without bilateral contact". A one-step contact
+  flicker at the top of the lift is tolerated.
+- State 999 tucks the arm while the object falls and ends once the object
+  has stayed within 3 mm and 0.05 rad over 15 steps (200-step cap), so state
+  0 starts at step 62–160 instead of 200.
+Lift step on the 10 reference trials: 253–364, median 297. The hammer (13)
+now picks for seeds 42 and 7 (lift 13.3–13.8 cm).
+Tried, not kept: lift at 3 mm per step without the ramp (the banana lifted
+13.5 cm, 11.6 mm grasp error); a per-finger opening check (it never
+converged on some grasps, because gravity shifts both fingers about 4.5 mm
+sideways); a 0.2 mm per step for 10 steps stillness test for state 999 (the
+strawberry never met it).
+
+### 26. Self-collision check dominated planning time (`grasp.py`; f5b81f3)
+**Cause.** `GraspPlanner._valid` made one robot-vs-robot closest-point query,
+about 20 ms and 95 % of a check.
+**Fix.** Self-collision is checked pair by pair (304 link pairs), skipping
+pairs whose bounding boxes are apart. Same answer on 400 of 400 random poses
+(52 in collision); 0.9 ms instead of 13 ms per check.
+
+### 27. Per-step printing (`solver.py`; a70a4b7)
+The solver no longer prints its state and every robot contact on each step.
+
+### 28. Reach flipped the gripper over (`solver.py`; 84202b1)
+**Symptom.** Objects were lost in the final arm move (foam brick seed 42 and
+strawberry seed 7 in state 68 at 897a4b2).
+**Cause.** The candidate order tried a centred aim in every orientation
+before an off-centre aim in the current one, so it often chose a pose that
+turned the gripper over again with the object in it.
+**Fix.** Candidates are tried least-gripper-rotation first (orientation outer
+loop, aim inner). Delivered 7 / 10 → 8 / 10.
+
+### 29. `tools/batch.py` snapshots (a71f790, 82c09fd, beec9b4)
+It no longer copies `OUT_DIR` into its own snapshot (an `OUT_DIR` inside the
+repo used to nest without end), leaves `.claude` out, and links `assets/`
+into the snapshot instead of copying 150 MB. Full-repo snapshots filled the
+2.9 GB RAM-backed `/tmp` of the dev machine and caused the earlier memory
+shortage.
+
+### New tool
+`tools/trace_carry.py` (a139817, extended in 61e2151) logs per step the base
+displacement, finger forces, the drift of the object in the gripper frame
+(x toward the fingertips, y along the closing axis, z across the pads) and
+the angle between the closing axis and the base motion, with EVENT lines on
+grip-force jumps. `SOLVER_SET="name=value,..."` overrides solver attributes
+for experiments.
+
+### Tried, not kept in part 2
+- An orientation-controlled swing (rotating the gripper about the axis across
+  the pads, through an IK chain of 12 waypoints from the lift pose to the
+  carry pose): every variant failed on IK or head collisions for the apple
+  and soup can.
+- A gripper-down carry pose: it does not fit the footprint.
+
 ## Known limitations / next steps
 
-- **Objects are still lost during transport in about 3 of 10 trials.** The
-  drops are intermittent. Two traced apple drops show the object creeping
-  in the gripper while the base drives (3 mm to 9–14 mm of drift), then
-  sliding off the 24 mm-tall finger pads; in the carry pose the closing axis
-  points straight down. Runs that delivered drifted 1–6 mm. A fingers-up
-  carry pose is the next thing to try; see handoff.md, Session 3, and
-  `tools/trace_carry.py`.
-- **Planning still fails for some objects.** Sugar box, large marker and potted meat can mostly end with `ik_fail` / `transit_fail`. Candidate ranking and approach direction for tall boxes need work.
-- **Bleach cleanser never leaves state 0**, with no error. Not yet investigated.
-- **Long runs.** A full episode with transport is about 10,300–11,800 steps.
-- **Slow grasp execution** in some trials (lift at step 2,425 and 2,494
-  against the 3,000 limit); see handoff.md, next step 5.
+- **Foam brick is lost in 2 of 2 trials** at 84202b1 (seed 42 in state 67 at
+  step 563, during the arm swing; seed 7 in state 67 at step 1,342,
+  mid-maze). Not traced yet.
+- **Little margin on 3,000 steps.** Apple seed 7 was delivered at 3,028. The
+  maze still takes about 1,950 steps. The arm swing is the fragile part at
+  higher rates (24 mm per tick gave 4 / 10).
+- **Object coverage.** In the user's run on another machine (beec9b4, 15
+  objects, maze seed 42) 5 / 15 were delivered. Master chef can, bowl and
+  plate: "No antipodal grasp candidates found"; mustard bottle and large
+  marker: no plan; banana and hammer: "Timed out during close" (the close
+  phase has been rewritten since and not re-run there); sugar box: lost just
+  after the retreat; bleach cleanser never left state 0; the mug is on the
+  floor. "Object moved; stop and obtain a fresh plan" was seen twice before
+  the grasp (apple, foam brick) and not investigated.
+- **Bleach cleanser** never leaves state 0, with no error. State 999 has
+  changed since; not re-tested.
+- **Rubric questions** for the teaching team: whether "sim steps" means
+  `env.step` calls or physics substeps; the carry-stability points wording.
+- `run.sh` passes `--max-steps 1000` by default; pass `--max-steps`
+  explicitly (3,500 is enough for delivered trials).
+- See handoff.md, Next steps, for the full list. A paper review is in
+  progress in `paper_review/`.
 
 ## Files changed
 
 - `solver.py`: fixes 2, 3, 4, 8, 9 and 10 (session 1), 14 and 15 (session 2),
-  19 and 20 (session 3; also the CPU-time deadline of fix 16).
+  19 and 20 (session 3; also the CPU-time deadline of fix 16), 21–25, 27 and
+  28 (part 2).
 - `custom_libraries/navigate_to_grasp.py`: fixes 1 and 3.
 - `custom_libraries/grasp.py`: fixes 5, 6 and 7 (session 1), 11–13 (session
-  2), 16, 17 and 18 (session 3).
+  2), 16, 17 and 18 (session 3), 25 (`GraspFollower`) and 26 (part 2).
 - `tools/score.py` (new): scores one trial against the rubric.
 - `tools/batch.py` (new): runs `score.py` over objects × seeds in parallel
-  from a frozen copy of the repo.
+  from a frozen copy of the repo; fix 29.
+- `tools/trace_carry.py` (new): per-step carry trace (session 3 and part 2).
