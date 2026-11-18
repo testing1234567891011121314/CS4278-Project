@@ -112,9 +112,27 @@ class Solver:
         self.state = 999
         self.wait = 200
 
+    def _check_holding(self, obs):
+        """While carrying (states 5, 67, 68): fail into state 4 once bilateral
+        finger contact has been gone for 30 ticks, instead of driving on empty
+        and trying to place nothing. Returns True when the object was lost."""
+        follower = getattr(self, "grasp_follower", None)
+        if follower is None:
+            return False
+        self._lost_ticks = 0 if follower._contacts() else getattr(self, "_lost_ticks", 0) + 1
+        if self._lost_ticks < 30:
+            return False
+        self.grasp_error = f"Lost the object in state {self.state} at {np.round(obs['object_pos'], 3).tolist()}"
+        self.lost_in_state = self.state
+        print(self.grasp_error)
+        self.state = 4
+        return True
+
     ## This function is called every time step.
     def get_action(self,env):
         obs = env._get_obs()
+        if self.state in (5, 67, 68) and self._check_holding(obs):
+            return self.action.copy()
 
         collisions = self.detect_collisions()
 
@@ -385,8 +403,12 @@ class Solver:
         1. back the base off along the arrival path (straight, slow);
         2. IK (planner's private torso+arm model) for a gripper pose that puts
            the object -- not the gripper -- at the goal, keeping the object's
-           offset in the gripper frame fixed;
-        3. move the arm there slowly with the fingers still squeezing.
+           offset in the gripper frame fixed, then RRT-Connect from the carry
+           pose to that solution with the object attached, checked against the
+           maze walls. Interpolating straight in joint space from the carry
+           pose swung the gripper sideways into the 1 m-wide corridor walls
+           and knocked the object out;
+        3. follow the path slowly with the fingers still squeezing.
         """
         qpos = np.asarray(obs["qpos"], dtype=float)
         action = self.action.copy()
@@ -397,48 +419,122 @@ class Solver:
             action[:2] = qpos[:2] + step
             if np.linalg.norm(error) < 0.03:
                 action[:2] = qpos[:2]
-                self._reach_target = self._solve_reach(obs)
-                self._reach_phase = "arm" if self._reach_target is not None else "hold"
-                print("Reach IK:", "solved" if self._reach_target is not None else "failed")
+                self._reach_base_hold = qpos[:3].copy()
+                self._reach_attempts = 0
+                self._reach_phase = "plan"
+        elif self._reach_phase == "plan":
+            # Hold still while planning; retry (the IK and RRT are randomised)
+            # a few times before giving up and just holding the object.
+            action[:3] = self._reach_base_hold
+            self._reach_attempts += 1
+            self._reach_path = self._solve_reach(obs)
+            self._reach_index = 0
+            if self._reach_path is not None:
+                self._reach_phase = "arm"
+            elif self._reach_attempts >= 3:
+                self._reach_phase = "hold"
+            print("Reach plan:", "found" if self._reach_path is not None else "failed",
+                  "attempt", self._reach_attempts)
         elif self._reach_phase == "arm":
             idx = self.grasp_planner.motion_indices
-            error = self._reach_target - qpos[idx]
-            action[idx] = qpos[idx] + np.clip(error, -0.003, 0.003)
-            if np.max(np.abs(error)) < 0.01:
-                self._reach_phase = "hold"
-                print("Object placed at goal.")
+            action[:3] = self._reach_base_hold
+            target = self._reach_path[self._reach_index]
+            error = target - qpos[idx]
+            # Common scale keeps the commanded motion on the checked segment.
+            limits = np.r_[0.002, np.full(len(idx) - 1, 0.003)]
+            scale = max(1.0, float(np.max(np.abs(error) / limits)))
+            action[idx] = qpos[idx] + error / scale
+            last = self._reach_index == len(self._reach_path) - 1
+            if np.max(np.abs(error)) < (0.01 if last else 0.03):
+                if last:
+                    self._reach_phase = "hold"
+                    print("Object placed at goal.")
+                else:
+                    self._reach_index += 1
+        elif self._reach_phase == "hold" and getattr(self, "_reach_path", None) is not None:
+            action[self.grasp_planner.motion_indices] = self._reach_path[-1]
         self.action = np.clip(action, self.action_lower_bound, self.action_upper_bound)
         return self.action.copy()
 
-    def _solve_reach(self, obs):
+    def _solve_reach(self, obs, seconds=20.0):
+        """Return a collision-checked torso+arm path to the place pose, or None."""
         import time as _time
         from scipy.spatial.transform import Rotation
-        from custom_libraries.grasp import _ManipulatorIK
+        from custom_libraries.grasp import _ManipulatorIK, RRTConnect, edge_samples
         planner = self.grasp_planner
+        env = self.env
+        client = planner.client
         qpos = np.asarray(obs["qpos"], dtype=float)
-        robot, client = planner.robot, planner.client
-        ee = next(j for j in range(p.getNumJoints(robot, physicsClientId=client))
-                  if p.getJointInfo(robot, j, physicsClientId=client)[12].decode() == "gripper_link")
-        state = p.getLinkState(robot, ee, computeForwardKinematics=True, physicsClientId=client)
+        deadline = _time.monotonic() + seconds
+        state = p.getLinkState(planner.robot, planner.ee, computeForwardKinematics=True,
+                               physicsClientId=client)
         g_pos, g_rot = np.asarray(state[4]), Rotation.from_quat(state[5])
+        object_pose = p.getBasePositionAndOrientation(env.object_id, physicsClientId=client)
+        inv = p.invertTransform(state[4], state[5])
+        attached = p.multiplyTransforms(*inv, *object_pose)
         offset_local = g_rot.inv().apply(np.asarray(obs["object_pos"]) - g_pos)
         goal = np.asarray(obs["goal_pos"], dtype=float)
         idx = planner.motion_indices
+        fingers = qpos[planner.finger_indices]
         lower, upper = planner.lower[idx].copy(), planner.upper[idx].copy()
-        seed = qpos[idx].copy()
-        lower[planner.wrap] = np.maximum(lower[planner.wrap], seed[planner.wrap] - np.pi)
-        upper[planner.wrap] = np.minimum(upper[planner.wrap], seed[planner.wrap] + np.pi)
+        start = qpos[idx].copy()
+        start[0] = np.clip(start[0], lower[0], upper[0])
+        lower[planner.wrap] = np.maximum(lower[planner.wrap], start[planner.wrap] - np.pi)
+        upper[planner.wrap] = np.minimum(upper[planner.wrap], start[planner.wrap] + np.pi)
+        # Collision world: everything but the robot. The goal marker has no
+        # collision response but getClosestPoints still reports it.
+        planner._configure_measured_limits(qpos)
+        planner.obstacles = [
+            b for b in (p.getBodyUniqueId(i, physicsClientId=client)
+                        for i in range(p.getNumBodies(physicsClientId=client)))
+            if b not in (planner.robot, getattr(env, "goal_marker_id", None))
+        ]
+        planner.support_contacts = {}
+        scale = planner.motion_scale
+
+        def valid(arm):
+            return planner._valid(planner._full(qpos, arm, fingers), touch=True,
+                                  attached=attached, deadline=deadline)
+
         ik = _ManipulatorIK(planner, qpos)
         try:
-            # Current gripper orientation first, then level/forward variants.
-            candidates = [g_rot] + [Rotation.from_euler("xyz", [r, 0, y])
-                                    for y in (0.0, 0.5, -0.5) for r in (0.0, np.pi/2, -np.pi/2)]
-            for rot in candidates:
-                target = goal - rot.apply(offset_local)
-                q = ik.solve(target, rot.as_quat(), seed, lower, upper,
-                             _time.monotonic() + 2.0, restarts=12)
-                if q is not None:
-                    return q
+            with planner._snapshot():
+                if not valid(start):
+                    print("Reach: start state invalid", planner._last_invalid)
+                # Current gripper orientation first, then level/forward variants.
+                rotations = [g_rot] + [Rotation.from_euler("xyz", [r, 0, y])
+                                       for y in (0.0, 0.5, -0.5)
+                                       for r in (0.0, np.pi/2, -np.pi/2)]
+                # The task only needs the object within 10 cm of the goal, so
+                # aim at the centre first, then at points 5 cm away from it.
+                aims = [np.zeros(3)] + [0.05 * np.asarray(d, float) for d in
+                                        ((-1, 0, 0), (0, 0, 1), (0, 1, 0), (0, -1, 0), (0, 0, -1))]
+                candidates = [(rot, aim) for aim in aims for rot in rotations]
+                for rot, aim in candidates:
+                    if _time.monotonic() >= deadline:
+                        break
+                    target = goal + aim - rot.apply(offset_local)
+                    q = ik.solve(target, rot.as_quat(), start, lower, upper,
+                                 min(deadline, _time.monotonic() + 2.0), restarts=12)
+                    if q is None:
+                        print("Reach: IK failed for orientation", np.round(rot.as_euler("xyz"), 2))
+                        continue
+                    if not valid(q):
+                        print("Reach: goal pose invalid", planner._last_invalid)
+                        continue
+                    if all(valid(m) for m in edge_samples(start, q, planner.motion_resolution)):
+                        return np.array([q])
+                    rrt = RRTConnect(lower / scale, upper / scale,
+                                     lambda x: valid(x * scale),
+                                     resolution=float(np.min(planner.motion_resolution / scale)),
+                                     step_size=planner.config.rrt_step,
+                                     max_iterations=planner.config.rrt_iterations,
+                                     rng=planner.rng)
+                    path = rrt.plan(start / scale, q / scale,
+                                    deadline=min(deadline, _time.monotonic() + 6.0))
+                    if path is not None:
+                        return np.asarray(path)[1:] * scale
+                    print("Reach: RRT found no path", planner._last_invalid)
         finally:
             ik.close()
         return None
