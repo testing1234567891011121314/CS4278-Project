@@ -5,8 +5,9 @@ Usage: python tools/trace_carry.py PROJECT_DIR OBJ SEED MAX_STEPS OUT.csv
 Writes one CSV row per env.step while the object is carried: step, state,
 navigator status, reach phase, base position and its per-step displacement
 (measured and commanded), largest arm-joint velocity, finger forces, bilateral
-contact, object drift in the gripper frame, and contacts between the object
-and anything but the robot. Prints EVENT lines when the grip force on either
+contact, object drift in the gripper frame (norm, then x toward the fingertips, y along
+the closing axis, z across the pads), contacts between the object and anything
+but the robot, and the angle between the closing axis and the base's motion. Prints EVENT lines when the grip force on either
 finger changes by more than 20 % within 5 steps, and a final RESULT line.
 """
 import contextlib, json, os, sys, time
@@ -24,8 +25,13 @@ with quiet:
     env.reset()
     s = Solver(env)
 pl, cid = s.grasp_planner, env.pb_physics_client
+# Experiments: SOLVER_SET="carry_speed=0.008,tuck_rate=0.006" overrides solver attributes.
+for item in filter(None, os.environ.get("SOLVER_SET", "").split(",")):
+    key, value = item.split("=")
+    assert hasattr(s, key), key
+    setattr(s, key, type(getattr(s, key))(float(value)))
 f = open(out, "w")
-f.write("step,state,nav,phase,bx,by,dbase_mm,dcmd_mm,arm_qvel,f0,f1,bil,drift_mm,other\n")
+f.write("step,state,nav,phase,bx,by,dbase_mm,dcmd_mm,arm_qvel,f0,f1,bil,drift_mm,other,dx_mm,dy_mm,dz_mm,align_deg\n")
 ref = prev_q = None
 forces = []
 lost = 0
@@ -45,12 +51,20 @@ for t in range(1, steps + 1):
         st = p.getLinkState(env.robot_id, pl.ee, computeForwardKinematics=True, physicsClientId=cid)
         off = Rotation.from_quat(st[5]).inv().apply(np.asarray(obs["object_pos"]) - np.asarray(st[4]))
         ref = off if ref is None else ref
+        # Angle between the closing axis (horizontal part) and the base's motion, 0-90 deg.
+        closing = Rotation.from_quat(st[5]).as_matrix()[:2, 1]
+        move = q[:2] - prev_q[:2] if prev_q is not None else np.zeros(2)
+        align = -1.0
+        if np.linalg.norm(move) > 1e-5 and np.linalg.norm(closing) > 0.3:
+            c = abs(float(closing @ move)) / (np.linalg.norm(closing) * np.linalg.norm(move))
+            align = float(np.degrees(np.arccos(min(1.0, c))))
         others = sorted({c[2] for c in p.getContactPoints(bodyA=env.object_id, physicsClientId=cid) if c[2] != env.robot_id})
         dbase = 0.0 if prev_q is None else 1000 * float(np.linalg.norm(q[:2] - prev_q[:2]))
         dcmd = 1000 * float(np.linalg.norm(np.asarray(a)[:2] - (q[:2] if prev_q is None else prev_q[:2])))
         f.write(f"{t},{s.state},{s.curved_nav.status},{getattr(s, '_reach_phase', '')},{q[0]-2:.3f},{q[1]:.3f},"
                 f"{dbase:.2f},{dcmd:.2f},{np.max(np.abs(obs['qvel'][3:13])):.3f},{f0:.1f},{f1:.1f},{int(bil)},"
-                f"{1000*np.linalg.norm(off-ref):.1f},{'|'.join(map(str, others))}\n")
+                f"{1000*np.linalg.norm(off-ref):.1f},{'|'.join(map(str, others))},"
+                f"{1000*(off-ref)[0]:.1f},{1000*(off-ref)[1]:.1f},{1000*(off-ref)[2]:.1f},{align:.0f}\n")
         forces.append((f0, f1))
         if len(forces) > 5:
             old = forces[-6]

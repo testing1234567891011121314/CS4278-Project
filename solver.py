@@ -41,6 +41,15 @@ class Solver:
         self.hold_before_transport = 60   # ticks holding the lifted object before moving
         self.retreat_distance = 1.0       # metres backed away so the held object clears the table before tucking
         self.carry_speed = 0.004          # max base displacement per tick while holding the object
+        # Extra finger closing (metres per finger) commanded once the object is
+        # lifted. Grip force is linear in how far the finger command sits inside
+        # the object: measured 6.6 N per mm, steady, 50 N at the grasp's own
+        # squeeze and ~250 N with the fingers commanded shut. Friction, and so
+        # every speed the hold tolerates, scales with it.
+        self.carry_grip_extra = 0.030
+        self.carry_accel = 0.0005         # change of that displacement per tick (speed ramp)
+        self.tuck_rate = 0.003            # rad per tick when moving the arm into the carry pose with the object
+        self.reach_rate = 0.003           # rad per tick for the final arm move to the goal
         self.reach_backoff_cells = 7      # cells to back off along the path before reaching to the goal
 
         # Travel targets retained; navigation rebuilds the map after preparation.
@@ -56,22 +65,26 @@ class Solver:
             "wrist_flex_joint": 1.0,
             "wrist_roll_joint": 0.0,
         }
-        # Pose used while carrying the object through the maze, found by a
-        # search over joint space: every link stays inside the base footprint
-        # (<= 0.29 m forward/sideways) and the gripper is held up at ~1.5 m,
-        # >= 0.2 m clear of the body. The drive-to-table pose above reaches
-        # 0.84 m forward, which seals the maze bottleneck once the fixed-yaw
-        # footprint is inflated; the standard Fetch tuck fits but swings the
-        # gripper down beside the base and knocks the object out.
+        # Pose used while carrying the object through the maze, found by an IK
+        # search over gripper positions above the base (tools/ are not needed
+        # to reproduce it: any pose meeting these conditions will do):
+        # - every link stays inside the base footprint (<= 0.289 m), so the
+        #   fixed-yaw wall inflation does not seal the maze bottleneck (the
+        #   drive-to-table pose reaches 0.84 m forward);
+        # - the gripper points straight up at 1.6 m with the palm under the
+        #   object. The object creeps in the fingers while the base drives; in
+        #   the previous carry pose the closing axis pointed down and the
+        #   object slid sideways off the 24 mm-tall pads after 10-14 mm. Here
+        #   gravity takes any creep into the palm instead.
         self.carry_joint_targets = {
-            "torso_lift_joint": 0.23,
-            "shoulder_pan_joint": -0.59,
-            "shoulder_lift_joint": -1.21,
-            "upperarm_roll_joint": -2.59,
-            "elbow_flex_joint": 1.50,
-            "forearm_roll_joint": -1.32,
-            "wrist_flex_joint": 1.15,
-            "wrist_roll_joint": -0.10,
+            "torso_lift_joint": 0.04,
+            "shoulder_pan_joint": 0.924,
+            "shoulder_lift_joint": -1.20,
+            "upperarm_roll_joint": -0.55,
+            "elbow_flex_joint": -1.418,
+            "forearm_roll_joint": -0.2,
+            "wrist_flex_joint": 1.125,
+            "wrist_roll_joint": 1.257,
         }
 
         if travel_joint_targets is not None:
@@ -87,6 +100,9 @@ class Solver:
             [names[name] for name in self.travel_joint_targets], dtype=int
         )
         self._travel_torso_index = names["torso_lift_joint"]
+        self._wrist_roll_index = names["wrist_roll_joint"]
+        self.align_grip_to_travel = True   # turn the fingers to face the direction of travel while carrying
+        self.grip_align_rate = 0.1         # rad per tick
         # Validate the configured travel targets.
         self._travel_target(self.action)
 
@@ -274,15 +290,27 @@ class Solver:
         if self.state == 3:
             # Hold the lifted grasp briefly (confirms the object is secure), then
             # back away from the table before tucking the arm for travel.
+            self._hold_ticks = getattr(self, "_hold_ticks", 0) + 1
             if hasattr(self, "grasp_follower"):
                 self.action = self.grasp_follower.hold.copy()
-                self._finger_hold = self.grasp_follower.hold[13:15].copy()
-            self._hold_ticks = getattr(self, "_hold_ticks", 0) + 1
-            if self._hold_ticks >= self.hold_before_transport:
-                qpos = np.asarray(obs["qpos"], dtype=float)
-                base_xy = np.array([qpos[0] - 2.0, qpos[1]])
+                # Tighten the grip gradually over the hold (0.5 mm per tick).
+                extra = min(self.carry_grip_extra, 0.0005 * self._hold_ticks)
+                self._finger_hold = np.maximum(0.0, self.grasp_follower.hold[13:15] - extra)
+                self.action[13:15] = self._finger_hold
+            qpos = np.asarray(obs["qpos"], dtype=float)
+            base_xy = np.array([qpos[0] - 2.0, qpos[1]])
+            if getattr(self, "_retreat_away", None) is None:
                 away = base_xy - np.asarray(obs["object_pos"])[:2]
-                away /= max(np.linalg.norm(away), 1e-6)
+                self._retreat_away = away / max(np.linalg.norm(away), 1e-6)
+            away = self._retreat_away
+            # Turn the fingers to face the retreat direction before the base moves.
+            aligned = 1.0
+            if self.align_grip_to_travel:
+                i = self._wrist_roll_index
+                self.action[i] = getattr(self, "_hold_roll", self.action[i])
+                aligned = self._align_grip(self.action, away)
+                self._hold_roll = self.action[i]
+            if self._hold_ticks >= self.hold_before_transport and (aligned > 0.995 or self._hold_ticks > 200):
                 # Retreat target in qpos coordinates (base x = qpos[0] - 2).
                 self._retreat_goal = qpos[:2] + self.retreat_distance * away
                 self.state = 5
@@ -293,7 +321,7 @@ class Solver:
             # pose, so the tuck motion cannot sweep the object into the table.
             qpos = np.asarray(obs["qpos"], dtype=float)
             error = self._retreat_goal - qpos[:2]
-            step = error * min(1.0, self.carry_speed / max(np.linalg.norm(error), 1e-9))
+            step = error * min(1.0, self._ramped_speed(np.linalg.norm(error)) / max(np.linalg.norm(error), 1e-9))
             self.action[:2] = qpos[:2] + step
             if np.linalg.norm(error) < 0.03:
                 self.action[:2] = qpos[:2]
@@ -305,7 +333,7 @@ class Solver:
                 # the drive to the table.
                 self._travel_pose_complete = False
                 self.travel_joint_targets.update(self.carry_joint_targets)
-                self._tuck_rate = 0.003   # slow tuck so the held object is not flung
+                self._tuck_rate = self.tuck_rate   # slow tuck so the held object is not flung
                 # The parking map leaves the tabletop out so the base can tuck
                 # under it; for transport the whole table must be an obstacle.
                 self.create_map(env, False)
@@ -375,13 +403,56 @@ class Solver:
                 qpos = np.asarray(obs["qpos"], dtype=float)
                 delta = action[:2] - qpos[:2]
                 norm = np.linalg.norm(delta)
-                if norm > self.carry_speed:
-                    action[:2] = qpos[:2] + delta * (self.carry_speed / norm)
+                factor = 1.0
+                if self.align_grip_to_travel and getattr(self, "_travel_pose_complete", False) and norm > 1e-6:
+                    factor = self._align_grip(action, delta / norm)
+                speed = self._ramped_speed(norm, factor)
+                if norm > speed:
+                    action[:2] = qpos[:2] + delta * (speed / norm)
                 # Keep squeezing the object; travel poses and navigation steps
                 # otherwise command the fingers to their measured (unsqueezed) width.
                 action[13:15] = finger_hold
                 self.action = action.copy()
             return action
+
+    def _ramped_speed(self, remaining, factor=1.0):
+        """Base displacement for this tick while carrying: at most
+        carry_speed * factor, changing by at most carry_accel per tick, and
+        low enough to slow to a stop within `remaining` metres."""
+        limit = min(self.carry_speed * factor, np.sqrt(2.0 * self.carry_accel * max(remaining, 0.0)) + self.carry_accel)
+        previous = getattr(self, "_carry_v", 0.0)
+        # The ramp only limits speeding up; slowing down follows `limit`,
+        # which already falls off smoothly towards a stop.
+        self._carry_v = float(min(limit, previous + self.carry_accel))
+        return self._carry_v
+
+    def _align_grip(self, action, direction):
+        """Turn the wrist roll so the gripper's closing axis lies along the
+        direction of travel, and return a speed factor (1 when aligned).
+
+        The base controller kicks forward at the start of every step. With the
+        closing axis along the travel direction the fingers take that kick as
+        a normal force; across it, the object is held by friction alone and
+        creeps along the pads. In the carry pose the gripper points straight
+        up, so the wrist roll turns the closing axis about the vertical
+        without moving anything else."""
+        planner = self.grasp_planner
+        state = p.getLinkState(planner.robot, planner.ee, computeForwardKinematics=True,
+                               physicsClientId=planner.client)
+        rot = np.asarray(p.getMatrixFromQuaternion(state[5])).reshape(3, 3)
+        closing = rot[:2, 1]
+        if np.linalg.norm(closing) < 0.3:
+            return 1.0   # closing axis nearly vertical: the roll cannot align it
+        heading = np.arctan2(closing[1], closing[0])
+        # The fingers are symmetric: align modulo pi, taking the short way.
+        error = (np.arctan2(direction[1], direction[0]) - heading + np.pi / 2) % np.pi - np.pi / 2
+        sign = 1.0 if rot[2, 0] >= 0 else -1.0   # roll axis (gripper x) up or down
+        i = self._wrist_roll_index
+        action[i] = action[i] + sign * float(np.clip(error, -self.grip_align_rate, self.grip_align_rate))
+        # Wait for the fingers to come round before moving (start of the
+        # route, sharp turns): a kick across the pads is what slides the
+        # object out. Small errors only slow the base a little.
+        return 0.0 if abs(error) > 0.3 else float(np.cos(error) ** 2)
 
     def reach_goal(self, obs):
         """State 68: put the held object on the goal sphere.
@@ -401,7 +472,7 @@ class Solver:
         action[13:15] = self._finger_hold
         if self._reach_phase == "backoff":
             error = self._reach_base_goal - qpos[:2]
-            step = error * min(1.0, self.carry_speed / max(np.linalg.norm(error), 1e-9))
+            step = error * min(1.0, self._ramped_speed(np.linalg.norm(error)) / max(np.linalg.norm(error), 1e-9))
             action[:2] = qpos[:2] + step
             if np.linalg.norm(error) < 0.03:
                 action[:2] = qpos[:2]
@@ -427,7 +498,7 @@ class Solver:
             target = self._reach_path[self._reach_index]
             error = target - qpos[idx]
             # Common scale keeps the commanded motion on the checked segment.
-            limits = np.r_[0.002, np.full(len(idx) - 1, 0.003)]
+            limits = np.r_[0.002, np.full(len(idx) - 1, self.reach_rate)]
             scale = max(1.0, float(np.max(np.abs(error) / limits)))
             action[idx] = qpos[idx] + error / scale
             last = self._reach_index == len(self._reach_path) - 1
@@ -439,6 +510,139 @@ class Solver:
                     self._reach_index += 1
         elif self._reach_phase == "hold" and getattr(self, "_reach_path", None) is not None:
             action[self.grasp_planner.motion_indices] = self._reach_path[-1]
+        self.action = np.clip(action, self.action_lower_bound, self.action_upper_bound)
+        return self.action.copy()
+
+    def _held_object_validity(self, obs, attached, deadline):
+        """Collision checking for torso+arm motion with the object in hand.
+
+        Returns (valid, start, lower, upper): valid(arm) checks one torso+arm
+        configuration with the object at `attached` (its pose in the gripper
+        frame); start is the measured configuration and lower/upper the joint
+        bounds, with continuous joints limited to +/- pi around the start.
+        Call valid() inside planner._snapshot() only.
+        """
+        planner = self.grasp_planner
+        env = self.env
+        client = planner.client
+        qpos = np.asarray(obs["qpos"], dtype=float)
+        idx = planner.motion_indices
+        fingers = qpos[planner.finger_indices]
+        lower, upper = planner.lower[idx].copy(), planner.upper[idx].copy()
+        # A joint held at its limit is measured a hair past it; plan from the
+        # limit, or every configuration fails the joint-limit test.
+        start = np.clip(qpos[idx], lower, upper)
+        lower[planner.wrap] = np.maximum(lower[planner.wrap], start[planner.wrap] - np.pi)
+        upper[planner.wrap] = np.minimum(upper[planner.wrap], start[planner.wrap] + np.pi)
+        # Collision world: everything but the robot and the held object. The
+        # goal marker has no collision response but getClosestPoints still
+        # reports it. The held object moves rigidly with the gripper here, so
+        # its distance to the palm and fingers cannot change along any path;
+        # checking it against them rejects every configuration, the start
+        # included, once the object has crept to within collision_margin of
+        # the palm (soup can, top-down grasp: 0.3 mm on seed 7). The object is
+        # still checked against the walls (_valid's payload check) and against
+        # the rest of the robot (below).
+        planner._configure_measured_limits(qpos)
+        planner.obstacles = [
+            b for b in (p.getBodyUniqueId(i, physicsClientId=client)
+                        for i in range(p.getNumBodies(physicsClientId=client)))
+            if b not in (planner.robot, env.object_id, getattr(env, "goal_marker_id", None))
+        ]
+        planner.support_contacts = {}
+        gripper_links = {planner.ee, *planner.finger_ids}
+
+        def valid(arm):
+            if not planner._valid(planner._full(qpos, arm, fingers), touch=True,
+                                  attached=attached, deadline=deadline):
+                return False
+            # _valid has placed the object at its attached pose.
+            for contact in p.getClosestPoints(planner.robot, env.object_id,
+                                              planner.config.collision_margin,
+                                              physicsClientId=client):
+                if contact[3] not in gripper_links:
+                    planner._last_invalid = {
+                        "reason": "payload_robot_collision",
+                        "robot_link_name": planner.link_names.get(contact[3], contact[3]),
+                        "distance": float(contact[8]),
+                    }
+                    return False
+            return True
+
+        return valid, start, lower, upper
+
+    def _plan_tuck(self, obs, goal, seconds=30.0):
+        """Collision-checked torso+arm path from the measured pose to `goal`
+        (motion_indices order) with the object in hand, or None."""
+        from custom_libraries.grasp import RRTConnect, edge_samples, planning_clock
+        planner = self.grasp_planner
+        client = planner.client
+        deadline = planning_clock() + seconds
+        state = p.getLinkState(planner.robot, planner.ee, computeForwardKinematics=True,
+                               physicsClientId=client)
+        object_pose = p.getBasePositionAndOrientation(self.env.object_id, physicsClientId=client)
+        attached = p.multiplyTransforms(*p.invertTransform(state[4], state[5]), *object_pose)
+        valid, start, lower, upper = self._held_object_validity(obs, attached, deadline)
+        goal = np.asarray(goal, dtype=float).copy()
+        wrap = planner.wrap
+        goal[wrap] = start[wrap] + (goal[wrap] - start[wrap] + np.pi) % (2 * np.pi) - np.pi
+        scale = planner.motion_scale
+        with planner._snapshot():
+            if not valid(start):
+                print("Tuck: start state invalid", planner._last_invalid)
+                return None
+            if not valid(goal):
+                print("Tuck: carry pose invalid", planner._last_invalid)
+                return None
+            if all(valid(m) for m in edge_samples(start, goal, planner.motion_resolution)):
+                return np.array([goal])
+            rrt = RRTConnect(lower / scale, upper / scale, lambda x: valid(x * scale),
+                             resolution=float(np.min(planner.motion_resolution / scale)),
+                             step_size=planner.config.rrt_step,
+                             max_iterations=planner.config.rrt_iterations, rng=planner.rng)
+            path = rrt.plan(start / scale, goal / scale, deadline=deadline)
+            if path is None:
+                print("Tuck: RRT found no path", planner._last_invalid)
+                return None
+            return np.asarray(path)[1:] * scale
+
+    def _tuck_with_object(self, obs):
+        """Move the arm into the carry pose with the object in hand, along a
+        collision-checked path (the object is swung from a top-down grasp to
+        fingers-up). Falls back to a straight joint-space move if no path is
+        found. Sets moving_pose_ready when the carry pose is reached."""
+        planner = self.grasp_planner
+        idx = planner.motion_indices
+        qpos = np.asarray(obs["qpos"], dtype=float)
+        if getattr(self, "_tuck_path", None) is None:
+            names = [planner.action_names[i] for i in idx]
+            goal = np.array([self.travel_joint_targets[n] for n in names])
+            path = self._plan_tuck(obs, goal)
+            if path is None:
+                wrap = planner.wrap
+                goal[wrap] = qpos[idx][wrap] + (goal[wrap] - qpos[idx][wrap] + np.pi) % (2 * np.pi) - np.pi
+                path = np.array([goal])
+            print("Tuck path:", len(path), "waypoints")
+            self._tuck_path, self._tuck_index = path, 0
+            self._tuck_base = qpos[:3].copy()
+        action = self.action.copy()
+        action[:3] = self._tuck_base
+        action[13:15] = self._finger_hold
+        target = self._tuck_path[self._tuck_index]
+        error = target - qpos[idx]
+        # Common scale keeps the commanded motion on the checked segment.
+        limits = np.r_[0.002, np.full(len(idx) - 1, self._tuck_rate)]
+        scale = max(1.0, float(np.max(np.abs(error) / limits)))
+        action[idx] = qpos[idx] + error / scale
+        last = self._tuck_index == len(self._tuck_path) - 1
+        self.moving_pose_ready = False
+        if np.max(np.abs(error)) < 0.03:
+            if not last:
+                self._tuck_index += 1
+            elif np.max(np.abs(np.asarray(obs["qvel"])[idx])) < 0.05:
+                action[idx] = target
+                self.moving_pose_ready = True
+                self._tuck_path = None
         self.action = np.clip(action, self.action_lower_bound, self.action_upper_bound)
         return self.action.copy()
 
@@ -463,48 +667,8 @@ class Solver:
         attached = p.multiplyTransforms(*inv, *object_pose)
         offset_local = g_rot.inv().apply(np.asarray(obs["object_pos"]) - g_pos)
         goal = np.asarray(obs["goal_pos"], dtype=float)
-        idx = planner.motion_indices
-        fingers = qpos[planner.finger_indices]
-        lower, upper = planner.lower[idx].copy(), planner.upper[idx].copy()
-        start = qpos[idx].copy()
-        start[0] = np.clip(start[0], lower[0], upper[0])
-        lower[planner.wrap] = np.maximum(lower[planner.wrap], start[planner.wrap] - np.pi)
-        upper[planner.wrap] = np.minimum(upper[planner.wrap], start[planner.wrap] + np.pi)
-        # Collision world: everything but the robot and the held object. The
-        # goal marker has no collision response but getClosestPoints still
-        # reports it. The held object moves rigidly with the gripper here, so
-        # its distance to the palm and fingers cannot change along any path;
-        # checking it against them rejects every configuration, the start
-        # included, once the object has crept to within collision_margin of
-        # the palm (soup can, top-down grasp: 0.3 mm on seed 7). The object is
-        # still checked against the walls (_valid's payload check) and against
-        # the rest of the robot (below).
-        planner._configure_measured_limits(qpos)
-        planner.obstacles = [
-            b for b in (p.getBodyUniqueId(i, physicsClientId=client)
-                        for i in range(p.getNumBodies(physicsClientId=client)))
-            if b not in (planner.robot, env.object_id, getattr(env, "goal_marker_id", None))
-        ]
-        planner.support_contacts = {}
+        valid, start, lower, upper = self._held_object_validity(obs, attached, deadline)
         scale = planner.motion_scale
-        gripper_links = {planner.ee, *planner.finger_ids}
-
-        def valid(arm):
-            if not planner._valid(planner._full(qpos, arm, fingers), touch=True,
-                                  attached=attached, deadline=deadline):
-                return False
-            # _valid has placed the object at its attached pose.
-            for contact in p.getClosestPoints(planner.robot, env.object_id,
-                                              planner.config.collision_margin,
-                                              physicsClientId=client):
-                if contact[3] not in gripper_links:
-                    planner._last_invalid = {
-                        "reason": "payload_robot_collision",
-                        "robot_link_name": planner.link_names.get(contact[3], contact[3]),
-                        "distance": float(contact[8]),
-                    }
-                    return False
-            return True
 
         ik = _ManipulatorIK(planner, qpos)
         try:
@@ -659,6 +823,8 @@ class Solver:
 
     def moving_pose(self, obs):
         """Original arm interpolation/readiness, using the configured tuck pose."""
+        if hasattr(self, "_tuck_rate") and getattr(self, "_finger_hold", None) is not None:
+            return self._tuck_with_object(obs)
         qpos = np.asarray(obs["qpos"], dtype=float)
         if not hasattr(self, "_moving_pose_target"):
             self._moving_pose_target = self._travel_target(qpos)
