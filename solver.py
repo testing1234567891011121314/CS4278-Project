@@ -134,11 +134,6 @@ class Solver:
         if self.state in (5, 67, 68) and self._check_holding(obs):
             return self.action.copy()
 
-        collisions = self.detect_collisions()
-
-        for contact in collisions:
-            print("CONTACT/COLLISION:", contact)
-        
         if self.state == 999:    ## wait for object to spawn
             # The object spawns at z=5 and needs ~200 steps to land on the table;
             # planning against the falling cloud produced unreachable-airborne goals.
@@ -166,10 +161,6 @@ class Solver:
                 return self.action.copy()
 
             decision_state = decision["state"]
-            print(
-                "solver state:", self.state,
-                "decision:", decision_state,
-            )
 
             if decision_state == "PREPARE_GRASP":
                 # Execute preparation and keep updating the navigation helper.
@@ -222,7 +213,6 @@ class Solver:
             )
         
         if self.state == 1:
-            print("solver state:", self.state)
             from pprint import pprint
             import time
 
@@ -271,7 +261,6 @@ class Solver:
             return self.action.copy()
 
         if self.state == 2:
-            print("solver state:", self.state)
             self.action = self.grasp_follower.step(obs)
             if self.grasp_follower.status == "done":
                 self.state = 3
@@ -283,7 +272,6 @@ class Solver:
             return self.action.copy()
 
         if self.state == 3:
-            print("solver state:", self.state)
             # Hold the lifted grasp briefly (confirms the object is secure), then
             # back away from the table before tucking the arm for travel.
             if hasattr(self, "grasp_follower"):
@@ -327,7 +315,6 @@ class Solver:
             return self.action.copy()
         # During grasp debugging, retain the failure hold target.
         if self.state == 4:
-            print("solver state:", self.state)
             # env.step() needs a (15,) target array; None crashed the episode.
             return self.action.copy()
         # if self.state == 4:
@@ -369,7 +356,6 @@ class Solver:
             return self.reach_goal(obs)
 
         if self.state == 67:
-            print("EXIT 67")
             goal = self.convert_to_grid(obs["goal_pos"][:2])
             action = self.navigate(env, goal)
             if (getattr(self, "_finger_hold", None) is not None
