@@ -16,6 +16,14 @@ The default pad dimensions/gap match the supplied fetch.urdf, including its
 modified box fingers. Gripper +X is approach; +Y is the closing axis. Positions,
 point clouds and normals are world-frame; quaternions are xyzw. Collision
 checking is discretized, not a continuous/dynamic safety guarantee.
+
+Robot planning requires the sibling SRDF (fetch.srdf by default). Pass
+robot_srdf_path explicitly if it lives elsewhere. Its named self-collision
+exclusions are validated against the URDF and live robot before use. Additional
+disabled_self_pairs augment those exclusions. require_srdf=False is an explicit
+opt-out for a deliberately SRDF-free setup; geometric sampling needs no SRDF.
+plan() validates the measured start once before sampling or IK, and reports
+named collisions in last_stats['start_state_error'] if that start is invalid.
 """
 from __future__ import annotations
 
@@ -24,6 +32,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import tempfile
 import time
+import warnings
 import xml.etree.ElementTree as ET
 
 import numpy as np
@@ -94,6 +103,47 @@ class GraspPlan:
 
 class PlanningError(RuntimeError):
     pass
+
+
+def _validated_link_pairs(pairs, link_ids, *, source):
+    """Validate exact link names and canonicalise unordered pairs."""
+    result = set()
+    for pair in pairs:
+        if isinstance(pair, (str, bytes)):
+            raise ValueError(f'{source}: expected a pair of link names, got {pair!r}.')
+        try:
+            names = tuple(pair)
+        except TypeError as exc:
+            raise ValueError(f'{source}: expected a pair of link names.') from exc
+        if len(names) != 2 or any(not isinstance(n, str) or not n.strip() for n in names):
+            raise ValueError(f'{source}: each exclusion needs two nonempty link names.')
+        if names[0] == names[1]:
+            raise ValueError(f'{source}: cannot exclude a link against itself: {names[0]!r}.')
+        unknown = [name for name in names if name not in link_ids]
+        if unknown:
+            raise ValueError(f'{source}: unknown robot link(s): {", ".join(unknown)}.')
+        result.add(tuple(sorted(names)))
+    return result
+
+
+def _read_srdf_pairs(path, urdf_path, link_ids):
+    """Read only explicit disable_collisions entries; never infer extra pairs."""
+    try:
+        root = ET.parse(path).getroot()
+    except ET.ParseError as exc:
+        raise ValueError(f'Malformed SRDF {path}: {exc}') from exc
+    urdf = ET.parse(urdf_path).getroot()
+    robot_name = urdf.get('name')
+    if root.tag != 'robot' or not robot_name or root.get('name') != robot_name:
+        raise ValueError(
+            f'SRDF {path} must have <robot name={robot_name!r}> matching the URDF; '
+            f'got <{root.tag} name={root.get("name")!r}>.')
+    pairs = [(entry.get('link1'), entry.get('link2'))
+             for entry in root.findall('disable_collisions')]
+    urdf_links = {link.get('name') for link in urdf.findall('link')}
+    # An entry must exist in both the source model and the loaded simulator.
+    _validated_link_pairs(pairs, urdf_links, source=f'SRDF {path} / URDF')
+    return _validated_link_pairs(pairs, link_ids, source=f'SRDF {path} / live robot')
 
 
 def edge_samples(a, b, resolution):
@@ -287,7 +337,7 @@ class _ManipulatorIK:
 class GraspPlanner:
     def __init__(self, env=None, *, physics_client_id=None,
                  robot_urdf_path='assets/fetch/fetch.urdf', config=None,
-                 disabled_self_pairs=()):
+                 disabled_self_pairs=(), robot_srdf_path=None, require_srdf=True):
         self.config = config or GraspConfig()
         cfg = self.config
         torso_settings = np.array([
@@ -365,7 +415,28 @@ class GraspPlanner:
             changed = len(self.moving_links) != before
         link_names = {v[12].decode(): j for j, v in self.info.items()}
         link_names[p.getBodyInfo(self.robot, physicsClientId=self.client)[0].decode()] = -1
-        self.disabled_pairs = {frozenset((link_names[a], link_names[b])) for a, b in disabled_self_pairs}
+        if len(link_names) != len(self.info) + 1:
+            raise ValueError('Live robot link names must be unique for SRDF mapping.')
+        self.link_names = {j: name for name, j in link_names.items()}
+        self.srdf_path = (Path(robot_srdf_path).expanduser().resolve()
+                          if robot_srdf_path is not None else self.urdf_path.with_suffix('.srdf'))
+        srdf_pairs = set()
+        if self.srdf_path.is_file():
+            srdf_pairs = _read_srdf_pairs(self.srdf_path, self.urdf_path, link_names)
+        elif robot_srdf_path is not None or require_srdf:
+            raise FileNotFoundError(
+                f'Robot SRDF not found: {self.srdf_path}. Put the matching SRDF beside '
+                'the URDF or pass robot_srdf_path. For an intentionally SRDF-free '
+                'model only, use require_srdf=False without an explicit SRDF path.')
+        else:
+            warnings.warn(
+                f'No SRDF loaded ({self.srdf_path}); using adjacency and explicit '
+                'disabled_self_pairs only.', RuntimeWarning, stacklevel=2)
+            self.srdf_path = None
+        explicit_pairs = _validated_link_pairs(
+            disabled_self_pairs, link_names, source='disabled_self_pairs')
+        self.disabled_pairs = {frozenset((link_names[a], link_names[b]))
+                               for a, b in srdf_pairs | explicit_pairs}
         # Treat a fixed cluster as one body; ignore direct joint neighbours only.
         def cluster(j):
             while j >= 0 and self.info[j][2] == p.JOINT_FIXED:
@@ -382,6 +453,13 @@ class GraspPlanner:
                         and frozenset((clusters[a], clusters[b])) not in adjacent
                         and pair not in self.disabled_pairs):
                     self.self_pairs.add(pair)
+        self.collision_policy = {
+            'srdf_path': str(self.srdf_path) if self.srdf_path is not None else None,
+            'srdf_pair_count': len(srdf_pairs),
+            'explicit_pair_count': len(explicit_pairs),
+            'disabled_pair_count': len(self.disabled_pairs),
+            'checked_self_pair_count': len(self.self_pairs),
+        }
         self._validate_fingers()
 
     def _validate_fingers(self):
@@ -564,6 +642,7 @@ class GraspPlanner:
                 self._last_invalid = {
                     'reason': 'obstacle_collision', 'body': body,
                     'robot_link': contact[3], 'obstacle_link': contact[4],
+                    'robot_link_name': self.link_names[contact[3]],
                     'distance': float(contact[8]),
                 }
                 return False
@@ -571,6 +650,7 @@ class GraspPlanner:
             if frozenset((contact[3], contact[4])) in self.self_pairs:
                 self._last_invalid = {
                     'reason': 'self_collision', 'links': (contact[3], contact[4]),
+                    'link_names': (self.link_names[contact[3]], self.link_names[contact[4]]),
                     'distance': float(contact[8]),
                 }
                 return False
@@ -670,9 +750,26 @@ class GraspPlanner:
         deadline = time.monotonic() + cfg.planning_seconds
         stats = self.last_stats = dict(candidates=0, tried=0, ik_fail=0, transit_fail=0,
                                       approach_fail=0, opening_fail=0, closure_fail=0,
-                                      lift_fail=0, reason='search_exhausted')
+                                      lift_fail=0, reason='search_exhausted',
+                                      start_valid=False, collision_policy=self.collision_policy.copy())
         if not self._configure_measured_limits(parked):
             return None
+        self.obstacles = [p.getBodyUniqueId(i, physicsClientId=self.client)
+                          for i in range(p.getNumBodies(physicsClientId=self.client))]
+        self.obstacles.remove(self.robot)
+        # This is the same strict validity policy used at the start of opening.
+        # Run it once, before expensive sampling/IK, and restore joint positions
+        # AND velocities even on early return or an exception.
+        with self._snapshot():
+            if not self._valid(parked, deadline=deadline):
+                error = dict(self._last_invalid or {'reason': 'unknown'})
+                stats['reason'] = ('time_budget' if error['reason'] == 'time_budget'
+                                   else 'invalid_start_state')
+                stats['start_state_error'] = error
+                self._record_invalid(stats, 'start')
+                print('[FAIL start]', error, flush=True)
+                return None
+        stats['start_valid'] = True
         candidates = self.sample_antipodal_grasps(points=obs['object_pc'], normals=obs['object_normals'])
         stats['candidates'] = len(candidates)
         if not candidates:
@@ -687,9 +784,6 @@ class GraspPlanner:
         start[0] = np.clip(start[0], lower[0], upper[0])
         lower[self.wrap] = np.maximum(lower[self.wrap], start[self.wrap] - np.pi)
         upper[self.wrap] = np.minimum(upper[self.wrap], start[self.wrap] + np.pi)
-        self.obstacles = [p.getBodyUniqueId(i, physicsClientId=self.client)
-                          for i in range(p.getNumBodies(physicsClientId=self.client))]
-        self.obstacles.remove(self.robot)
         ik = _ManipulatorIK(self, parked)
         try:
             with self._snapshot():

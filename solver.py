@@ -117,19 +117,16 @@ class Solver:
                 "decision:", decision_state,
             )
 
-            # if decision_state == "PREPARE_GRASP":
-            #     # Remain in solver state 0 so update() runs next timestep.
-            #     # The helper turns the base and waits for it to settle.
-            #     self.path = None
-            #     self._path_goal = None
-            #     # self.waypoint_index = 0
-            #     # self.curved_nav.reset()
+            if decision_state == "PREPARE_GRASP":
+                # Execute preparation and keep updating the navigation helper.
+                self.path = None
+                self._path_goal = None
+                self.action = np.asarray(
+                    decision["action"], dtype=float
+                ).copy()
+                return self.action.copy()
 
-            #     return np.asarray(
-            #         decision["action"], dtype=float
-            #     ).copy()
-
-            if decision_state in {"PREPARE_GRASP", "GRASP"}:
+            if decision_state == "GRASP":
                 # Only the helper decides when preparation is complete.
                 self.state = 1
                 self._grasp_settle_ticks = 0
@@ -233,41 +230,45 @@ class Solver:
             if hasattr(self, "grasp_follower"):
                 self.action = self.grasp_follower.hold.copy()
             return self.action.copy()
-        
+        # During grasp debugging, retain the failure hold target.
         if self.state == 4:
             print("solver state:", self.state)
-            print("Transition to exit")
-            base_xy = np.array([obs["qpos"][0] - 2.0, obs["qpos"][1]])
-            # Choose the retreat goal once, so it does not keep moving.
-            if not hasattr(self, "_exit_table_goal"):
-                away = base_xy - np.asarray(obs["object_pos"])[:2]
-                distance = np.linalg.norm(away)
-                if distance < 1e-6:
-                    raise PlanningError("Cannot determine retreat direction.")
-                self._exit_table_goal = base_xy + 0.5 * away / distance
+            # return self.action.copy() 
+            return None       
+        # if self.state == 4:
+        #     print("solver state:", self.state)
+        #     print("Transition to exit")
+        #     base_xy = np.array([obs["qpos"][0] - 2.0, obs["qpos"][1]])
+        #     # Choose the retreat goal once, so it does not keep moving.
+        #     if not hasattr(self, "_exit_table_goal"):
+        #         away = base_xy - np.asarray(obs["object_pos"])[:2]
+        #         distance = np.linalg.norm(away)
+        #         if distance < 1e-6:
+        #             raise PlanningError("Cannot determine retreat direction.")
+        #         self._exit_table_goal = base_xy + 0.5 * away / distance
 
-                self.path = None
-                self._path_goal = None
+        #         self.path = None
+        #         self._path_goal = None
 
-            reached_goal = (
-                np.linalg.norm(base_xy - self._exit_table_goal) < 0.05
-            )
+        #     reached_goal = (
+        #         np.linalg.norm(base_xy - self._exit_table_goal) < 0.05
+        #     )
 
-            if reached_goal:
-                self.create_map(env, False)     # redo map so it treats table as an obstacle
-                self.state = 67
-                self.path = None
-                self._path_goal = None
-                del self._exit_table_goal
-                # Return numeric absolute targets, never an exception class.
-                self.action = np.clip(
-                    np.asarray(self.action, dtype=float),
-                    self.action_lower_bound, self.action_upper_bound,
-                )
-                return self.action.copy()
+        #     if reached_goal:
+        #         self.create_map(env, False)     # redo map so it treats table as an obstacle
+        #         self.state = 67
+        #         self.path = None
+        #         self._path_goal = None
+        #         del self._exit_table_goal
+        #         # Return numeric absolute targets, never an exception class.
+        #         self.action = np.clip(
+        #             np.asarray(self.action, dtype=float),
+        #             self.action_lower_bound, self.action_upper_bound,
+        #         )
+        #         return self.action.copy()
             
-            goal = self.convert_to_grid(self._exit_table_goal)
-            return self.navigate(env, goal) 
+        #     goal = self.convert_to_grid(self._exit_table_goal)
+        #     return self.navigate(env, goal) 
         
         if self.state == 67:
             print("EXIT 67")

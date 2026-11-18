@@ -1,0 +1,32 @@
+--- a/tests/test_Grasp_srdf.py
++++ b/tests/test_Grasp_srdf.py
+@@
+-Run with the supplied Fetch archive:
+-    python test_grasp_srdf.py --grasp grasp.py --fetch-zip fetch.zip -v
++Run from the project root:
++    python -m pytest tests/test_Grasp_srdf.py -v
+@@
+-import argparse
+@@
+-import zipfile
+@@
+-PARSER = argparse.ArgumentParser(add_help=False)
+-PARSER.add_argument('--grasp', default=str(Path(__file__).with_name('grasp.py')))
+-PARSER.add_argument('--fetch-zip', default=str(Path(__file__).with_name('fetch.zip')))
+-ARGS, UNITTEST_ARGS = PARSER.parse_known_args()
+-SPEC = importlib.util.spec_from_file_location('grasp_under_test', ARGS.grasp)
++PROJECT_ROOT = Path(__file__).resolve().parents[1]
++SPEC = importlib.util.spec_from_file_location(
++    'grasp_under_test', PROJECT_ROOT / 'custom_libraries' / 'grasp.py')
+@@
+     @classmethod
+     def setUpClass(cls):
+-        with zipfile.ZipFile(ARGS.fetch_zip) as archive:
+-            cls.urdf_text = archive.read('fetch/fetch.urdf').decode()
+-            cls.srdf_text = archive.read('fetch/fetch.srdf').decode()
++        model_dir = PROJECT_ROOT / 'assets' / 'fetch'
++        cls.urdf_text = (model_dir / 'fetch.urdf').read_text(encoding='utf-8')
++        cls.srdf_text = (model_dir / 'fetch.srdf').read_text(encoding='utf-8')
+@@
+-if __name__ == '__main__':
+-    unittest.main(argv=[sys.argv[0], *UNITTEST_ARGS])
