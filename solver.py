@@ -480,20 +480,41 @@ class Solver:
         start[0] = np.clip(start[0], lower[0], upper[0])
         lower[planner.wrap] = np.maximum(lower[planner.wrap], start[planner.wrap] - np.pi)
         upper[planner.wrap] = np.minimum(upper[planner.wrap], start[planner.wrap] + np.pi)
-        # Collision world: everything but the robot. The goal marker has no
-        # collision response but getClosestPoints still reports it.
+        # Collision world: everything but the robot and the held object. The
+        # goal marker has no collision response but getClosestPoints still
+        # reports it. The held object moves rigidly with the gripper here, so
+        # its distance to the palm and fingers cannot change along any path;
+        # checking it against them rejects every configuration, the start
+        # included, once the object has crept to within collision_margin of
+        # the palm (soup can, top-down grasp: 0.3 mm on seed 7). The object is
+        # still checked against the walls (_valid's payload check) and against
+        # the rest of the robot (below).
         planner._configure_measured_limits(qpos)
         planner.obstacles = [
             b for b in (p.getBodyUniqueId(i, physicsClientId=client)
                         for i in range(p.getNumBodies(physicsClientId=client)))
-            if b not in (planner.robot, getattr(env, "goal_marker_id", None))
+            if b not in (planner.robot, env.object_id, getattr(env, "goal_marker_id", None))
         ]
         planner.support_contacts = {}
         scale = planner.motion_scale
+        gripper_links = {planner.ee, *planner.finger_ids}
 
         def valid(arm):
-            return planner._valid(planner._full(qpos, arm, fingers), touch=True,
-                                  attached=attached, deadline=deadline)
+            if not planner._valid(planner._full(qpos, arm, fingers), touch=True,
+                                  attached=attached, deadline=deadline):
+                return False
+            # _valid has placed the object at its attached pose.
+            for contact in p.getClosestPoints(planner.robot, env.object_id,
+                                              planner.config.collision_margin,
+                                              physicsClientId=client):
+                if contact[3] not in gripper_links:
+                    planner._last_invalid = {
+                        "reason": "payload_robot_collision",
+                        "robot_link_name": planner.link_names.get(contact[3], contact[3]),
+                        "distance": float(contact[8]),
+                    }
+                    return False
+            return True
 
         ik = _ManipulatorIK(planner, qpos)
         try:
