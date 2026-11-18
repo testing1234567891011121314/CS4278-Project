@@ -530,6 +530,12 @@ class Solver:
                 aims = [np.zeros(3)] + [0.05 * np.asarray(d, float) for d in
                                         ((-1, 0, 0), (0, 0, 1), (0, 1, 0), (0, -1, 0), (0, 0, -1))]
                 candidates = [(rot, aim) for aim in aims for rot in rotations]
+                # Pass 1: IK for every candidate, taking the first one whose
+                # straight joint-space move is collision free (cheap). Running
+                # a 6 s RRT for each candidate as it came used up the budget
+                # on 2-3 hard candidates before any easy one was tried (soup
+                # can, seed 42: 2 of 5 plans failed that way).
+                needs_rrt = []
                 for rot, aim in candidates:
                     if planning_clock() >= deadline:
                         break
@@ -544,6 +550,12 @@ class Solver:
                         continue
                     if all(valid(m) for m in edge_samples(start, q, planner.motion_resolution)):
                         return np.array([q])
+                    needs_rrt.append(q)
+                # Pass 2: RRT to the IK solutions nearest the start first.
+                needs_rrt.sort(key=lambda q: float(np.linalg.norm((q - start) / scale)))
+                for q in needs_rrt:
+                    if planning_clock() >= deadline:
+                        break
                     rrt = RRTConnect(lower / scale, upper / scale,
                                      lambda x: valid(x * scale),
                                      resolution=float(np.min(planner.motion_resolution / scale)),
