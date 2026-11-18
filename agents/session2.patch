@@ -1,0 +1,803 @@
+From ebc11a88092fea10448223e0d39204dce9bce0f2 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 18 Nov 2026 17:45:21 +0800
+Subject: [PATCH 1/4] Grasp deeper on the finger pads and rank grasps by centre
+ of mass
+
+- plan() tries tcp_offsets (0.010, 0.025): contact 21 mm from the pad tip
+  first, the old tip depth only as a fallback
+- rank candidates down by the distance from the centre of mass to the
+  grasp line (com_weight)
+- squeeze 0.004 -> 0.012
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01DSeNJQjCAQvxwyuG2m2P22
+---
+ custom_libraries/grasp.py             | 50 +++++++++++++++++++++++----
+ custom_libraries/navigate_to_grasp.py |  1 +
+ 2 files changed, 45 insertions(+), 6 deletions(-)
+
+diff --git a/custom_libraries/grasp.py b/custom_libraries/grasp.py
+index e90d101..d3ab2a8 100644
+--- a/custom_libraries/grasp.py
++++ b/custom_libraries/grasp.py
+@@ -59,10 +59,20 @@ class GraspConfig:
+     finger_travel: float = 0.05
+     pad_length: float = 0.063
+     pad_height: float = 0.024
+-    tcp_offset: tuple = (0.025, 0.0, 0.0)  # contact near pad tips, ahead of link origin
++    tcp_offset: tuple = (0.010, 0.0, 0.0)  # contact point ahead of the finger link origin (pad centre)
++    # Depths tried in order by plan(). Contacts 6.5 mm from the pad tip (0.025)
++    # let the object creep onto the tip edge during the lift and hang there;
++    # 0.010 leaves ~21 mm of pad beyond the contact. Fetch's own grasp frame is
++    # the pad centre. The shallow depth remains as a fallback for low objects
++    # where deep fingertips would hit the table.
++    tcp_offsets: tuple = (0.010, 0.025)
+     opening_clearance: float = 0.024  # total gap, metres
+     min_opening_clearance: float = 0.008  # used when travel cannot fit the full clearance (wide objects)
+-    squeeze: float = 0.004  # total gap reduction in motor command after contact
++    squeeze: float = 0.012  # total gap reduction in motor command after contact
++    # Score penalty per metre of distance between the object's centre of mass
++    # and the grasp line. Finger contacts have no spinning friction, so an
++    # off-centre grasp lets gravity pivot the object out of the fingers.
++    com_weight: float = 4.0
+     min_width: float = 0.005
+     finger_thickness: float = 0.015  # finger body beyond the pad surface, for the obstruction test
+     max_cloud_points: int = 800
+@@ -487,12 +497,14 @@ class GraspPlanner:
+             raise ValueError('Expected zero lower finger limits.')
+         self.config.finger_travel = float(min(self.upper[self.finger_indices]))
+ 
+-    def sample_antipodal_grasps(self, object_id=None, num_samples=500, *, points, normals):
++    def sample_antipodal_grasps(self, object_id=None, num_samples=500, *, points, normals, com=None):
+         """Sample surface pairs satisfying BOTH outward-normal friction cones.
+ 
+         Returns ranked (p1,p2,centre,xyzw,score) tuples, compatible with
+         NavigateToGrasp. num_samples limits returned poses, not random trials.
+         Normals must be outward; the environment already supplies these.
++        com is the object's centre of mass (world); candidates whose grasp line
++        passes far from it are ranked lower. Defaults to the cloud centroid.
+         """
+         cfg = self.config
+         pts, ns = np.asarray(points, float), np.asarray(normals, float)
+@@ -520,9 +532,12 @@ class GraspPlanner:
+         keep = (a >= threshold) & (b >= threshold)
+         i, j, directions, widths, quality = i[keep], j[keep], directions[keep], widths[keep], np.minimum(a[keep], b[keep])
+         self.sample_stats['antipodal_pairs'] = len(i)
++        com = cloud.mean(axis=0) if com is None else np.asarray(com, float)
++        rel = com - pts[i]
++        com_dist = np.linalg.norm(rel - np.einsum('ij,ij->i', rel, directions)[:, None]*directions, axis=1)
+         # Include a spread of locations rather than spending the budget on a
+         # thousand almost-identical contacts on the same planar face.
+-        order = np.argsort(-(quality - 0.05*np.abs(directions[:, 2])))
++        order = np.argsort(-(quality - 0.05*np.abs(directions[:, 2]) - cfg.com_weight*com_dist))
+         candidates, seen = [], set()
+         for k in order:
+             centre = (pts[i[k]] + pts[j[k]]) / 2
+@@ -552,7 +567,7 @@ class GraspPlanner:
+                     if key in seen:
+                         continue
+                     seen.add(key)
+-                    score = float(quality[k] + 0.10*(-approach[2]))
++                    score = float(quality[k] + 0.10*(-approach[2]) - cfg.com_weight*com_dist[k])
+                     candidates.append((pts[i[k]].copy(), pts[j[k]].copy(), centre.copy(), quat, score))
+             if len(candidates) >= num_samples:
+                 break
+@@ -743,9 +758,31 @@ class GraspPlanner:
+     def plan(self, obs):
+         """Plan from measured post-navigation state; return GraspPlan or None.
+ 
++        Tries each depth in config.tcp_offsets in turn (deep first), so the
++        object sits well inside the finger pads whenever that is feasible.
+         None means the finite sampling/IK/RRT budget failed, not that the parked
+         pose is proven unreachable. last_stats explains the rejection stage.
+         """
++        cfg = self.config
++        original = cfg.tcp_offset
++        attempts = []
++        try:
++            for depth in cfg.tcp_offsets:
++                cfg.tcp_offset = (float(depth), 0.0, 0.0)
++                plan = self._plan_once(obs)
++                attempts.append((float(depth), self.last_stats.get('reason')))
++                self.last_stats['tcp_attempts'] = list(attempts)
++                if plan is not None:
++                    self.last_stats['tcp_offset'] = float(depth)
++                    return plan
++                if self.last_stats.get('reason') == 'invalid_start_state':
++                    return None  # a deeper/shallower grasp cannot fix the start state
++            return None
++        finally:
++            cfg.tcp_offset = original
++
++    def _plan_once(self, obs):
++        """One planning attempt at the current config.tcp_offset."""
+         if self.env is None:
+             raise ValueError('Construct GraspPlanner(env) before calling plan().')
+         cfg = self.config
+@@ -778,7 +815,8 @@ class GraspPlanner:
+                 print('[FAIL start]', error, flush=True)
+                 return None
+         stats['start_valid'] = True
+-        candidates = self.sample_antipodal_grasps(points=obs['object_pc'], normals=obs['object_normals'])
++        candidates = self.sample_antipodal_grasps(points=obs['object_pc'], normals=obs['object_normals'],
++                                                  com=obs['object_pos'])
+         stats['candidates'] = len(candidates)
+         if not candidates:
+             stats['reason'] = 'no_antipodal_pairs'
+diff --git a/custom_libraries/navigate_to_grasp.py b/custom_libraries/navigate_to_grasp.py
+index 94ec50b..e7285ca 100644
+--- a/custom_libraries/navigate_to_grasp.py
++++ b/custom_libraries/navigate_to_grasp.py
+@@ -118,6 +118,7 @@ class NavigateToGrasp:
+             self.env.object_id,
+             points=obs["object_pc"],
+             normals=obs["object_normals"],
++            com=obs["object_pos"],
+         )
+         if len(candidates) == 0:
+             raise RuntimeError("No antipodal grasp candidates found.")
+-- 
+2.43.0
+
+
+From dbc824802a328956c89b6e227b923b48b8d43e82 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 18 Nov 2026 17:45:21 +0800
+Subject: [PATCH 2/4] Plan the goal reach with collision checking and detect a
+ dropped object
+
+- state 68: RRT-Connect to the place pose with the object attached and the
+  maze walls as obstacles; aims at the goal or points 5 cm from it; retries
+- states 5/67/68: go to state 4 after 30 ticks without bilateral finger
+  contact instead of driving on empty
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01DSeNJQjCAQvxwyuG2m2P22
+---
+ solver.py | 152 ++++++++++++++++++++++++++++++++++++++++++++----------
+ 1 file changed, 124 insertions(+), 28 deletions(-)
+
+diff --git a/solver.py b/solver.py
+index 71bf8a6..564cefc 100644
+--- a/solver.py
++++ b/solver.py
+@@ -112,9 +112,27 @@ class Solver:
+         self.state = 999
+         self.wait = 200
+ 
++    def _check_holding(self, obs):
++        """While carrying (states 5, 67, 68): fail into state 4 once bilateral
++        finger contact has been gone for 30 ticks, instead of driving on empty
++        and trying to place nothing. Returns True when the object was lost."""
++        follower = getattr(self, "grasp_follower", None)
++        if follower is None:
++            return False
++        self._lost_ticks = 0 if follower._contacts() else getattr(self, "_lost_ticks", 0) + 1
++        if self._lost_ticks < 30:
++            return False
++        self.grasp_error = f"Lost the object in state {self.state} at {np.round(obs['object_pos'], 3).tolist()}"
++        self.lost_in_state = self.state
++        print(self.grasp_error)
++        self.state = 4
++        return True
++
+     ## This function is called every time step.
+     def get_action(self,env):
+         obs = env._get_obs()
++        if self.state in (5, 67, 68) and self._check_holding(obs):
++            return self.action.copy()
+ 
+         collisions = self.detect_collisions()
+ 
+@@ -385,8 +403,12 @@ class Solver:
+         1. back the base off along the arrival path (straight, slow);
+         2. IK (planner's private torso+arm model) for a gripper pose that puts
+            the object -- not the gripper -- at the goal, keeping the object's
+-           offset in the gripper frame fixed;
+-        3. move the arm there slowly with the fingers still squeezing.
++           offset in the gripper frame fixed, then RRT-Connect from the carry
++           pose to that solution with the object attached, checked against the
++           maze walls. Interpolating straight in joint space from the carry
++           pose swung the gripper sideways into the 1 m-wide corridor walls
++           and knocked the object out;
++        3. follow the path slowly with the fingers still squeezing.
+         """
+         qpos = np.asarray(obs["qpos"], dtype=float)
+         action = self.action.copy()
+@@ -397,48 +419,122 @@ class Solver:
+             action[:2] = qpos[:2] + step
+             if np.linalg.norm(error) < 0.03:
+                 action[:2] = qpos[:2]
+-                self._reach_target = self._solve_reach(obs)
+-                self._reach_phase = "arm" if self._reach_target is not None else "hold"
+-                print("Reach IK:", "solved" if self._reach_target is not None else "failed")
++                self._reach_base_hold = qpos[:3].copy()
++                self._reach_attempts = 0
++                self._reach_phase = "plan"
++        elif self._reach_phase == "plan":
++            # Hold still while planning; retry (the IK and RRT are randomised)
++            # a few times before giving up and just holding the object.
++            action[:3] = self._reach_base_hold
++            self._reach_attempts += 1
++            self._reach_path = self._solve_reach(obs)
++            self._reach_index = 0
++            if self._reach_path is not None:
++                self._reach_phase = "arm"
++            elif self._reach_attempts >= 3:
++                self._reach_phase = "hold"
++            print("Reach plan:", "found" if self._reach_path is not None else "failed",
++                  "attempt", self._reach_attempts)
+         elif self._reach_phase == "arm":
+             idx = self.grasp_planner.motion_indices
+-            error = self._reach_target - qpos[idx]
+-            action[idx] = qpos[idx] + np.clip(error, -0.003, 0.003)
+-            if np.max(np.abs(error)) < 0.01:
+-                self._reach_phase = "hold"
+-                print("Object placed at goal.")
++            action[:3] = self._reach_base_hold
++            target = self._reach_path[self._reach_index]
++            error = target - qpos[idx]
++            # Common scale keeps the commanded motion on the checked segment.
++            limits = np.r_[0.002, np.full(len(idx) - 1, 0.003)]
++            scale = max(1.0, float(np.max(np.abs(error) / limits)))
++            action[idx] = qpos[idx] + error / scale
++            last = self._reach_index == len(self._reach_path) - 1
++            if np.max(np.abs(error)) < (0.01 if last else 0.03):
++                if last:
++                    self._reach_phase = "hold"
++                    print("Object placed at goal.")
++                else:
++                    self._reach_index += 1
++        elif self._reach_phase == "hold" and getattr(self, "_reach_path", None) is not None:
++            action[self.grasp_planner.motion_indices] = self._reach_path[-1]
+         self.action = np.clip(action, self.action_lower_bound, self.action_upper_bound)
+         return self.action.copy()
+ 
+-    def _solve_reach(self, obs):
++    def _solve_reach(self, obs, seconds=20.0):
++        """Return a collision-checked torso+arm path to the place pose, or None."""
+         import time as _time
+         from scipy.spatial.transform import Rotation
+-        from custom_libraries.grasp import _ManipulatorIK
++        from custom_libraries.grasp import _ManipulatorIK, RRTConnect, edge_samples
+         planner = self.grasp_planner
++        env = self.env
++        client = planner.client
+         qpos = np.asarray(obs["qpos"], dtype=float)
+-        robot, client = planner.robot, planner.client
+-        ee = next(j for j in range(p.getNumJoints(robot, physicsClientId=client))
+-                  if p.getJointInfo(robot, j, physicsClientId=client)[12].decode() == "gripper_link")
+-        state = p.getLinkState(robot, ee, computeForwardKinematics=True, physicsClientId=client)
++        deadline = _time.monotonic() + seconds
++        state = p.getLinkState(planner.robot, planner.ee, computeForwardKinematics=True,
++                               physicsClientId=client)
+         g_pos, g_rot = np.asarray(state[4]), Rotation.from_quat(state[5])
++        object_pose = p.getBasePositionAndOrientation(env.object_id, physicsClientId=client)
++        inv = p.invertTransform(state[4], state[5])
++        attached = p.multiplyTransforms(*inv, *object_pose)
+         offset_local = g_rot.inv().apply(np.asarray(obs["object_pos"]) - g_pos)
+         goal = np.asarray(obs["goal_pos"], dtype=float)
+         idx = planner.motion_indices
++        fingers = qpos[planner.finger_indices]
+         lower, upper = planner.lower[idx].copy(), planner.upper[idx].copy()
+-        seed = qpos[idx].copy()
+-        lower[planner.wrap] = np.maximum(lower[planner.wrap], seed[planner.wrap] - np.pi)
+-        upper[planner.wrap] = np.minimum(upper[planner.wrap], seed[planner.wrap] + np.pi)
++        start = qpos[idx].copy()
++        start[0] = np.clip(start[0], lower[0], upper[0])
++        lower[planner.wrap] = np.maximum(lower[planner.wrap], start[planner.wrap] - np.pi)
++        upper[planner.wrap] = np.minimum(upper[planner.wrap], start[planner.wrap] + np.pi)
++        # Collision world: everything but the robot. The goal marker has no
++        # collision response but getClosestPoints still reports it.
++        planner._configure_measured_limits(qpos)
++        planner.obstacles = [
++            b for b in (p.getBodyUniqueId(i, physicsClientId=client)
++                        for i in range(p.getNumBodies(physicsClientId=client)))
++            if b not in (planner.robot, getattr(env, "goal_marker_id", None))
++        ]
++        planner.support_contacts = {}
++        scale = planner.motion_scale
++
++        def valid(arm):
++            return planner._valid(planner._full(qpos, arm, fingers), touch=True,
++                                  attached=attached, deadline=deadline)
++
+         ik = _ManipulatorIK(planner, qpos)
+         try:
+-            # Current gripper orientation first, then level/forward variants.
+-            candidates = [g_rot] + [Rotation.from_euler("xyz", [r, 0, y])
+-                                    for y in (0.0, 0.5, -0.5) for r in (0.0, np.pi/2, -np.pi/2)]
+-            for rot in candidates:
+-                target = goal - rot.apply(offset_local)
+-                q = ik.solve(target, rot.as_quat(), seed, lower, upper,
+-                             _time.monotonic() + 2.0, restarts=12)
+-                if q is not None:
+-                    return q
++            with planner._snapshot():
++                if not valid(start):
++                    print("Reach: start state invalid", planner._last_invalid)
++                # Current gripper orientation first, then level/forward variants.
++                rotations = [g_rot] + [Rotation.from_euler("xyz", [r, 0, y])
++                                       for y in (0.0, 0.5, -0.5)
++                                       for r in (0.0, np.pi/2, -np.pi/2)]
++                # The task only needs the object within 10 cm of the goal, so
++                # aim at the centre first, then at points 5 cm away from it.
++                aims = [np.zeros(3)] + [0.05 * np.asarray(d, float) for d in
++                                        ((-1, 0, 0), (0, 0, 1), (0, 1, 0), (0, -1, 0), (0, 0, -1))]
++                candidates = [(rot, aim) for aim in aims for rot in rotations]
++                for rot, aim in candidates:
++                    if _time.monotonic() >= deadline:
++                        break
++                    target = goal + aim - rot.apply(offset_local)
++                    q = ik.solve(target, rot.as_quat(), start, lower, upper,
++                                 min(deadline, _time.monotonic() + 2.0), restarts=12)
++                    if q is None:
++                        print("Reach: IK failed for orientation", np.round(rot.as_euler("xyz"), 2))
++                        continue
++                    if not valid(q):
++                        print("Reach: goal pose invalid", planner._last_invalid)
++                        continue
++                    if all(valid(m) for m in edge_samples(start, q, planner.motion_resolution)):
++                        return np.array([q])
++                    rrt = RRTConnect(lower / scale, upper / scale,
++                                     lambda x: valid(x * scale),
++                                     resolution=float(np.min(planner.motion_resolution / scale)),
++                                     step_size=planner.config.rrt_step,
++                                     max_iterations=planner.config.rrt_iterations,
++                                     rng=planner.rng)
++                    path = rrt.plan(start / scale, q / scale,
++                                    deadline=min(deadline, _time.monotonic() + 6.0))
++                    if path is not None:
++                        return np.asarray(path)[1:] * scale
++                    print("Reach: RRT found no path", planner._last_invalid)
+         finally:
+             ik.close()
+         return None
+-- 
+2.43.0
+
+
+From 9b62bd7a0018eefcad667c9d3c91cffaf4a56709 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 18 Nov 2026 17:45:21 +0800
+Subject: [PATCH 3/4] Add tools/trace_hold.py to trace grasp security through
+ transport
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01DSeNJQjCAQvxwyuG2m2P22
+---
+ tools/trace_hold.py | 98 +++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 98 insertions(+)
+ create mode 100644 tools/trace_hold.py
+
+diff --git a/tools/trace_hold.py b/tools/trace_hold.py
+new file mode 100644
+index 0000000..d648765
+--- /dev/null
++++ b/tools/trace_hold.py
+@@ -0,0 +1,98 @@
++"""Trace grasp security from the pick through transport.
++
++Usage: python tools/trace_hold.py PROJECT_DIR OBJ SEED MAX_STEPS [EVERY]
++
++From the moment the solver enters state 2 (grasp execution) it records, per
++tick: solver state, bilateral finger contact, finger joint positions and
++commands, and the object's drift in the gripper frame relative to where it sat
++when the lift finished. Prints a line every EVERY ticks (default 200), on every
++state change, and on the first tick contact is lost. Ends with a JSON line
++prefixed DROP: (state/tick where contact was lost, or null) and the result.
++"""
++import sys, os, io, json, time, contextlib
++sys.path.insert(0, sys.argv[1]); os.chdir(sys.argv[1]); time.sleep = lambda *a, **k: None
++import numpy as np
++import pybullet as p
++from scipy.spatial.transform import Rotation
++from pick_nav_reach_env_multi import PickNavReachEnv
++from solver import Solver
++
++obj, seed, steps = int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4])
++every = int(sys.argv[5]) if len(sys.argv) > 5 else 200
++env = PickNavReachEnv(seed=seed, object_idx=obj, maze_urdf_path=f"/tmp/th{obj}_{seed}.urdf", gui=False)
++env.reset()
++s = Solver(env)
++pl = s.grasp_planner
++cid = env.pb_physics_client
++ee = next(j for j in range(p.getNumJoints(env.robot_id, physicsClientId=cid))
++          if p.getJointInfo(env.robot_id, j, physicsClientId=cid)[12].decode() == "gripper_link")
++
++
++def contact_info():
++    cs = p.getContactPoints(env.robot_id, env.object_id, physicsClientId=cid)
++    per = {}
++    for c in cs:
++        if c[3] in pl.finger_ids:
++            per[c[3]] = per.get(c[3], 0.0) + c[9]
++    return per
++
++
++def obj_in_gripper(obs):
++    st = p.getLinkState(env.robot_id, ee, computeForwardKinematics=True, physicsClientId=cid)
++    g, r = np.asarray(st[4]), Rotation.from_quat(st[5])
++    return r.inv().apply(np.asarray(obs["object_pos"]) - g)
++
++
++ref = None
++drop = None
++history = []
++last_state = None
++result = dict(object=obj, seed=seed)
++for t in range(steps):
++    with contextlib.redirect_stdout(io.StringIO()):
++        a = s.get_action(env)
++        obs, _ = env.step(a)
++    gd = float(np.linalg.norm(obs["object_pos"] - obs["goal_pos"]))
++    if s.state in (2, 3, 5, 67, 68):
++        per = contact_info()
++        bil = all(f in per for f in pl.finger_ids)
++        off = obj_in_gripper(obs)
++        if s.state == 3 and ref is None:
++            ref = off.copy()
++            cs = [c for c in p.getContactPoints(env.robot_id, env.object_id, physicsClientId=cid) if c[3] in pl.finger_ids]
++            pa = np.mean([c[6] for c in cs if c[3] == pl.finger_ids[0]], axis=0)
++            pb = np.mean([c[6] for c in cs if c[3] == pl.finger_ids[1]], axis=0)
++            u = (pb - pa) / np.linalg.norm(pb - pa)
++            v = np.asarray(obs["object_pos"]) - pa
++            result["com_offset"] = round(float(np.linalg.norm(v - v.dot(u) * u)), 4)
++            result["axis_z"] = round(float(abs(u[2])), 3)
++            print("COM offset from contact line:", result["com_offset"], "axis |z|:", result["axis_z"], flush=True)
++        drift = None if ref is None else float(np.linalg.norm(off - ref))
++        others = sorted({(c[2], c[4]) for c in p.getContactPoints(bodyA=env.object_id, physicsClientId=cid)
++                         if c[2] != env.robot_id})
++        q = obs["qpos"]
++        line = (f"T{t} st{s.state} bil={bil} F={ {k: round(v, 1) for k, v in per.items()} } "
++                f"fq={np.round(obs['qpos'][13:15], 4)} fcmd={np.round(np.asarray(a)[13:15], 4)} "
++                f"drift={None if drift is None else round(drift, 3)} obj={np.round(obs['object_pos'], 3)} "
++                f"base={np.round([q[0]-2, q[1], q[2]], 3)} other={others} gd={gd:.2f}")
++        history.append(line)
++        history = history[-40:]
++        changed = s.state != last_state
++        lost = ref is not None and drop is None and not bil
++        if lost:
++            drop = dict(t=t, state=s.state, drift=drift, nav=getattr(s.curved_nav, "status", None),
++                        phase=getattr(s, "_reach_phase", None),
++                        travel_done=getattr(s, "_travel_pose_complete", None))
++        if lost:
++            print("---- history before loss ----")
++            print("\n".join(history[::4]))
++            print("---- LOST ----", flush=True)
++        elif changed or t % every == 0:
++            print(line, flush=True)
++        last_state = s.state
++    if s.state == 4 or gd < 0.10:
++        break
++    if drop is not None and t - drop["t"] > 300:
++        break
++result.update(final_state=s.state, steps=t + 1, goal_dist=gd, err=getattr(s, "grasp_error", None))
++print("DROP:" + json.dumps(drop), "RESULT:" + json.dumps(result, default=str), flush=True)
+-- 
+2.43.0
+
+
+From bb98c6945610cd2ff47f8684ae70923b39df3dfa Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 18 Nov 2026 17:45:21 +0800
+Subject: [PATCH 4/4] Update handoff.md and fixes.md for session 2
+
+Results (5/10 delivered), rules, Claude Code setup and the prioritised plan.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01DSeNJQjCAQvxwyuG2m2P22
+---
+ fixes.md   |  31 +++++++
+ handoff.md | 240 +++++++++++++++++++++++++++++++++++++++++++++++++----
+ 2 files changed, 257 insertions(+), 14 deletions(-)
+
+diff --git a/fixes.md b/fixes.md
+index 20ff32b..87fcea6 100644
+--- a/fixes.md
++++ b/fixes.md
+@@ -143,6 +143,37 @@ State 3 used to be a terminal hold. The new sequence is:
+    - solve IK (the planner's private torso + arm model) for a gripper pose that puts the *object*, not the gripper, on the goal;
+    - move the arm there slowly.
+ 
++## Session 2: holding the object through transport
++
++Measured with `tools/trace_hold.py`. End-to-end deliveries on the reference
++batch (objects 5, 6, 7, 14, 2 × seeds 42 and 7) went from 2 / 10 to 5 / 10.
++
++### 11. Fingers gripped at the pad tip (`grasp.py`)
++The contact was planned 6.5 mm from the fingertip (`tcp_offset` 0.025 on a
++63 mm pad), so objects slid onto the tip edge during the lift. `plan()` now
++tries `tcp_offsets = (0.010, 0.025)`: 21 mm from the tip first, the old depth
++only as a fallback.
++
++### 12. Off-centre grasps pivoted out (`grasp.py`, `navigate_to_grasp.py`)
++Finger contacts have no spinning friction. Candidates are now ranked down by
++the distance from the centre of mass to the grasp line (`com_weight` 4.0).
++
++### 13. Weak squeeze (`grasp.py`)
++`squeeze` 0.004 → 0.012. This slows creep but is the suspected cause of
++occasional ejections; see handoff.md, next step 3.
++
++### 14. The reach swung the object into the maze walls (`solver.py`, state 68)
++The final arm move was a joint-space interpolation. It is now an RRT-Connect
++path with the object attached and the walls as obstacles, aiming at the goal
++or points 5 cm from it, with 3 planning attempts.
++
++### 15. Driving on with an empty gripper (`solver.py`)
++States 5, 67 and 68 go to state 4 after 30 ticks without bilateral finger
++contact; `grasp_error` records where the object was lost.
++
++Not used, by team decision: PyBullet's `frictionAnchor` on the finger links.
++It removes the creep completely but changes the robot's contact model.
++
+ ## Known limitations / next steps
+ 
+ - **Objects still slip during transport** in most runs: during the re-tuck, during navigation, or in the final arm motion. A firmer grasp would be the most useful next fix, for example:
+diff --git a/handoff.md b/handoff.md
+index 7eff9f6..ea95792 100644
+--- a/handoff.md
++++ b/handoff.md
+@@ -3,11 +3,80 @@
+ Read `fixes.md` first. It explains every change made so far and why.
+ This file covers where things stand, how to test, and what to do next.
+ 
+-## Where things stand
++## Session 2 update (grasp hold during transport)
+ 
+-- **Branch:** `fix/pick-nav-reach`, one commit on top of `last` (`ac3da6a`).
+-  - It has **not been pushed**: the previous session had no GitHub access.
+-  - Push it, then open a PR into `last`.
++Read this section first; the rest of the file is from session 1 and is kept
++for reference (the results table below it is superseded).
++
++**Why objects were dropped** (measured with `tools/trace_hold.py`):
++1. **Contacts at the fingertip edge.** The planner aimed the contact 6.5 mm
++   from the pad tip (`tcp_offset` 0.025 on a 63 mm pad). During the lift the
++   object slid onto the tip edge and hung there. Fetch's own grasp frame
++   (MoveIt / simple_grasping) is the pad centre.
++2. **Friction creep.** Bullet solves friction at velocity level, so a held
++   object creeps along the pads even with ~10× the friction it needs. Grip
++   force is not the problem (20–50 N on objects of 0.05–0.32 kg).
++   - PyBullet's `frictionAnchor` on the finger links removes the creep
++     completely (0 mm in 1,500 ticks), but it changes the robot's contact
++     model. **The team decided it must stay off; it is not in the code.**
++3. **Off-centre grasps pivot.** Spinning friction is 0, so a grasp line that
++   misses the centre of mass by 3–4 cm lets gravity rotate the object out.
++4. **Collisions.** The final reach interpolated in joint space and swung the
++   object into the 1 m-wide corridor walls (maze walls are 2 m tall). One
++   banana still touched the table after the lift and was dragged off.
++5. **Ejection** at high squeeze: twice, contact went from 40–50 N to 0 in 4
++   ticks with no outside contact and the object was flung metres. Probably
++   the harder squeeze (below) storing penetration energy. Not yet fixed.
++
++**Changes (uncommitted on `fix/pick-nav-reach` at the time of writing):**
++- `grasp.py`:
++  - `tcp_offsets = (0.010, 0.025)`: plan with the contact 21 mm from the tip
++    first, and fall back to the old depth only if nothing plans.
++  - `com_weight = 4.0`: candidates are ranked down by the distance from the
++    centre of mass (`obs["object_pos"]`) to the grasp line.
++  - `squeeze` 0.004 → 0.012.
++- `navigate_to_grasp.py`: passes the centre of mass to the sampler.
++- `solver.py`:
++  - state 68 plans the reach with RRT-Connect, with the object attached and
++    the maze walls as obstacles, aims at the goal or points 5 cm from it, and
++    retries 3 times; before, it did a blind joint-space move;
++  - states 5/67/68 fail into state 4 after 30 ticks without bilateral finger
++    contact, instead of driving on empty (`grasp_error` says where).
++- `tools/trace_hold.py` (new): per-tick finger contact, grip force, drift of
++  the object in the gripper frame, contacts with other bodies, and a history
++  dump before the first contact loss. Ends with `DROP:` and `RESULT:` lines.
++
++**Results** (clean batch of this code: 5 pickable objects × seeds 42 and 7,
++friction anchor off): **5 / 10 delivered**, up from 2 / 10 at the start of the
++session. All 10 picks succeeded.
++
++| Object | Seed 42 | Seed 7 |
++|---|---|---|
++| Banana (5) | delivered, 10,273 steps | delivered, 10,992 |
++| Strawberry (6) | delivered, 10,250 | delivered, 10,443 |
++| Foam brick (14) | delivered, 10,416 | dropped mid-maze (t = 7,501) |
++| Apple (7) | dropped mid-maze (t = 5,523) | dropped mid-maze (t = 7,284) |
++| Soup can (2) | held, reach never planned | held, reach never planned |
++
++- The three drops were in state 67 with no contact with another body
++  beforehand; grip force was 37–51 N just before two of them, and the object
++  had drifted 2.5–4 cm in the gripper.
++- Soup can: IK fails for every orientation from the fixed 7-cell backoff; the
++  robot holds the object 1.0 m from the goal until the step cap.
++
++**Settling after `env.reset()`** (object dropped from z = 5 m; the seed only
++changes the maze, so this is the same on every seed):
++- **mug (10)** bounces off the table and lands on the floor at about
++  (−2.007, −2.072, 0.045);
++- **large marker (12)** settles at z = 0.595, below the tabletop (0.626): it
++  sinks partly into the table, which likely explains its "no plan" results;
++- **bleach cleanser (8)** is still sliding (~2 cm/s) at step 200, when the
++  solver starts, and ends 0.52 m from the table centre.
++
++## Where things stand (session 1)
++
++- **Branch:** `fix/pick-nav-reach`, on top of `last` (`ac3da6a`). Already on
++  `origin`; open a PR into `last` once the team is happy.
+ - **Files changed:**
+   - `solver.py`
+   - `custom_libraries/grasp.py`
+@@ -107,20 +176,163 @@ The tuck rate while carrying is `_tuck_rate`, set to 0.003 rad/tick when enterin
+ - **`a_star` returns `[]` on failure, not `None`.**
+ - **Line endings.** `grasp.py` uses CRLF; the other files use LF. Preserve them when editing with scripts.
+ 
+-## Recommended next steps, in priority order
++## Continuing in Claude Code
++
++**Setup** (Python 3.10+, no GPU needed for the tools):
++
++```
++git clone https://github.com/testing1234567891011121314/CS4278-Project
++cd CS4278-Project && git checkout fix/pick-nav-reach
++pip install pybullet numpy scipy trimesh matplotlib
++python tools/trace_hold.py . 5 42 16000 400     # banana, seed 42: ~2-5 min
++```
++
++**Rules agreed with the team**
++- Control and planning only. No changes to the environment, the object state
++  or any contact/dynamics parameter: no `frictionAnchor`, no `changeDynamics`,
++  no constraints, no re-settling the object.
++- Do not edit `pick_nav_reach_env*.py` behaviour.
++- `custom_libraries/grasp.py` has CRLF line endings; keep them.
++
++**Working method**
++- Run batches from a frozen copy of the repo (`cp -r . /tmp/snap`, then
++  `python tools/trace_hold.py /tmp/snap OBJ SEED 16000 400`), two runs at a
++  time on a 2-core machine. Editing while a batch runs mixes code versions.
++- The reference batch is objects 5 6 7 14 2 × seeds 42 and 7 (10 runs,
++  ~15 min). Current score: 5 / 10 delivered.
++- `trace_hold.py` ends each log with `DROP:<json|null> RESULT:<json>`; a run
++  is delivered when `goal_dist < 0.10` (it stops at the first success, so
++  delivered runs read ~0.099).
++- The claims marked "review" below come from reading the code, not from
++  runs. Confirm each with a batch before keeping the change.
++
++**Rubric** (readme.md): pick is 64 %, navigation + reach 36 %. Per trial:
++lift within 3,000 sim steps, lift ≥ 10 cm above the table, hold ≥ 50 steps,
++final pose close to the target grasp; reach within 10 cm, within 15,000 sim
++steps, no drop. Graded on 5 objects from the provided set and 5 unseen seeds.
++- **Open question for the teaching team:** "sim steps" is most likely
++  `env.step` calls (the only counter in the env; our pick takes ~1,100 calls
++  and a full run ~10,500). If it means physics substeps (5 per call) neither
++  budget is reachable.
++
++## Next steps, in priority order
++
++1. **Rubric scorer.** Extend `tools/run_one.py` (or add `tools/score.py`) to
++   report per trial: step of state 3 entry, lift height above the table,
++   50-step hold, step of first `dist < 0.1`, drop flag; stop on state 4 and
++   on a navigator stall. Judge every later change by this score.
++2. **Lift height (certain points).** The lift is planned at 8 cm
++   (`lift_distance`, grasp.py `GraspConfig`) and accepted at 4 cm in
++   `GraspFollower`; the rubric wants ≥ 10 cm.
++   - `lift_distance` → 0.15, accept at ≥ 0.12.
++   - State 3 holds `target` without the follower's integral term, so the arm
++     sags back; hold `target + integral` (review).
++3. **Stop the mid-maze drops** (3 of 10 runs).
++   - Squeeze relative to the *measured* contact width (about 2 mm per finger),
++     ramped in and kept through the carry. Today the target is 6 mm per
++     finger past the point-cloud width, and the collision hull is fatter, so
++     the motor pushes 7–9 mm into the object (review). This is the suspected
++     cause of the ejections.
++   - The finger command jumps from +0.4 mm to the full squeeze at the start
++     of the lift: ramp it (review).
++   - `GraspFollower` integral: clip per joint (torso 0.01 m, arm 0.03 rad),
++     integrate only near the target, reset at each phase, freeze during
++     close; leave finger errors out of the common speed scale (review).
++   - Smooth the transport: slew-limit the base command, slow down before
++     stops and in corners, move all tuck joints on one time scale with a
++     ramp, blend the reach waypoints (review).
++   - Tilt the approach axis upward right after the lift, so creep runs
++     toward the palm.
++4. **Soup can reach.** Try several standoffs (0.4–0.9 m) and base headings
++   when IK fails, not 3 retries of the same pose. Stop navigation ~0.7 m
++   short of the goal instead of driving in and backing out 7 cells (saves
++   ~500 steps). The backoff has no wall check and no timeout.
++5. **Widen the set of pickable objects.**
++   - Rank by the *horizontal* distance from the centre of mass to the grasp
++     line, `|((com − p) × z) · d|`; the current 3-D distance penalises top
++     grasps on tall boxes by ~0.27 against a quality spread of ~0.1 (review).
++   - Check the pregrasp pose before RRT and count it separately (it is
++     reported as `transit_fail` today); add a palm-clearance test to the
++     sampler; give side approaches a chance for tall boxes.
++   - Choose the grasp depth per candidate: as deep as possible with the
++     fingertips ≥ 4 mm above the table.
++   - Plan with friction 0.25: fingers and objects are both 0.5 and Bullet
++     multiplies them (measured with `getDynamicsInfo`); the planner assumes 0.5.
++   - After a failed plan, retry from another parking spot
++     (`mark_goal_failed` exists but is never called); add a timeout to state 1.
++   - `contact_penetration` 6 mm → ~3 mm, pad-face contacts only (review).
++6. **Awkward starts.**
++   - Bleach (8): still sliding at step 200. In state 999 wait until the
++     object has stopped moving (with a cap) instead of a fixed 200 steps.
++   - Large marker (12): sunk in the tabletop (z = 0.595 < 0.626). Fail fast.
++   - Master chef can (0): 102 mm across, gripper opens ~95 mm. Fail fast.
++   - Untested since session 1: bowl (9), plate (11).
++7. **Floor pick for the mug (object 10)**, which `env.reset()` bounces off
++   the table onto the floor at about (−2.007, −2.072, 0.045). Today
++   `NavigateToGrasp.update()` raises "Grasp height is outside the configured
++   coarse height range" (`min_z` = 0.20 m in the base frame) and the solver
++   stops in state 4. Steps:
++   - **check feasibility first:** with the torso at 0, can the planner's IK
++     model put the gripper at z ≈ 0.05–0.10 m, and from what base distance?
++   - lower `min_z` or give floor objects their own height range and parking
++     distance; park on the floor map;
++   - add a low travel / pre-grasp arm pose, measured with
++     `wall_projection.robot_xy_polygons(env)`;
++   - treat the plane (body 0) as the support surface and keep the fingertips
++     clear of it;
++   - if it is not feasible, fail fast with a clear message.
++8. **Robustness.**
++   - Navigator deadlock: on `blocked_or_off_path` the navigator returns zeros
++     forever; add a replan or timeout (review).
++   - `_check_holding` does not cover state 3; a loss during the 60-tick hold
++     goes unnoticed (review).
++   - Declare the `hasattr`/`getattr` solver attributes in `__init__`.
++9. **Housekeeping**, if the team agrees: the committed `pnr/` virtualenv,
++   the stale `test.patch`, the `navigation_p4000_*` jsonl/mp4 files at the
++   root, `custom_libraries/old/`, noisy prints in `create_map` and state 67.
++
++## Session 1 next-steps list (superseded by the list above)
++
++
+ 
+-1. **Make the grasp hold through transport.** This is the biggest win: 8 of the 10 end-to-end runs picked the object but lost it. They drop it during the re-tuck, the navigation, or the final arm motion. Ideas:
+-   - squeeze harder once lifted (raise the finger command below the contact width in state 3);
+-   - prefer grasps near the object's centroid, and closing directions that are horizontal;
+-   - check finger contact each tick, and on loss stop the carry and go back to re-grasp rather than continuing empty.
+-2. **Verify the untested fixes** with a full sweep: master chef can, bowl and plate.
+-3. **Fix the planner for tall or long objects** (sugar box, large marker, potted meat). Their failures are `ik_fail` plus `transit_fail` where the forearm or wrist hits the table. Things to look at:
++1. **Re-measure** the session 2 code in a clean batch (anchor off), and run
++   batches from a copy of the repo so edits don't mix code versions mid-batch.
++2. **Finish the grasp hold without the friction anchor.** Creep and ejection
++   during transport are still the main losses. Ideas:
++   - tune `squeeze` between 0.004 and 0.012 (harder squeeze slows creep but
++     seems to cause the ejections);
++   - make creep run toward the palm: keep the gripper's approach axis tilted
++     upward whenever the object is held (the carry pose already does this;
++     the re-tuck from the top-down lift pose passes through tip-down poses);
++   - shorten the time between lift and carry pose, since creep is per tick;
++   - re-grasp when the object is lost onto the table (it is detected now).
++3. **Attempt a floor pick for the mug (object 10)**, which `env.reset()`
++   bounces off the table onto the floor at about (−2.007, −2.072, 0.045).
++   Today `NavigateToGrasp.update()` raises "Grasp height is outside the
++   configured coarse height range" (its `min_z` is 0.20 m in the base frame)
++   and the solver stops in state 4. Steps:
++   - **check feasibility first:** with the torso at 0, can the planner's IK
++     model put the gripper at z ≈ 0.05–0.10 m at all, and from what base
++     distance? Fetch only just reaches the floor;
++   - lower `min_z`, or give floor objects their own height range and parking
++     distance, and park on the floor map (no table near the mug);
++   - add a low travel / pre-grasp arm pose for floor grasps, measured with
++     `wall_projection.robot_xy_polygons(env)` like the other poses;
++   - the floor is the support surface: check the plane (body 0) is treated
++     like the table in `support_contacts`, and keep the fingertips clear of
++     it (the deep `tcp_offset` puts the tips ~20 mm below the grasp centre);
++   - likely grasps are the rim or handle from above; lift straight up before
++     the retreat;
++   - if it is not feasible, fail fast with a clear message instead.
++4. **Verify the untested fixes** with a full sweep: master chef can, bowl and plate.
++5. **Fix the planner for tall or long objects** (sugar box, large marker, potted meat). Their failures are `ik_fail` plus `transit_fail` where the forearm or wrist hits the table. Things to look at:
++   - the large marker first: it settles partly sunk into the table (z = 0.595 < 0.626), so its start state may be the real problem;
+    - candidate ranking;
+    - side (horizontal) approaches for boxes;
+    - the base standoff distance.
+-4. **Investigate the bleach cleanser** sitting in state 0. Add a print of `decision` / `decision_state` in solver state 0.
+-5. **Episode length.** Check whether the grader has a step limit. Transport takes about 10k steps at `carry_speed` = 4 mm/tick, so raise the speed carefully once the grasp is firmer.
+-6. **Housekeeping**, if the team agrees:
++6. **Investigate the bleach cleanser** sitting in state 0. It is still sliding when state 999 ends after 200 steps; wait until the object has stopped moving instead of a fixed count. Also add a print of `decision` / `decision_state` in solver state 0.
++7. **Episode length.** Check whether the grader has a step limit. Transport takes about 10k steps at `carry_speed` = 4 mm/tick, so raise the speed carefully once the grasp is firmer.
++8. **Housekeeping**, if the team agrees:
+    - the committed `pnr/` virtualenv;
+    - the deleted `requirements.txt` and tests on `last`;
+    - the stray `test.patch`.
+-- 
+2.43.0
+
