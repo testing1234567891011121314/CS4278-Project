@@ -68,7 +68,11 @@ class GraspConfig:
     tcp_offsets: tuple = (0.010, 0.025)
     opening_clearance: float = 0.024  # total gap, metres
     min_opening_clearance: float = 0.008  # used when travel cannot fit the full clearance (wide objects)
-    squeeze: float = 0.012  # total gap reduction in motor command after contact
+    # Total gap reduction the close phase commands past the point-cloud width.
+    # Grip force is linear in it (6.6 N per mm per finger): 0.012 gave ~50 N,
+    # which let heavy objects (sugar box, hammer) slide 10-28 mm in the
+    # fingers during the lift itself.
+    squeeze: float = 0.060
     # Score penalty per metre of distance between the object's centre of mass
     # and the grasp line. Finger contacts have no spinning friction, so an
     # off-centre grasp lets gravity pivot the object out of the fingers.
