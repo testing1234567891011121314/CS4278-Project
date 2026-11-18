@@ -151,12 +151,43 @@ class Solver:
             return self.action.copy()
 
         if self.state == 999:    ## wait for object to spawn
-            # The object spawns at z=5 and needs ~200 steps to land on the table;
-            # planning against the falling cloud produced unreachable-airborne goals.
+            # The object spawns at z=5 and lands on the table after ~50 steps;
+            # planning against the falling cloud produced unreachable-airborne
+            # goals. Meanwhile tuck the arm into the travel pose (state 0 would
+            # do it first anyway; the robot is 2 m from the drop point), and
+            # leave as soon as the object has been at rest for 10 steps
+            # (self.wait = 200 remains the cap).
+            if not getattr(self, "_travel_pose_complete", False):
+                action = self.moving_pose(obs)
+                if self.moving_pose_ready:
+                    # Same as navigate() does once the travel pose is reached.
+                    self.inflated_occupancy = self.create_navigable_map()
+                    self._travel_pose_complete = True
+                    self.path = None
+                    self._path_goal = None
+                    self.waypoint_index = 0
+                    self.curved_nav.reset()
+            else:
+                action = self.action.copy()
             self.wait -= 1
-            if self.wait == 0:
+            # "Landed": over the last 15 steps the object stayed within 3 mm
+            # and turned < 0.05 rad. Some objects keep rocking by < 1 mm per
+            # step for 100+ steps; that is harmless here because state 1 still
+            # waits for the object to be still before planning, and
+            # NavigateToGrasp re-selects its goal if the object moves > 1 cm.
+            history = getattr(self, "_drop_history", [])
+            history = (history + [np.r_[obs["object_pos"], obs["object_xyzw"]]])[-15:]
+            self._drop_history = history
+            poses = np.asarray(history)
+            landed = (
+                len(poses) == 15
+                and poses[-1, 2] < 4.0
+                and np.max(np.linalg.norm(poses[:, :3] - poses[:, :3].mean(axis=0), axis=1)) < 0.003
+                and 2 * np.arccos(min(1.0, abs(float(np.dot(poses[0, 3:], poses[-1, 3:]))))) < 0.05
+            )
+            if self.wait <= 0 or (landed and self._travel_pose_complete):
                 self.state = 0
-            return np.zeros(env.action_size)
+            return action
 
         if self.state == 0:
             try:
