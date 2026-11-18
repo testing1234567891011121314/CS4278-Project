@@ -456,8 +456,12 @@ class Solver:
         self.action = np.clip(action, self.action_lower_bound, self.action_upper_bound)
         return self.action.copy()
 
-    def _solve_reach(self, obs, seconds=20.0):
-        """Return a collision-checked torso+arm path to the place pose, or None."""
+    def _solve_reach(self, obs, seconds=60.0):
+        """Return a collision-checked torso+arm path to the place pose, or None.
+
+        `seconds` is CPU time; planning costs no simulation steps, so the
+        budget is generous (plans measured at 2.5-7 CPU-s for the soup can).
+        """
         from scipy.spatial.transform import Rotation
         from custom_libraries.grasp import _ManipulatorIK, RRTConnect, edge_samples, planning_clock
         planner = self.grasp_planner
