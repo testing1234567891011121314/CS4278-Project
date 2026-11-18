@@ -54,7 +54,7 @@ def load(log):
 if not args.report:
     os.makedirs(out, exist_ok=True)
     shutil.rmtree(snap, ignore_errors=True)
-    skip = shutil.ignore_patterns(".git", "pnr", "__pycache__", "pristine", "*.mp4", "*.jsonl", "imgs")
+    skip = shutil.ignore_patterns(".git", ".claude", "pnr", "__pycache__", "pristine", "*.mp4", "*.jsonl", "imgs")
 
     def ignore(folder, names):
         # OUT_DIR may be inside the repo: never copy it into its own snapshot.
