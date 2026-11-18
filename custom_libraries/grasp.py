@@ -91,6 +91,23 @@ class GraspConfig:
     max_approach_torso_jump: float = 0.02  # metres per Cartesian waypoint
     torso_action_step: float = 0.002  # metres per follower call; tune to timestep
     torso_goal_tolerance: float = 0.001  # metres
+    # GraspFollower moves a command point ("carrot") along the planned path at
+    # these per-call joint speeds instead of converging on every densified
+    # waypoint. It only stops (waits for the measured state to converge) at
+    # phase ends and at corners of the joint-space path, so the arm never
+    # cuts a corner of the collision-checked polyline by more than the
+    # corner tolerance. Speeds are per env.step (5 physics substeps).
+    follow_arm_step: float = 0.04  # rad per call in open/transit
+    follow_torso_step: float = 0.006  # metres per call in open/transit
+    follow_cartesian_arm_step: float = 0.01  # rad per call, approach/close
+    follow_cartesian_torso_step: float = 0.003  # metres per call, approach/close
+    follow_lift_arm_step: float = 0.01  # rad per call while lifting
+    follow_lift_torso_step: float = 0.003  # metres per call while lifting
+    follow_corner_cos: float = 0.995  # direction cosine below which a waypoint is a corner
+    follow_corner_tolerance: float = 0.02  # rad (torso: x torso_metric_scale) at corners
+    follow_close_rate: float = 0.0005  # metres per call the finger command closes
+    follow_close_stable: int = 12  # ticks of bilateral contact before the lift
+    follow_ramp_ticks: int = 8  # carrot speed ramps up over this many calls per phase
     rrt_step: float = 0.20
     rrt_iterations: int = 2500
     # Budgets are CPU seconds and cost no simulation steps. One collision check
@@ -1001,6 +1018,30 @@ class GraspFollower:
         # The environment's P-only position controller sags under gravity; an
         # integral term on the commanded arm/torso targets removes the offset.
         self.integral = np.zeros(len(planner.action_ids))
+        # Waypoints where the carrot waits for the measured state: phase ends
+        # and joint-space corners. Everything between two stops is (nearly) a
+        # straight checked segment, and an equal-gain P controller tracking a
+        # point moving along a straight line stays on that line.
+        cfg = planner.config
+        waypoints, phases = plan.waypoints, plan.phases
+        self.motion = np.r_[planner.torso_index, planner.arm_indices]
+        self.motion_scale = np.r_[cfg.torso_metric_scale, np.ones(len(planner.arm_indices))]
+        n = len(waypoints)
+        self.stops = np.zeros(n, bool)
+        self.stops[-1] = True
+        for i in range(n - 1):
+            if phases[i] != phases[i + 1]:
+                self.stops[i] = True
+        for i in range(1, n - 1):
+            a = (waypoints[i] - waypoints[i - 1])[self.motion] / self.motion_scale
+            b = (waypoints[i + 1] - waypoints[i])[self.motion] / self.motion_scale
+            na, nb = np.linalg.norm(a), np.linalg.norm(b)
+            if na > 1e-9 and nb > 1e-9 and np.dot(a, b) / (na * nb) < cfg.follow_corner_cos:
+                self.stops[i] = True
+        self.carrot = None  # commanded point on the path (full action vector)
+        self.finger_command = None  # closing ramp
+        self.phase_ticks, self.phase = 0, None
+        self.finger_previous, self.finger_still = None, 0
 
     def _contacts(self):
         owner = self.planner
@@ -1051,27 +1092,102 @@ class GraspFollower:
                        * Rotation.from_quat(obs['object_xyzw'])).magnitude()
             if np.linalg.norm(np.asarray(obs['object_pos'])-self.plan.object_position) > 0.012 or rotated > 0.10:
                 return self._fail('Object moved; stop and obtain a fresh plan.', q)
-        # Common interpolation factor keeps commanded targets on the checked
-        # joint-space segment; independent component clipping would bend it.
-        limits = np.full(len(q), 0.015)
-        limits[owner.torso_index] = owner.config.torso_action_step
-        limits[owner.finger_indices] = 0.0004 if phase == 'close' else 0.002
-        error = target-q
-        scale = max(1., float(np.max(np.abs(error)/limits)))
-        action = q + error/scale
-        lifted = np.r_[owner.torso_index, owner.arm_indices]
-        self.integral[lifted] = np.clip(self.integral[lifted] + 0.05*error[lifted], -0.15, 0.15)
-        action[lifted] += self.integral[lifted]
+        cfg, motion = owner.config, self.motion
+        waypoints, phases = self.plan.waypoints, self.plan.phases
+        # Advance the carrot along the polyline by one call's worth of joint
+        # motion (common factor across joints, so it stays on each segment),
+        # passing through intermediate waypoints but never past a stop.
+        if self.carrot is None:
+            self.carrot = q.copy()
+        if phases[self.index] != self.phase:
+            self.phase, self.phase_ticks = phases[self.index], 0
+        self.phase_ticks += 1
+        # Ramp the speed up at the start of each phase (no step in velocity).
+        budget = min(1.0, self.phase_ticks / max(1, cfg.follow_ramp_ticks))
+        while True:
+            arm_step, torso_step = {
+                'approach': (cfg.follow_cartesian_arm_step, cfg.follow_cartesian_torso_step),
+                'close': (cfg.follow_cartesian_arm_step, cfg.follow_cartesian_torso_step),
+                'lift': (cfg.follow_lift_arm_step, cfg.follow_lift_torso_step),
+            }.get(phases[self.index], (cfg.follow_arm_step, cfg.follow_torso_step))
+            limits = np.full(len(motion), arm_step)
+            limits[0] = torso_step
+            delta = (waypoints[self.index] - self.carrot)[motion]
+            need = float(np.max(np.abs(delta) / limits))
+            if need > budget:
+                self.carrot[motion] += delta * (budget / need)
+                break
+            self.carrot[motion] = waypoints[self.index][motion]
+            budget -= need
+            if self.stops[self.index]:
+                break
+            self.index += 1
+            self.ticks = 0
+        target = waypoints[self.index]
+        phase = phases[self.index]
+        at_stop = self.stops[self.index] and np.array_equal(self.carrot[motion], target[motion])
+
+        error = self.carrot - q
+        action = self.carrot.copy()
+        # While the carrot moves, the measured state lags behind it along the
+        # segment; integrating that lag winds up and overshoots the segment
+        # end. Integrate only the off-path (sag) part while moving.
+        integrated = error[motion] / self.motion_scale
+        if not at_stop and self.index > 0:
+            direction = (target - waypoints[self.index - 1])[motion] / self.motion_scale
+            norm = np.linalg.norm(direction)
+            if norm > 1e-9:
+                direction /= norm
+                integrated = integrated - np.dot(integrated, direction) * direction
+        self.integral[motion] = np.clip(self.integral[motion] + 0.05*integrated*self.motion_scale, -0.15, 0.15)
+        action[motion] += self.integral[motion]
         action[self.pinned] = target[self.pinned]
-        if phase == 'lift':
-            action[owner.finger_indices] = target[owner.finger_indices]
-        reached = (np.max(np.abs(error[owner.arm_indices])) < 0.008
-                   and abs(error[owner.torso_index]) < owner.config.torso_goal_tolerance)
-        if phase == 'open':
-            reached &= np.max(np.abs(error[owner.finger_indices])) < 0.001
-        elif phase == 'close':
-            self.contact_stable = self.contact_stable + 1 if self._contacts() else 0
-            reached &= self.contact_stable >= 12 and self.ticks >= 30
+        # Fingers get their final target directly (their gain is 10x lower
+        # than the arm's, so a rate-limited command made opening take ~200
+        # calls); they open during the transit, before the approach starts.
+        action[owner.finger_indices] = target[owner.finger_indices]
+        if phase == 'close':
+            if self.finger_command is None:
+                self.finger_command = waypoints[self.index - 1][owner.finger_indices].copy()
+            step = target[owner.finger_indices] - self.finger_command
+            self.finger_command += np.clip(step, -cfg.follow_close_rate, cfg.follow_close_rate)
+            action[owner.finger_indices] = self.finger_command
+
+        final_error = target - q
+        last_of_phase = self.index + 1 == len(waypoints) or phases[self.index + 1] != phase
+        if last_of_phase:
+            arm_tolerance, torso_tolerance = 0.008, cfg.torso_goal_tolerance
+        else:  # joint-space corner inside a phase
+            arm_tolerance = cfg.follow_corner_tolerance
+            torso_tolerance = cfg.follow_corner_tolerance * cfg.torso_metric_scale
+        reached = (at_stop and np.max(np.abs(final_error[owner.arm_indices])) < arm_tolerance
+                   and abs(final_error[owner.torso_index]) < torso_tolerance)
+        if last_of_phase and self.index + 1 < len(waypoints) and phases[self.index + 1] == 'approach':
+            # Enter the approach only with the gripper open as planned. Check
+            # the total opening: with the closing axis tilted, gravity shifts
+            # both weak finger servos the same way by several millimetres.
+            reached &= abs(float(np.sum(final_error[owner.finger_indices]))) < 0.004
+        if phase == 'close':
+            # The arm converged at the end of the approach; once the fingers
+            # squeeze, the object pushes back on the arm, so the arm/torso
+            # tolerance is not required here (it kept `reached` false until
+            # the 600-tick timeout on some banana/hammer grasps).
+            contact = self._contacts()
+            self.contact_stable = self.contact_stable + 1 if contact else 0
+            fingers = q[owner.finger_indices]
+            moving = (self.finger_previous is not None
+                      and np.max(np.abs(fingers - self.finger_previous)) > 1e-4)
+            self.finger_previous = fingers.copy()
+            commanded = np.allclose(self.finger_command, target[owner.finger_indices])
+            self.finger_still = self.finger_still + 1 if commanded and not moving else 0
+            stalled = self.finger_still >= cfg.follow_close_stable
+            if stalled and not contact and self.contact_stable == 0 and self.ticks > 60:
+                return self._fail('Fingers stopped closing without bilateral contact.', q)
+            # Done once contact is stable, or once the fingers have stopped
+            # moving with both fingers touching (contact force may flicker
+            # around the detection threshold on some shapes).
+            reached = commanded and (self.contact_stable >= cfg.follow_close_stable
+                                     or (stalled and contact))
         elif phase == 'lift':
             self.lost_contact_ticks = 0 if self._contacts() else self.lost_contact_ticks + 1
             if self.lost_contact_ticks > 20:
@@ -1079,10 +1195,14 @@ class GraspFollower:
         if self.ticks > 600:
             return self._fail(f'Timed out during {phase} at waypoint {self.index}.', q)
         if reached:
-            if self.index + 1 == len(self.plan.waypoints):
+            if self.index + 1 == len(waypoints):
                 if not self._contacts():
+                    if phase == 'lift':
+                        # A one-tick contact flicker at the top is not a drop;
+                        # wait (lost_contact_ticks fails a real one above).
+                        return np.clip(action, owner.lower, owner.upper)
                     return self._fail('No bilateral finger contact at completion.', q)
-                if phase == 'lift' and float(obs['object_pos'][2]) < self.plan.object_position[2] + owner.config.min_lift_fraction*owner.config.lift_distance:
+                if phase == 'lift' and float(obs['object_pos'][2]) < self.plan.object_position[2] + cfg.min_lift_fraction*cfg.lift_distance:
                     return self._fail('Arm reached lift pose but the object did not rise.', q)
                 self.status = 'done'
                 self.hold = target.copy()
