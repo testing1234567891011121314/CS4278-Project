@@ -143,6 +143,37 @@ State 3 used to be a terminal hold. The new sequence is:
    - solve IK (the planner's private torso + arm model) for a gripper pose that puts the *object*, not the gripper, on the goal;
    - move the arm there slowly.
 
+## Session 2: holding the object through transport
+
+Measured with `tools/trace_hold.py`. End-to-end deliveries on the reference
+batch (objects 5, 6, 7, 14, 2 × seeds 42 and 7) went from 2 / 10 to 5 / 10.
+
+### 11. Fingers gripped at the pad tip (`grasp.py`)
+The contact was planned 6.5 mm from the fingertip (`tcp_offset` 0.025 on a
+63 mm pad), so objects slid onto the tip edge during the lift. `plan()` now
+tries `tcp_offsets = (0.010, 0.025)`: 21 mm from the tip first, the old depth
+only as a fallback.
+
+### 12. Off-centre grasps pivoted out (`grasp.py`, `navigate_to_grasp.py`)
+Finger contacts have no spinning friction. Candidates are now ranked down by
+the distance from the centre of mass to the grasp line (`com_weight` 4.0).
+
+### 13. Weak squeeze (`grasp.py`)
+`squeeze` 0.004 → 0.012. This slows creep but is the suspected cause of
+occasional ejections; see handoff.md, next step 3.
+
+### 14. The reach swung the object into the maze walls (`solver.py`, state 68)
+The final arm move was a joint-space interpolation. It is now an RRT-Connect
+path with the object attached and the walls as obstacles, aiming at the goal
+or points 5 cm from it, with 3 planning attempts.
+
+### 15. Driving on with an empty gripper (`solver.py`)
+States 5, 67 and 68 go to state 4 after 30 ticks without bilateral finger
+contact; `grasp_error` records where the object was lost.
+
+Not used, by team decision: PyBullet's `frictionAnchor` on the finger links.
+It removes the creep completely but changes the robot's contact model.
+
 ## Known limitations / next steps
 
 - **Objects still slip during transport** in most runs: during the re-tuck, during navigation, or in the final arm motion. A firmer grasp would be the most useful next fix, for example:
