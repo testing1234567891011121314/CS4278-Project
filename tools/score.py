@@ -26,7 +26,6 @@ Stops at the first success, 50 steps after a drop, on state 4, on a stall
 (default 15000, the rubric's reach budget).
 """
 import contextlib
-import io
 import json
 import os
 import sys
@@ -52,7 +51,7 @@ DROP_STEPS, STALL_STEPS = 30, 400
 obj, seed = int(sys.argv[2]), int(sys.argv[3])
 max_steps = int(sys.argv[4]) if len(sys.argv) > 4 else REACH_BUDGET
 
-quiet = contextlib.redirect_stdout(io.StringIO())
+quiet = contextlib.redirect_stdout(open(os.devnull, "w"))   # the env and solver print every step
 maze = os.path.join(tempfile.gettempdir(), f"score_maze_{os.getpid()}.urdf")
 with quiet:
     env = PickNavReachEnv(seed=seed, object_idx=obj, maze_urdf_path=maze, gui=False)
