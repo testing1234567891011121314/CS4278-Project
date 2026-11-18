@@ -479,6 +479,7 @@ class GraspPlanner:
                         and frozenset((clusters[a], clusters[b])) not in adjacent
                         and pair not in self.disabled_pairs):
                     self.self_pairs.add(pair)
+        self._self_pair_list = sorted(tuple(sorted(pair)) for pair in self.self_pairs)
         self.collision_policy = {
             'srdf_path': str(self.srdf_path) if self.srdf_path is not None else None,
             'srdf_pair_count': len(srdf_pairs),
@@ -683,8 +684,23 @@ class GraspPlanner:
                     'distance': float(contact[8]),
                 }
                 return False
-        for contact in p.getClosestPoints(self.robot, self.robot, cfg.collision_margin, physicsClientId=self.client):
-            if frozenset((contact[3], contact[4])) in self.self_pairs:
+        # Self-collision, pair by pair, skipping pairs whose bounding boxes are
+        # apart. One robot-vs-robot query over all links cost ~20 ms and was 95 %
+        # of the time of a validity check; this gives the same answer.
+        boxes = {}
+        reach = cfg.collision_margin + 0.01
+        for a, b in self._self_pair_list:
+            if a not in boxes:
+                boxes[a] = p.getAABB(self.robot, a, physicsClientId=self.client)
+            if b not in boxes:
+                boxes[b] = p.getAABB(self.robot, b, physicsClientId=self.client)
+            (alo, ahi), (blo, bhi) = boxes[a], boxes[b]
+            if (alo[0] > bhi[0] + reach or blo[0] > ahi[0] + reach
+                    or alo[1] > bhi[1] + reach or blo[1] > ahi[1] + reach
+                    or alo[2] > bhi[2] + reach or blo[2] > ahi[2] + reach):
+                continue
+            for contact in p.getClosestPoints(self.robot, self.robot, cfg.collision_margin,
+                                              linkIndexA=a, linkIndexB=b, physicsClientId=self.client):
                 self._last_invalid = {
                     'reason': 'self_collision', 'links': (contact[3], contact[4]),
                     'link_names': (self.link_names[contact[3]], self.link_names[contact[4]]),
