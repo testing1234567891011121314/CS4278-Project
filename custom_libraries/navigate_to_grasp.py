@@ -118,6 +118,7 @@ class NavigateToGrasp:
             self.env.object_id,
             points=obs["object_pc"],
             normals=obs["object_normals"],
+            com=obs["object_pos"],
         )
         if len(candidates) == 0:
             raise RuntimeError("No antipodal grasp candidates found.")

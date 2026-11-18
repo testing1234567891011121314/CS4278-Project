@@ -59,10 +59,20 @@ class GraspConfig:
     finger_travel: float = 0.05
     pad_length: float = 0.063
     pad_height: float = 0.024
-    tcp_offset: tuple = (0.025, 0.0, 0.0)  # contact near pad tips, ahead of link origin
+    tcp_offset: tuple = (0.010, 0.0, 0.0)  # contact point ahead of the finger link origin (pad centre)
+    # Depths tried in order by plan(). Contacts 6.5 mm from the pad tip (0.025)
+    # let the object creep onto the tip edge during the lift and hang there;
+    # 0.010 leaves ~21 mm of pad beyond the contact. Fetch's own grasp frame is
+    # the pad centre. The shallow depth remains as a fallback for low objects
+    # where deep fingertips would hit the table.
+    tcp_offsets: tuple = (0.010, 0.025)
     opening_clearance: float = 0.024  # total gap, metres
     min_opening_clearance: float = 0.008  # used when travel cannot fit the full clearance (wide objects)
-    squeeze: float = 0.004  # total gap reduction in motor command after contact
+    squeeze: float = 0.012  # total gap reduction in motor command after contact
+    # Score penalty per metre of distance between the object's centre of mass
+    # and the grasp line. Finger contacts have no spinning friction, so an
+    # off-centre grasp lets gravity pivot the object out of the fingers.
+    com_weight: float = 4.0
     min_width: float = 0.005
     finger_thickness: float = 0.015  # finger body beyond the pad surface, for the obstruction test
     max_cloud_points: int = 800
@@ -487,12 +497,14 @@ class GraspPlanner:
             raise ValueError('Expected zero lower finger limits.')
         self.config.finger_travel = float(min(self.upper[self.finger_indices]))
 
-    def sample_antipodal_grasps(self, object_id=None, num_samples=500, *, points, normals):
+    def sample_antipodal_grasps(self, object_id=None, num_samples=500, *, points, normals, com=None):
         """Sample surface pairs satisfying BOTH outward-normal friction cones.
 
         Returns ranked (p1,p2,centre,xyzw,score) tuples, compatible with
         NavigateToGrasp. num_samples limits returned poses, not random trials.
         Normals must be outward; the environment already supplies these.
+        com is the object's centre of mass (world); candidates whose grasp line
+        passes far from it are ranked lower. Defaults to the cloud centroid.
         """
         cfg = self.config
         pts, ns = np.asarray(points, float), np.asarray(normals, float)
@@ -520,9 +532,12 @@ class GraspPlanner:
         keep = (a >= threshold) & (b >= threshold)
         i, j, directions, widths, quality = i[keep], j[keep], directions[keep], widths[keep], np.minimum(a[keep], b[keep])
         self.sample_stats['antipodal_pairs'] = len(i)
+        com = cloud.mean(axis=0) if com is None else np.asarray(com, float)
+        rel = com - pts[i]
+        com_dist = np.linalg.norm(rel - np.einsum('ij,ij->i', rel, directions)[:, None]*directions, axis=1)
         # Include a spread of locations rather than spending the budget on a
         # thousand almost-identical contacts on the same planar face.
-        order = np.argsort(-(quality - 0.05*np.abs(directions[:, 2])))
+        order = np.argsort(-(quality - 0.05*np.abs(directions[:, 2]) - cfg.com_weight*com_dist))
         candidates, seen = [], set()
         for k in order:
             centre = (pts[i[k]] + pts[j[k]]) / 2
@@ -552,7 +567,7 @@ class GraspPlanner:
                     if key in seen:
                         continue
                     seen.add(key)
-                    score = float(quality[k] + 0.10*(-approach[2]))
+                    score = float(quality[k] + 0.10*(-approach[2]) - cfg.com_weight*com_dist[k])
                     candidates.append((pts[i[k]].copy(), pts[j[k]].copy(), centre.copy(), quat, score))
             if len(candidates) >= num_samples:
                 break
@@ -743,9 +758,31 @@ class GraspPlanner:
     def plan(self, obs):
         """Plan from measured post-navigation state; return GraspPlan or None.
 
+        Tries each depth in config.tcp_offsets in turn (deep first), so the
+        object sits well inside the finger pads whenever that is feasible.
         None means the finite sampling/IK/RRT budget failed, not that the parked
         pose is proven unreachable. last_stats explains the rejection stage.
         """
+        cfg = self.config
+        original = cfg.tcp_offset
+        attempts = []
+        try:
+            for depth in cfg.tcp_offsets:
+                cfg.tcp_offset = (float(depth), 0.0, 0.0)
+                plan = self._plan_once(obs)
+                attempts.append((float(depth), self.last_stats.get('reason')))
+                self.last_stats['tcp_attempts'] = list(attempts)
+                if plan is not None:
+                    self.last_stats['tcp_offset'] = float(depth)
+                    return plan
+                if self.last_stats.get('reason') == 'invalid_start_state':
+                    return None  # a deeper/shallower grasp cannot fix the start state
+            return None
+        finally:
+            cfg.tcp_offset = original
+
+    def _plan_once(self, obs):
+        """One planning attempt at the current config.tcp_offset."""
         if self.env is None:
             raise ValueError('Construct GraspPlanner(env) before calling plan().')
         cfg = self.config
@@ -778,7 +815,8 @@ class GraspPlanner:
                 print('[FAIL start]', error, flush=True)
                 return None
         stats['start_valid'] = True
-        candidates = self.sample_antipodal_grasps(points=obs['object_pc'], normals=obs['object_normals'])
+        candidates = self.sample_antipodal_grasps(points=obs['object_pc'], normals=obs['object_normals'],
+                                                  com=obs['object_pos'])
         stats['candidates'] = len(candidates)
         if not candidates:
             stats['reason'] = 'no_antipodal_pairs'
