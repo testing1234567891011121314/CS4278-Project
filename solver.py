@@ -44,14 +44,14 @@ class Solver:
         # base covers 83 % of it). 0.004 was needed with a 50 N grip and the
         # fingers across the direction of travel; see carry_grip_extra and
         # _align_grip.
-        self.carry_speed = 0.018
+        self.carry_speed = 0.036
         # Extra finger closing (metres per finger) commanded once the object is
         # lifted. Grip force is linear in how far the finger command sits inside
         # the object: measured 6.6 N per mm, steady, 50 N at the grasp's own
         # squeeze and ~250 N with the fingers commanded shut. Friction, and so
         # every speed the hold tolerates, scales with it.
         self.carry_grip_extra = 0.030
-        self.carry_accel = 0.0005         # change of that displacement per tick (speed ramp)
+        self.carry_accel = 0.002         # change of that displacement per tick (speed ramp)
         self.tuck_rate = 0.012            # rad per tick when moving the arm into the carry pose with the object
         self.reach_rate = 0.012           # rad per tick for the final arm move to the goal
         self.reach_backoff_cells = 7      # cells to back off along the path before reaching to the goal
