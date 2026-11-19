@@ -179,6 +179,13 @@ class Solver:
         self._wrist_roll_index = names["wrist_roll_joint"]
         self.align_grip_to_travel = True   # turn the fingers to face the direction of travel while carrying
         self.grip_align_rate = 0.1         # rad per tick
+        # Grasp exploration, for collecting ranker training data
+        # (tools/README_ranker_data.md): 0 tries the grasp candidates in score
+        # order; K > 0 tries the first pass's top K in a seeded random order.
+        # grasp_explore_seed < 0: tools/score.py derives it from the object,
+        # seed and repeat; elsewhere the planner draws fresh entropy.
+        self.grasp_explore = 0
+        self.grasp_explore_seed = -1
         # Validate the configured travel targets.
         self._travel_target(self.action)
 
@@ -512,6 +519,8 @@ class Solver:
             started = time.monotonic()
             print("[PLAN] Starting grasp planning", flush=True)
 
+            self.grasp_planner.explore = int(self.grasp_explore)
+            self.grasp_planner.explore_seed = int(self.grasp_explore_seed) if self.grasp_explore_seed >= 0 else None
             plan = self.grasp_planner.plan(obs)
 
             print(
