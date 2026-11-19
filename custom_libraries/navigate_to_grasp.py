@@ -79,6 +79,40 @@ class NavigateToGrasp:
         self.overhead_rects = []       # (xmin, ymin, xmax, ymax) the base fits under
         self.overhead_reach = 0.0      # how far tall links (torso) reach forward
         self.overhead_margin = 0.03
+        # Parking limits for an object on the table; set_floor_mode swaps in
+        # the floor limits and back.
+        self.floor_mode = False
+        self._table_limits = dict(min_reach=min_reach, max_reach=max_reach, min_z=min_z,
+                                  max_z=max_z, preferred_reach=preferred_reach,
+                                  position_tolerance=position_tolerance)
+
+    def set_floor_mode(self, on, *, min_reach=0.48, max_reach=0.62, preferred_reach=0.55,
+                       min_z=-0.05, max_z=0.30, position_tolerance=0.04):
+        """Use the parking limits for a grasp on the floor (on=True) or the
+        table limits given to __init__ (on=False).
+
+        With the gripper pointing down at floor height (pad centre 5 cm above
+        the floor) the planner's IK finds collision-free arm poses only for
+        a horizontal distance of about 0.45-0.65 m from the base centre: closer,
+        the forearm or wrist hits the base; farther, there is no IK solution
+        (scratch/HANDBACK.md, section 2). The band and the arrival tolerance
+        are chosen so that the parked distance stays inside it.
+        """
+        limits = (dict(min_reach=min_reach, max_reach=max_reach, min_z=min_z, max_z=max_z,
+                       preferred_reach=preferred_reach, position_tolerance=position_tolerance)
+                  if on else self._table_limits)
+        for key, value in limits.items():
+            setattr(self, key, float(value))
+        self.floor_mode = bool(on)
+
+    def reset(self):
+        """Forget the grasp, the parking goal, failed goals and the turn, so
+        that the next update starts a fresh pick from the current state (for
+        example after the object was dropped and lies somewhere else)."""
+        self._object_pose = None
+        self.grasp = self.navigation_goal = None
+        self.failed_goals.clear()
+        self._reset_preparation()
 
     def set_overhead_obstacles(self, rects, link_reach, margin=0.03):
         """Obstacles the base can drive under but the torso cannot (table top).
@@ -380,8 +414,10 @@ class NavigateToGrasp:
         grasp_pos, grasp_quat = self.relative_grasp_pose(obs)
         reach = self.classify_reachability(grasp_pos)
         if reach == "HEIGHT_OUT_OF_RANGE":
-            raise RuntimeError("Grasp height is outside the configured coarse height range; "
-                               "moving the base horizontally will not change it.")
+            mode = "floor" if self.floor_mode else "table"
+            raise RuntimeError(f"Grasp height {grasp_pos[2]:.3f} m is outside the {mode} pick's "
+                               f"height range [{self.min_z}, {self.max_z}]; moving the base "
+                               "horizontally will not change it.")
         target = self.grasp["position_world"][:2]
         distance = np.linalg.norm(target-base[:2])
         current_ok = (self.min_reach <= distance <= self.max_reach
