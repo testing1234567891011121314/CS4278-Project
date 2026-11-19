@@ -81,11 +81,13 @@ class Solver:
         # 0.5 m corner at 30 mm per tick it would turn 0.06 rad per tick.
         self.object_turn_rate = 1e9
         self.yaw_fillet_radius = 0.5      # largest corner radius of the object's path (m)
-        self.slip_governor = True         # slow the drive once the object slides toward the fingertips
-        # Speed factors at 3, 6 and 10 mm of slide. Reference batches:
-        # (1, 0.6, 0.4) 27/30 delivered, 8 of them slowed, 4 over 1,500
-        # steps (1,612-2,140); (1, 0.75, 0.6) 21/30, 1 slowed.
-        self.slip_slowdown = (1.0, 0.6, 0.4)
+        # Slow the drive once the object slides toward the fingertips. Off:
+        # on the reference batch it made no measurable difference (50/60
+        # delivered with it at the factors below, 51/60 without), and the
+        # slowed trials took up to 2,165 steps. Apples alone: 10/12 with it,
+        # 9/15 without.
+        self.slip_governor = False
+        self.slip_slowdown = (1.0, 0.6, 0.4)   # speed factors at 3, 6 and 10 mm of slide
         # Heavy objects: at the end of the hold, weigh the object from the
         # finger contact forces (as a wrist force sensor would) and scale the
         # retreat and yaw-carry speeds and rates by gentle_mass / mass, at
