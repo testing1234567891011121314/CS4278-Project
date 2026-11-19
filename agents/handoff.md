@@ -3,9 +3,109 @@
 Read `agents/fixes.md` first. It explains every change made so far and why.
 This file covers where things stand, how to test, and what to do next.
 
+## Session 3, part 3: toward 1,500 steps
+
+Date: 2026-11-19. This is the newest section; it is placed above part 2
+because this file lists the newest work first. Read it first, then part 2.
+
+**New target.** The user now wants the whole episode (pick, carry and reach)
+within 1,500 `env.step` calls for full credit; it was 3,000. The code at
+84202b1 finishes in about 2,700-3,000. Unanswered questions for the course
+staff and the user:
+- how credit scales with steps;
+- whether the lift limit scales too;
+- which objects count;
+- whether reading the object mass from the simulator is allowed.
+
+**Where it stands.**
+- 818e59b (local, not pushed) raises `GraspConfig.squeeze` in
+  `custom_libraries/grasp.py` to 0.060: the fingers are commanded 30 mm per
+  finger past contact from the close phase onward, so the object is held at
+  full force (about 250 N, 110-135 N for narrow objects; 6.6 N per mm of
+  finger command offset) before the lift and the carry. Cause of the earlier
+  losses: the object crept across the pads during the retreat and arm swing
+  while the grip was still light. This is fix 30 in fixes.md.
+- Sugar box, hammer, strawberry and apple (2 seeds each): delivered 2 of 8
+  before, 6 of 8 after.
+- Batch objects 1, 13, 6, 7, 14 x seeds 42 and 7: 7 of 10 delivered.
+  Failures: sugar box seed 7 lost in state 67 at step 779; strawberry seed 42
+  lost in state 68 at step 2,593; foam brick seed 42 lost in state 67 at step
+  2,033.
+- Objects 5 and 2 x both seeds: 4 of 4 delivered, at 2,709-2,929 steps.
+- At 84202b1 on the user's machine (all 15 objects, maze seed 42, their
+  `run.sh`): 3 of 15 delivered (foam brick 3,036 steps, banana 2,981, tomato
+  soup can 3,043). Strawberry, potted meat can, apple, hammer and sugar box
+  were lost in state 67 (carry), mostly near the start; mustard bottle and
+  large marker found no grasp plan; master chef can, bowl and plate had no
+  grasp candidates; bleach cleanser never starts; the mug ended on the floor.
+  The earlier beec9b4 on the same machine delivered 5 of 15 at about
+  12,200-12,700 steps (see part 2). A wider batch here at 84202b1 (objects 1,
+  4, 13, 6, 7 x seeds 42 and 7) delivered 2 of 10.
+- Still failing at planning: potted meat can (4) and master chef can (0). All
+  60 candidates are rejected with IK failures and approach failures; master
+  chef can seed 42 goes to state 4 at step 68.
+
+**Tested, not adopted.**
+- Slower arm swing (`tuck_rate` 0.005 instead of 0.012): sugar box and apple
+  delivered but in more than 3,000 steps; hammer and strawberry still lost.
+- Gripper-straight-down carry pose. The maze is passable with a robot
+  footprint radius up to 0.38 m (plus the 5 cm margin) on maze seeds 42, 7, 1,
+  2 and 3; the route is about 20-21 m (197-212 cells). The fingers-up pose has
+  radius 0.289 m. A pose search up to 0.38 m found no pose with radius <=
+  0.38 m and at least 0.10 m clearance between the held object and the robot;
+  the closest had radius 0.372 m and clearance 0.098 m (gripper height 0.95 m,
+  gripper xy (0.15, 0.25) in the base frame). The held object ends up 7-10 cm
+  from the torso, or the arm hits the head. The fingers-up pose stays. (Older
+  notes say no gripper-down pose fits; that was against the 0.289 m footprint.)
+
+**Experiment: twice the carry speed (not committed).** Traces with
+`tools/trace_carry.py` and `SOLVER_SET="carry_speed=0.036,carry_accel=0.002"`
+(twice the driving speed, four times the ramp), on top of 818e59b:
+
+| Trial | Result | Drift in grip |
+|---|---|---|
+| Apple seed 7 | delivered, step 1,989, no drop | 9.2 mm at the end of the carry |
+| Soup can seed 42 | delivered, step 1,791 | 3.5 mm |
+| Banana seed 42 | delivered, step 1,799 | 4.9 mm |
+| Foam brick seed 7 | lost in state 67 at step 831 | 15.5 mm by step 700, 21.5 mm after 80 steps of driving |
+
+- The foam brick had slid 15.5 mm (about 10 mm downward) before the base
+  started driving, i.e. during the retreat and arm swing, then slipped out
+  during an acceleration from a stop. So this loss starts in the swing, not at
+  top speed.
+- In the three deliveries the maze took 811-856 moving steps at a mean 26-27
+  mm per step (peak 30 mm per step, the commanded 36 mm times the 83 % the
+  base covers per step); before, about 1,700-1,900 steps.
+- Step breakdown: lift done at about 350-410, state 67 starts at about
+  395-460, navigation ends (state 68) at about 1,490-1,680, reach about
+  280-310 steps.
+- **Result pending:** a ten-trial reference batch at this speed is running;
+  its result is not known yet. Fill it in here.
+
+**Next, toward 1,500.** The full-force grip holds at twice the speed on
+straights and corners for three of four objects. The remaining 300-500 steps
+must come from:
+- the hold (60 steps);
+- the arm swing before driving (state 67 starts about 290 steps before the
+  base moves fast); the swing is also where the foam brick is lost;
+- the reach (drive onto the goal cell, back off 7 cells, then reach).
+
+**Paper reviews** are in `paper_review/` (`FInal_extraction.md`,
+`FInal_synthesis.md`). Takeaways used: losses come from torsion about the
+closing axis and from the object acting as an inverted pendulum in the
+fingers-up pose, so the offset between the grasp centre and the centre of
+mass matters.
+
+**Operational notes.**
+- `/tmp` is a 2.9 GB RAM-backed filesystem: snapshots must be code-only
+  (`tools/batch.py` links `assets`).
+- Each simulation uses about 900 MB; run at most 4 at once.
+- Commits 47dfcb0 and 818e59b are local only. Do not push unless the user
+  asks.
+
 ## Session 3, part 2: a 3,000-step episode
 
-Date: 2026-11-19. Read this section first, then the Session 3 section below
+Date: 2026-11-19. Read this section after part 3, then the Session 3 section below
 it. The goal changed after the first Session 3 day: the user requires the
 WHOLE episode (pick, carry and reach) to fit in 3,000 `env.step` calls. It
 took about 10,500. All the work below is on `fix/pick-nav-reach` and pushed
@@ -611,7 +711,8 @@ grasp execution (lift now at step 253-364), the 3,000-step episode on 8 of
    second half of the maze and was still held at delivery; the other three
    drifted 1-11 mm. That upward creep while driving is a new pattern and is
    not explained yet. Repeat the batch (`--repeat 3`) to get a rate.
-2. **Margin on 3,000 steps.** Apple seed 7 was delivered at 3,028. The maze
+2. **Margin on 3,000 steps.** (2026-11-19: the target is now 1,500 steps; see
+   Session 3, part 3 at the top.) Apple seed 7 was delivered at 3,028. The maze
    still takes about 1,950 steps; speed dips at corners and while the wrist
    realigns. The arm swing is the fragile part at higher rates (see the
    24 mm per tick batch, 4/10).

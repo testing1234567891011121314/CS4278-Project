@@ -39,6 +39,11 @@ the user now requires for the whole episode). Before part 2 it was 7 / 10 and
 35.2 points (380d21a), with deliveries at about 10,300–11,800 steps. See
 handoff.md, Session 3 and Session 3, part 2, for the full table.
 
+Update 2026-11-19 (part 3): the user's target is now 1,500 steps for the whole
+episode. After fix 30 (818e59b, local) the objects 5 and 2 batch delivered 4 /
+4 in 2,709-2,929 steps, and the 1, 13, 6, 7, 14 batch 7 / 10. The 8 / 10 above
+is at 84202b1 and was not re-run on the full reference batch with fix 30.
+
 The objects that pick reliably are banana, strawberry, apple, foam brick and tomato soup can. Runs are not deterministic, so expect some run-to-run variation.
 
 ## How it was debugged
@@ -386,6 +391,90 @@ for experiments.
   and soup can.
 - A gripper-down carry pose: it does not fit the footprint.
 
+## Session 3, part 3: toward 1,500 steps
+
+New target from the user (2026-11-19): the whole episode must finish within
+1,500 `env.step` calls for full credit (it was 3,000). The code at 84202b1
+finishes in about 2,700-3,000. Open questions for the course staff and the
+user: how credit scales with steps, whether the lift limit scales too, which
+objects count, and whether reading the object mass from the simulator is
+allowed.
+
+### 30. Objects crept across the pads while the grip was still light (`custom_libraries/grasp.py`; 818e59b, local, not pushed)
+**Symptom.** Objects were lost in state 67 (carry), mostly near the start. In
+the user's run of all 15 objects (maze seed 42, their `run.sh`, 84202b1) only
+3 of 15 were delivered: foam brick (3,036 steps), banana (2,981) and tomato
+soup can (3,043). Strawberry, potted meat can, apple, hammer and sugar box
+were lost in state 67; mustard bottle and large marker found no grasp plan;
+master chef can, bowl and plate had no grasp candidates; bleach cleanser never
+starts; the mug ended on the floor. The earlier commit beec9b4 on the same
+machine delivered 5 of 15, at about 12,200-12,700 steps. A wider batch here at
+84202b1 (objects 1, 4, 13, 6, 7 x seeds 42 and 7) delivered 2 of 10.
+**Cause.** The object crept across the pads during the retreat and the arm
+swing, while the grip was still light; the full force came only later, during
+the hold.
+**Fix.** `GraspConfig.squeeze` raised to 0.060: the fingers are commanded 30
+mm per finger past contact from the close phase onward. The object is held at
+full force (about 250 N, 110-135 N for narrow objects; grip force is linear at
+6.6 N per mm of finger command offset) before the lift and the carry.
+**Result.**
+- Sugar box, hammer, strawberry and apple (2 seeds each): delivered 2 of 8
+  before, 6 of 8 after.
+- Batch objects 1, 13, 6, 7, 14 x seeds 42 and 7: 7 of 10 delivered. Failures:
+  sugar box seed 7 lost in state 67 at step 779; strawberry seed 42 lost in
+  state 68 at step 2,593; foam brick seed 42 lost in state 67 at step 2,033.
+- Objects 5 and 2 x both seeds: 4 of 4 delivered, at 2,709-2,929 steps.
+- Still failing: potted meat can (4) and master chef can (0) fail at grasp
+  planning. All 60 candidates are rejected with IK failures and approach
+  failures; master chef can seed 42 goes to state 4 at step 68.
+
+### Tried, not kept in part 3
+- **Slower arm swing** (`tuck_rate` 0.005 instead of 0.012). Sugar box and
+  apple were delivered, but in more than 3,000 steps; hammer and strawberry
+  were still lost.
+- **Gripper-straight-down carry pose.** The maze is passable with a robot
+  footprint radius up to 0.38 m (plus the 5 cm margin) on maze seeds 42, 7, 1,
+  2 and 3; the route is about 20-21 m (197-212 cells), and the current
+  fingers-up pose has radius 0.289 m. A pose search allowing radius up to 0.38
+  m found no pose with radius <= 0.38 m and at least 0.10 m clearance between
+  the held object and the robot. The closest had radius 0.372 m and clearance
+  0.098 m (gripper height 0.95 m, gripper xy (0.15, 0.25) in the base frame).
+  The held object ends up 7-10 cm from the torso, or the arm hits the head.
+  The fingers-up carry pose stays. (This is a different result from the older
+  "does not fit the footprint" note, which assumed the 0.289 m footprint.)
+
+### Experiment: twice the carry speed (2026-11-19, not committed)
+Traced with `tools/trace_carry.py`, `SOLVER_SET="carry_speed=0.036,carry_accel=0.002"`
+(twice the driving speed and four times the ramp), on top of 818e59b.
+- Apple seed 7: delivered at step 1,989, no drop, drift in the grip 9.2 mm at
+  the end of the carry.
+- Tomato soup can seed 42: delivered at step 1,791, drift 3.5 mm.
+- Banana seed 42: delivered at step 1,799, drift 4.9 mm.
+- Foam brick seed 7: lost in state 67 at step 831. It had already slid 15.5
+  mm in the grip (about 10 mm downward) by step 700, before the base started
+  driving, i.e. during the retreat and arm swing. It crept to 21.5 mm over the
+  first 80 steps of driving and then slipped out during an acceleration from a
+  stop. This loss starts in the swing, not at top speed.
+- In the three deliveries the maze took 811-856 moving steps at a mean 26-27
+  mm per step (peak 30 mm per step, the commanded 36 mm times the 83 % the
+  base covers per step); before, about 1,700-1,900 steps.
+- Step breakdown: lift done at about 350-410, state 67 starts at about
+  395-460, navigation ends (state 68) at about 1,490-1,680, the reach takes
+  about 280-310.
+- Conclusion: the full-force grip holds at twice the speed on straights and
+  corners for three of four objects. The remaining 300-500 steps to reach
+  1,500 must come from the hold (60 steps), the arm swing before driving
+  (state 67 starts about 290 steps before the base moves fast) and the reach
+  (drive onto the goal cell, back off 7 cells, then reach).
+- **Result pending:** a ten-trial reference batch at this speed is running;
+  its result is not yet known.
+
+### Paper reviews
+`paper_review/` (`FInal_extraction.md`, `FInal_synthesis.md`). Takeaways used:
+losses come from torsion about the closing axis and from the object acting as
+an inverted pendulum in the fingers-up pose, so the offset between the grasp
+centre and the centre of mass matters.
+
 ## Known limitations / next steps
 
 - **Foam brick is lost in 2 of 2 trials** at 84202b1 (seed 42 in state 67 at
@@ -418,7 +507,8 @@ for experiments.
   28 (part 2).
 - `custom_libraries/navigate_to_grasp.py`: fixes 1 and 3.
 - `custom_libraries/grasp.py`: fixes 5, 6 and 7 (session 1), 11–13 (session
-  2), 16, 17 and 18 (session 3), 25 (`GraspFollower`) and 26 (part 2).
+  2), 16, 17 and 18 (session 3), 25 (`GraspFollower`) and 26 (part 2), 30
+  (`squeeze` 0.060, part 3).
 - `tools/score.py` (new): scores one trial against the rubric.
 - `tools/batch.py` (new): runs `score.py` over objects × seeds in parallel
   from a frozen copy of the repo; fix 29.
