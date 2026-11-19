@@ -30,13 +30,35 @@ e57127d run from an extracted copy of that commit (30 trials); "fixed" is
 this branch with `SOLVER_SET="carry_mode=fixed"`, which runs the same code
 path as e57127d.
 
-FINAL_TABLE
+| carry | trials | delivered | delivery steps (median) |
+|---|---|---|---|
+| before: fixed yaw, e57127d | 30 | 18 (60 %) | 1,674-1,924 (1,806) |
+| base yaw, slip governor off (yaw_v1, yaw_v2, yaw_v2b, final4_std) | 90 | 75 (83 %) | 1,171-1,388 (about 1,250) |
+| base yaw, slip governor on (final_std, final2_std, final3_std) | 90 | 71 (79 %) | 1,224-2,165; 8 over 1,500 |
+| seeds 1 2 3, fixed (`carry_mode=fixed`) | 15 | 12 | 1,670-1,905 (1,744) |
+| seeds 1 2 3, base yaw | 15 | 12 | 1,196-1,374 (1,262) |
+| independent re-run of the final code, seeds 42 7 1 2 3, twice each | 50 | 37 (74 %) | 1,198-1,380 |
+
+In the independent re-run: soup can 10/10, strawberry 9/10, foam brick 9/10,
+apple 6/10, banana 3/10. Identical code varies between 21 and 27 of 30 from
+batch to batch, so differences under about 5 in 30 are noise.
 
 Steps by phase, medians over delivered trials:
 
-PHASE_TABLE
+| phase | fixed yaw | base yaw |
+|---|---|---|
+| pick (to end of lift) | about 312 | about 340 |
+| hold | 60 | 60 |
+| retreat | 46 | 46 |
+| setup (wrist roll 40, turn on the spot 40, wrist roll 40) | - | 119 |
+| arm swing + maze / drive | about 1,094 | about 715 |
+| reach | about 278 | 0 (the object is driven onto the goal) |
 
-**Where drops happen now.** DROPS_TEXT
+**Where drops happen now.** Mostly in the drive. The apple creeps toward the fingertips
+(downward, gripper pointing down) over hundreds of steps and goes suddenly
+at 20-23 mm. The banana goes suddenly after corners or during the wrist
+rolls and the turn on the spot. A few banana and strawberry losses are in
+the setup; a few are in the retreat, which both carries share.
 
 **Heavy objects** (1 sugar box, 13 hammer, 4 potted meat can, 8 bleach
 cleanser; seeds 42 and 7). Fixed carry: 1/8 (potted meat can, 1,959 steps).
