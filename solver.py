@@ -81,6 +81,14 @@ class Solver:
         # 0.5 m corner at 30 mm per tick it would turn 0.06 rad per tick.
         self.object_turn_rate = 1e9
         self.yaw_fillet_radius = 0.5      # largest corner radius of the object's path (m)
+        self.slip_governor = False        # slow the drive once the object slides toward the fingertips
+        # Heavy objects: at the end of the hold, weigh the object from the
+        # finger contact forces (as a wrist force sensor would) and scale the
+        # retreat and yaw-carry speeds and rates by gentle_mass / mass, at
+        # least gentle_min. The soup can (0.32 kg) is carried at full speed.
+        self.mass_adaptive = True
+        self.gentle_mass = 0.35
+        self.gentle_min = 0.5
         self.yaw_carry_margin = 0.04      # m between the swept robot+object outline and any wall
         self.carry_object_height = 0.90   # target height of the object centre (the goal is at 0.9 m)
 
@@ -376,6 +384,8 @@ class Solver:
             if self._hold_ticks >= self.hold_before_transport and (aligned > 0.995 or self._hold_ticks > 200):
                 # Retreat target in qpos coordinates (base x = qpos[0] - 2).
                 self._retreat_goal = qpos[:2] + self.retreat_distance * away
+                if self.carry_mode == "yaw" and self.mass_adaptive:
+                    self._adapt_to_weight()
                 self.state = 5
             return self.action.copy()
 
@@ -628,8 +638,37 @@ class Solver:
               f"{np.degrees(yaw0 - yaw):.0f} deg, about {traj.duration():.0f} ticks driving, torso {q[t]:.3f}->{torso:.3f}")
         return dict(traj=traj, yaw0=yaw0, yaw_cmd=yaw, hold=base.copy(), L=traj.L, bias=traj.bias,
                     k=k, c0=c0, roll=float(self.action[i]), torso=float(self.action[t]), torso_target=torso,
-                    s=float(traj.sg[0]), v=0.0, phase="spin_roll" if self.spin_roll and abs(yaw0 - yaw) > 0.15 else
+                    s=float(traj.sg[0]), v=0.0, slow=1.0, phase="spin_roll" if self.spin_roll and abs(yaw0 - yaw) > 0.15 else
                     ("spin" if abs(yaw0 - yaw) > 0.02 else "drive_roll"))
+
+    def _held_weight(self):
+        """Vertical force (N) the robot's contacts exert on the object: its
+        weight while everything is still. Normal force acts along -n (the
+        normal on the object points to the robot), friction along -dir."""
+        env = self.env
+        total = 0.0
+        for c in p.getContactPoints(env.robot_id, env.object_id, physicsClientId=env.pb_physics_client):
+            total += -c[9] * c[7][2] - c[10] * c[11][2] - c[12] * c[13][2]
+        return float(total)
+
+    def _adapt_to_weight(self):
+        mass = self._held_weight() / 9.81
+        gentle = float(np.clip(self.gentle_mass / max(mass, 1e-3), self.gentle_min, 1.0))
+        print(f"Held object weighs about {mass:.2f} kg; carry speed factor {gentle:.2f}")
+        if gentle < 1.0:
+            for name in ("yaw_carry_speed", "yaw_carry_accel", "yaw_rate_limit", "roll_rate_limit", "carry_speed"):
+                setattr(self, name, getattr(self, name) * gentle)
+            self.object_turn_rate = min(self.object_turn_rate, 0.04 * gentle)
+        self.carry_gentle = gentle
+
+    def _slip_toward_tips(self, obs):
+        """Position of the object's centre along the gripper x axis (toward
+        the fingertips), metres, from the gripper link origin."""
+        planner = self.grasp_planner
+        st = p.getLinkState(planner.robot, planner.ee, computeForwardKinematics=True,
+                            physicsClientId=planner.client)
+        x_axis = np.asarray(p.getMatrixFromQuaternion(st[5])).reshape(3, 3)[:, 0]
+        return float(x_axis @ (np.asarray(obs["object_pos"]) - np.asarray(st[4])))
 
     def _yaw_carry_step(self, obs):
         """State 67 in the yaw carry: turn the wrist so the closing axis lies
@@ -686,7 +725,13 @@ class Solver:
         elif phase == "drive":
             x, y, theta, psi = traj.pose(Y["s"])
             lag = np.hypot(x - (q[0] - 2.0), y - q[1])
-            v = min(Y["v"] + accel, float(np.interp(Y["s"], traj.sg, traj.back)))
+            v = min(Y["v"] + accel, Y["slow"] * float(np.interp(Y["s"], traj.sg, traj.back)))
+            if self.slip_governor:
+                # Objects that slide toward the fingertips (downward here)
+                # keep sliding at a steady rate while driving; slow down for
+                # good once they have slid a few millimetres.
+                slid = self._slip_toward_tips(obs) - Y.setdefault("slip_ref", self._slip_toward_tips(obs))
+                Y["slow"] = min(Y["slow"], float(np.interp(slid, (0.003, 0.006, 0.010), (1.0, 0.6, 0.4))))
             if lag > 0.10 or abs(Y["roll"] - q[i]) > 0.3:
                 v = 0.0      # wait for the base or the wrist to catch up
             Y["v"] = v
