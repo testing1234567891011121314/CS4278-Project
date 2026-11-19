@@ -81,7 +81,7 @@ class Solver:
         # 0.5 m corner at 30 mm per tick it would turn 0.06 rad per tick.
         self.object_turn_rate = 1e9
         self.yaw_fillet_radius = 0.5      # largest corner radius of the object's path (m)
-        self.slip_governor = False        # slow the drive once the object slides toward the fingertips
+        self.slip_governor = True         # slow the drive once the object slides toward the fingertips
         # Heavy objects: at the end of the hold, weigh the object from the
         # finger contact forces (as a wrist force sensor would) and scale the
         # retreat and yaw-carry speeds and rates by gentle_mass / mass, at
