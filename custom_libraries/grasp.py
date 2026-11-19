@@ -112,6 +112,32 @@ class GraspConfig:
     rim_azimuths: int = 24
     rim_span: float = 0.025
     rim_depths: tuple = (0.006, 0.012)  # contact centre beyond the rim edge, along the wall
+    # Flange grasps (plate), generated only when the sampler AND the rim
+    # generator find nothing, and only for flat objects (cloud height below
+    # flange_max_height). The plate's flange is ~20 mm above the table, and a
+    # closing axis near vertical puts the palm 63 mm below the gripper centre,
+    # i.e. inside the table if the fingers are centred on the flange. So the
+    # pinch point (gripper centre) is put flange_heights above the rim top,
+    # flange_inset inside the rim edge, with the approach tilted
+    # flange_tilts below horizontal; the lower finger is opened until it sits
+    # flange_finger_gap under the flange (measured at the grasp pose) and the
+    # approach runs horizontally, so the lower finger slides in under the rim.
+    # Closing with the arm still, the lower finger lifts the rim up to the
+    # pinch point: the plate pivots about its far edge on the table. The
+    # planner checks the closed pose and the lift with the plate at that
+    # predicted pivoted pose; the follower watches the far edge instead of the
+    # static-object watch during the close.
+    flange_fallback: bool = True
+    flange_max_height: float = 0.040
+    flange_min_rim_height: float = 0.015  # rim top above the lowest cloud point
+    flange_azimuths: tuple = (0., 15., -15., 30., -30., 45., -45.)  # deg from the side facing the robot
+    flange_tilts: tuple = (12., 16., 8.)  # deg, approach below horizontal
+    flange_heights: tuple = (0.031, 0.0285, 0.0335, 0.036)
+    flange_inset: float = 0.011
+    flange_tcp: float = 0.025
+    flange_thickness: float = 0.007  # collision flange, vertical (the cloud is a 1 mm shell)
+    flange_finger_gap: float = 0.0025
+    flange_hinge_drift: float = 0.020  # metres the far edge may move during the close
     # Total gap reduction the close phase commands past the point-cloud width.
     # Grip force is linear in it (6.6 N per mm per finger): 0.012 gave ~50 N,
     # which let heavy objects (sugar box, hammer) slide 10-28 mm in the
@@ -183,6 +209,7 @@ class GraspPlan:
     object_position: np.ndarray
     object_orientation: np.ndarray
     stats: dict
+    flange: dict = None  # flange grasp data (pivot hinge), see GraspConfig.flange_fallback
 
 
 # Clock for every planning budget (seconds). CPU time of this process, not
@@ -190,6 +217,12 @@ class GraspPlan:
 # loaded grader) ran out of budget after ~20 candidates and returned no plan
 # for grasps that plan in a few seconds on an idle one.
 planning_clock = time.process_time
+
+
+class FlangeCandidate(tuple):
+    """A sampler tuple (p1, p2, centre, xyzw, score) carrying .flange, the
+    data of a flange grasp (see GraspConfig.flange_fallback)."""
+    flange = None
 
 
 class PlanningError(RuntimeError):
@@ -654,6 +687,9 @@ class GraspPlanner:
         if not candidates and cfg.rim_fallback:
             candidates = self.sample_rim_grasps(cloud, cloud_normals)
             self.sample_stats['rim_candidates'] = len(candidates)
+        if not candidates and cfg.flange_fallback:
+            candidates = self.sample_flange_grasps(cloud)
+            self.sample_stats['flange_candidates'] = len(candidates)
         candidates.sort(key=lambda v: v[4], reverse=True)
         self.sample_stats['candidates'] = min(len(candidates), num_samples)
         return candidates[:num_samples]
@@ -717,6 +753,53 @@ class GraspPlanner:
                         quat = Rotation.from_matrix(rotation).as_quat()
                         score = float(quality + 0.10*(-a[2]))
                         candidates.append((p1.copy(), p2.copy(), centre.copy(), quat, score))
+        return candidates
+
+    def sample_flange_grasps(self, points):
+        """Flange candidates (see GraspConfig.flange_fallback), in the order
+        to try them (the score decreases along the list)."""
+        cfg = self.config
+        pts = np.asarray(points, float)
+        if len(pts) < 20:
+            return []
+        bottom = float(pts[:, 2].min())
+        if float(pts[:, 2].max()) - bottom > cfg.flange_max_height:
+            return []
+        axis = pts[:, :2].mean(axis=0)
+        rel = pts[:, :2] - axis
+        toward = np.array([-1., 0.])
+        if self.env is not None:
+            base_link = next(j for j, n in self.link_names.items() if n == 'base_link')
+            base = np.asarray(p.getLinkState(self.robot, base_link, physicsClientId=self.client)[4][:2])
+            toward = (base - axis) / max(np.linalg.norm(base - axis), 1e-9)
+        phi0 = np.arctan2(toward[1], toward[0])
+        up = np.array([0., 0., 1.])
+        candidates = []
+        for dphi in cfg.flange_azimuths:
+            phi = phi0 + np.radians(dphi)
+            u = np.array([np.cos(phi), np.sin(phi), 0.])
+            t = np.array([-np.sin(phi), np.cos(phi), 0.])
+            rad, tang = rel @ u[:2], rel @ t[:2]
+            strip = np.abs(tang) <= cfg.pad_height/2
+            if (strip & (rad > 0)).sum() < 5 or (strip & (rad < 0)).sum() < 5:
+                continue
+            edge = float(rad[strip].max())
+            far = float(-rad[strip].min())
+            top = float(pts[strip & (rad >= edge - cfg.rim_span), 2].max())
+            if top - bottom < cfg.flange_min_rim_height:
+                continue
+            for tilt in cfg.flange_tilts:
+                a = np.radians(tilt)
+                approach = -np.cos(a)*u - np.sin(a)*up
+                closing = -np.sin(a)*u + np.cos(a)*up
+                quat = Rotation.from_matrix(np.column_stack((approach, closing, np.cross(approach, closing)))).as_quat()
+                for height in cfg.flange_heights:
+                    centre = np.r_[axis + (edge - cfg.flange_inset)*u[:2], top + height]
+                    p1, p2 = centre - closing*cfg.min_width/2, centre + closing*cfg.min_width/2
+                    c = FlangeCandidate((p1, p2, centre, quat, 1.0 - 1e-3*len(candidates)))
+                    c.flange = dict(direction=-u, tcp=cfg.flange_tcp, rim_top=top,
+                                    hinge=np.r_[axis - far*u[:2], bottom])
+                    candidates.append(c)
         return candidates
 
     def _precheck_flags(self, candidate, cloud):
@@ -1080,6 +1163,12 @@ class GraspPlanner:
                     
                     print(f"[CANDIDATE {stats['tried']}] Testing", flush=True)
 
+                    if getattr(candidate, 'flange', None) is not None:
+                        plan = self._plan_flange(candidate, obs, ik, parked, start, lower, upper,
+                                                 deadline, object_pose)
+                        if plan is not None:
+                            return plan
+                        continue
                     p1, p2, centre, quat, _ = candidate
                     width = np.linalg.norm(p2-p1)
                     nominal = np.full(2, (width-cfg.closed_gap)/2)
@@ -1180,6 +1269,134 @@ class GraspPlanner:
         finally:
             ik.close()
         return None
+
+    def _plan_flange(self, candidate, obs, ik, parked, start, lower, upper, deadline, object_pose):
+        """Plan one flange candidate (see GraspConfig.flange_fallback)."""
+        cfg, stats = self.config, self.last_stats
+        _, _, centre, quat, _ = candidate
+        info = candidate.flange
+        direction = np.asarray(info['direction'], float)
+        rot = Rotation.from_quat(quat)
+        grasp_pos = centre - rot.apply([info['tcp'], 0., 0.])
+        pre_pos = grasp_pos - cfg.pregrasp_distance*direction
+        reach = ik.solve(grasp_pos, quat, start, lower, upper, deadline)
+        if reach is None:
+            stats['ik_fail'] += 1
+            print('[FAIL flange grasp IK]', np.round(grasp_pos, 4), flush=True)
+            return None
+        # The lower finger: opened from full travel until it is just under the
+        # flange (it must meet the flange from below, or it is not under it).
+        k_low = 1 if rot.as_matrix()[2, 1] > 0 else 0
+        link = self.finger_ids[k_low]
+        others = [b for b in self.obstacles if b != self.object]
+        gap = cfg.flange_finger_gap
+
+        def distance(bodies):
+            d = gap + 0.01
+            for b in bodies:
+                for c in p.getClosestPoints(self.robot, b, d, linkIndexA=link, physicsClientId=self.client):
+                    d = min(d, c[8])
+            return d
+        chosen, met = None, False
+        for q in np.arange(float(self.upper[self.finger_indices].min()), 0.015, -0.001):
+            self._set(self._full(parked, reach, np.full(2, q)))
+            if distance([self.object]) < gap:
+                met = True
+                break
+            if distance(others) >= gap:
+                chosen = q
+        if chosen is None or not met:
+            stats['opening_fail'] += 1
+            print('[FAIL flange opening] met', met, 'chosen', chosen, flush=True)
+            return None
+        opened = np.full(2, chosen)
+        if not self._valid(self._full(parked, reach, opened), deadline=deadline):
+            stats['approach_fail'] += 1
+            print('[FAIL flange grasp pose]', self._last_invalid, flush=True)
+            self._record_invalid(stats, 'approach')
+            return None
+        opening = self._full(parked, start, opened)
+        if not all(self._valid(q, deadline=deadline) for q in edge_samples(parked, opening, 0.002)):
+            stats['opening_fail'] += 1
+            print('[FAIL opening]', self._last_invalid, flush=True)
+            self._record_invalid(stats, 'opening')
+            return None
+        pre = ik.solve(pre_pos, quat, reach, lower, upper, deadline)
+        if pre is None:
+            stats['ik_fail'] += 1
+            print('[FAIL flange pregrasp IK]', np.round(pre_pos, 4), flush=True)
+            return None
+        if not self._live_pose_ok(self._full(parked, pre, opened), pre_pos, quat):
+            raise PlanningError('IK model and loaded robot disagree; check the URDF path/scaling.')
+        scale = self.motion_scale
+        valid = lambda scaled: self._valid(self._full(parked, scaled * scale, opened), deadline=deadline)
+        rrt = RRTConnect(lower / scale, upper / scale, valid,
+                         resolution=float(np.min(self.motion_resolution / scale)), step_size=cfg.rrt_step,
+                         max_iterations=cfg.rrt_iterations, rng=self.rng)
+        transit = rrt.plan(start / scale, pre / scale, deadline=min(deadline, planning_clock()+cfg.rrt_seconds))
+        if transit is None:
+            stats['transit_fail'] += 1
+            print('[FAIL transit] RRT returned no path last_state_rejection=', self._last_invalid, flush=True)
+            return None
+        transit = transit * scale
+        approach = self._cartesian(ik, pre_pos, grasp_pos, quat, pre, parked, opened, lower, upper, deadline)
+        if approach is None:
+            stats['approach_fail'] += 1
+            return None
+        reach = approach[-1]
+        # Predicted plate pose once closed: pivoted about its far edge until
+        # the flange (mid-thickness) is at the pinch point.
+        hinge = np.asarray(info['hinge'], float)
+        rise = centre[2] - (info['rim_top'] - cfg.flange_thickness/2)
+        span = float(np.linalg.norm((centre - hinge)[:2]))
+        theta = float(np.arcsin(np.clip(rise / span, 0., 0.5)))
+        pivot = Rotation.from_rotvec(np.cross(-direction, [0., 0., 1.]) * theta)
+        pos0, orn0 = np.asarray(object_pose[0], float), np.asarray(object_pose[1], float)
+        pos1 = hinge + pivot.apply(pos0 - hinge)
+        orn1 = (pivot * Rotation.from_quat(orn0)).as_quat()
+        p.resetBasePositionAndOrientation(self.object, pos1, orn1, physicsClientId=self.client)
+        nominal = np.full(2, max(0., (cfg.min_width - cfg.closed_gap)/2))
+        squeezed = np.maximum(self.lower[self.finger_indices], nominal - cfg.squeeze/2)
+        if not self._valid(self._full(parked, reach, nominal), touch=True, deadline=deadline):
+            stats['closure_fail'] += 1
+            print('[FAIL flange closure]', self._last_invalid, flush=True)
+            self._record_invalid(stats, 'closure')
+            return None
+        lift = []
+        if cfg.lift_distance > 0:
+            saved = self.support_contacts
+            self.support_contacts = {}
+            for body in others:
+                for c in p.getClosestPoints(self.object, body, cfg.collision_margin, physicsClientId=self.client):
+                    if c[7][2] > 0.7 and c[8] >= -cfg.contact_penetration:
+                        key = (body, c[4])
+                        self.support_contacts[key] = min(self.support_contacts.get(key, 0.), c[8])
+            self._set(self._full(parked, reach, nominal))
+            ee = p.getLinkState(self.robot, self.ee, computeForwardKinematics=True, physicsClientId=self.client)
+            attached = p.multiplyTransforms(*p.invertTransform(ee[4], ee[5]), pos1, orn1)
+            try:
+                lift = self._cartesian(ik, grasp_pos, grasp_pos + [0, 0, cfg.lift_distance], quat, reach, parked,
+                                       nominal, lower, upper, deadline, touch=True, attached=attached)
+            finally:
+                self.support_contacts = saved
+            if lift is None:
+                stats['lift_fail'] += 1
+                return None
+        waypoints, phases = [opening], ['open']
+        for phase, path, fingers in [('transit', transit[1:], opened), ('approach', approach, opened),
+                                      ('close', [reach], squeezed), ('lift', lift, squeezed)]:
+            for arm in path:
+                waypoints.append(self._full(parked, arm, fingers))
+                phases.append(phase)
+        stats['reason'] = 'success'
+        stats['flange'] = dict(theta_deg=round(np.degrees(theta), 2), rise=round(float(rise), 4),
+                               opened=round(float(chosen), 4), centre=np.round(centre, 4).tolist())
+        obj_pos = np.asarray(obs['object_pos'], float)
+        obj_rot = Rotation.from_quat(np.asarray(obs['object_xyzw'], float))
+        commands = np.clip(np.asarray(waypoints), self.lower, self.upper)
+        return GraspPlan(commands, tuple(phases), candidate, nominal, squeezed, obj_pos.copy(),
+                         np.asarray(orn0).copy(), stats.copy(),
+                         flange=dict(hinge=hinge, hinge_local=obj_rot.inv().apply(hinge - obj_pos), theta=theta))
 
 
 class GraspFollower:
@@ -1282,6 +1499,13 @@ class GraspFollower:
             if (moved > 0.012 + self.watch_allowance[0]
                     or rotated > 0.10 + self.watch_allowance[1]):
                 return self._fail('Object moved; stop and obtain a fresh plan.', q)
+        flange = getattr(self.plan, 'flange', None)
+        if flange is not None and phase == 'close':
+            # The plate may only pivot about its far edge (see GraspConfig.flange_fallback).
+            hinge = (np.asarray(obs['object_pos'], float)
+                     + Rotation.from_quat(obs['object_xyzw']).apply(flange['hinge_local']))
+            if np.linalg.norm(hinge - flange['hinge']) > owner.config.flange_hinge_drift:
+                return self._fail('Object left the predicted pivot during the flange close.', q)
         cfg, motion = owner.config, self.motion
         waypoints, phases = self.plan.waypoints, self.plan.phases
         # Advance the carrot along the polyline by one call's worth of joint
