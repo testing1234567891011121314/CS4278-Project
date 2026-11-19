@@ -78,6 +78,11 @@ class Solver:
         # Turn the closing axis to face the motion of the turn on the spot
         # (and back afterwards); False keeps it along the base x axis.
         self.spin_roll = True
+        # Instead (overrides spin_roll): turn on the spot with the wrist
+        # counter-rotating, so the object's heading goes straight from where
+        # it is to the route's starting heading (at most 90 degrees, spread
+        # over the turn) while the base turns under it; no separate rolls.
+        self.spin_counter_roll = False
         # Limit on how fast the object itself turns about the vertical while
         # driving (rad per tick), whether by base yaw or wrist roll; on a
         # 0.5 m corner at 30 mm per tick it would turn 0.06 rad per tick.
@@ -661,10 +666,26 @@ class Solver:
         c0 = float(np.arctan2(rot[1, 1], rot[0, 1])) - yaw - k * float(q[i])
         print(f"Yaw carry: route {traj.s[-1]:.2f} m, object {traj.L:.2f} m ahead, turn "
               f"{np.degrees(yaw0 - yaw):.0f} deg, about {traj.duration():.0f} ticks driving, torso {q[t]:.3f}->{torso:.3f}")
-        return dict(traj=traj, yaw0=yaw0, yaw_cmd=yaw, hold=base.copy(), L=traj.L, bias=traj.bias,
+        plan = dict(traj=traj, yaw0=yaw0, yaw_cmd=yaw, hold=base.copy(), L=traj.L, bias=traj.bias,
                     k=k, c0=c0, roll=float(self.action[i]), torso=float(self.action[t]), torso_target=torso,
                     s=float(traj.sg[0]), v=0.0, slow=1.0, phase="spin_roll" if self.spin_roll and abs(yaw0 - yaw) > 0.15 else
                     ("spin" if abs(yaw0 - yaw) > 0.02 else "drive_roll"))
+        if self.spin_counter_roll and abs(yaw0 - yaw) > 0.02:
+            # Closing-axis heading now and at the start of the route (the
+            # fingers are symmetric, so the nearest of the two, mod pi).
+            h0 = yaw + c0 + k * plan["roll"]
+            dh = float(wrap(2.0 * (traj.psi[0] - h0)) / 2.0)
+            turn = yaw0 - yaw
+            plan.update(phase="spin_hold", yaw_start=yaw, roll_start=plan["roll"], dh=dh,
+                        # yaw rate cap so that neither the object's heading
+                        # (dh over the turn) nor the wrist joint turns faster
+                        # than the limits
+                        spin_rate=min(self.yaw_rate_limit,
+                                      self.roll_rate_limit / max(abs(dh / turn), 1e-9),
+                                      self.yaw_rate_limit / max(abs(1.0 - dh / turn), 1e-9)))
+            print(f"Yaw carry: counter-rolled turn, object heading changes {np.degrees(dh):.0f} deg "
+                  f"over a {np.degrees(turn):.0f} deg turn")
+        return plan
 
     def _held_weight(self):
         """Vertical force (N) the robot's contacts exert on the object: its
@@ -729,6 +750,25 @@ class Solver:
             action[:3] = np.r_[hold, Y["yaw_cmd"]]
             if roll_toward(roll_for(psi, Y["yaw_cmd"])) < 0.05:
                 Y["phase"] = "spin"
+        elif phase == "spin_hold":
+            # Turn on the spot; the wrist roll follows the turn so that the
+            # closing axis heading moves linearly with the turn's progress
+            # from its present value to the route's (Y["dh"] in total).
+            remaining = Y["yaw0"] - Y["yaw_cmd"]
+            v = min(self.yaw_carry_speed, Y["spin_rate"] * Y["L"], Y["v"] + accel,
+                    np.sqrt(2 * accel * Y["L"] * abs(remaining)) + 1e-4)
+            Y["v"] = v
+            if abs(remaining) <= v / Y["L"]:
+                Y["yaw_cmd"] = Y["yaw0"]
+            else:
+                Y["yaw_cmd"] += float(np.sign(remaining) * v / Y["L"])
+            turned = Y["yaw_cmd"] - Y["yaw_start"]
+            frac = turned / (Y["yaw0"] - Y["yaw_start"])
+            Y["roll"] = Y["roll_start"] + Y["k"] * (frac * Y["dh"] - turned)
+            action[:3] = np.r_[hold, Y["yaw_cmd"]]
+            action[i] = Y["roll"]
+            if Y["yaw_cmd"] == Y["yaw0"] and abs(wrap(q[2] - Y["yaw0"])) < 0.02:
+                Y["phase"], Y["v"] = "drive_roll", 0.0
         elif phase == "spin":
             remaining = Y["yaw0"] - Y["yaw_cmd"]
             v = min(self.yaw_carry_speed, self.yaw_rate_limit * Y["L"], Y["v"] + accel,
