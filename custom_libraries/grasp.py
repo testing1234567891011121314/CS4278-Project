@@ -1392,7 +1392,9 @@ class GraspPlanner:
                 phases.append(phase)
         stats['reason'] = 'success'
         stats['flange'] = dict(theta_deg=round(np.degrees(theta), 2), rise=round(float(rise), 4),
-                               opened=round(float(chosen), 4), centre=np.round(centre, 4).tolist())
+                               opened=round(float(chosen), 4), centre=np.round(centre, 4).tolist(),
+                               tilt_deg=round(float(np.degrees(np.arcsin(-rot.as_matrix()[2, 0]))), 1),
+                               height=round(float(centre[2] - info['rim_top']), 4))
         obj_pos = np.asarray(obs['object_pos'], float)
         obj_rot = Rotation.from_quat(np.asarray(obs['object_xyzw'], float))
         commands = np.clip(np.asarray(waypoints), self.lower, self.upper)

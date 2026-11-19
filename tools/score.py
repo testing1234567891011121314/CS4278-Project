@@ -180,7 +180,7 @@ r.update(
                     if hasattr(solver, "grasp_plan") else None),
     plan={k: v for k, v in (planner.last_stats or {}).items()
           if k in ("reason", "tried", "candidates", "ik_fail", "transit_fail", "approach_fail", "opening_fail",
-                   "closure_fail", "lift_fail", "tcp_attempts", "tcp_offset")},
+                   "closure_fail", "lift_fail", "tcp_attempts", "tcp_offset", "flange")},
     wall_s=round(time.perf_counter() - t0, 1),
 )
 with contextlib.suppress(OSError):
