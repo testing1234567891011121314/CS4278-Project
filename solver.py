@@ -111,6 +111,20 @@ class Solver:
         self.gentle_min = 0.5
         self.yaw_carry_margin = 0.04      # m between the swept robot+object outline and any wall
         self.carry_object_height = 0.90   # target height of the object centre (the goal is at 0.9 m)
+        # Floor pick: an object resting on the floor (the mug bounces off the
+        # table on every seed) is picked with the gripper pointing down from a
+        # parking spot 0.48-0.62 m away, lifted 0.15 m by the grasp plan, then
+        # raised with the gripper still pointing down until its centre is at
+        # floor_lift_height (state 31), and carried as after a table pick.
+        # Selected in begin_pick by where the object is; floor_pick=0 restores
+        # the old behaviour (state 4: grasp height out of range).
+        self.floor_pick = True
+        self.floor_max_height = 0.30      # "on the floor": lowest cloud point below this (the tabletop is at 0.575 m)
+        self.floor_min_reach = 0.48       # parking distance band, base centre to grasp centre (m)
+        self.floor_max_reach = 0.62
+        self.floor_lift_height = 0.90     # object centre height after the raise (= carry_object_height)
+        self.floor_retreat_distance = 0.0  # no table to back away from
+        self.pick_mode = "table"
 
         # Travel targets retained; navigation rebuilds the map after preparation.
         # Pose used while driving to the table: arm forward, ready to plan a
@@ -152,6 +166,7 @@ class Solver:
             if unknown:
                 raise ValueError(f"Unsupported travel joints: {sorted(unknown)}")
             self.travel_joint_targets.update(travel_joint_targets)
+        self._pick_travel_targets = dict(self.travel_joint_targets)   # restored by begin_pick(fresh=True)
         names = {
             p.getJointInfo(env.robot_id, j, physicsClientId=env.pb_physics_client)[1].decode(): i
             for i, j in enumerate(env.joint_indices)
@@ -214,11 +229,128 @@ class Solver:
         self.state = 4
         return True
 
+    def _object_on_floor(self, obs):
+        """True when the object rests on the floor rather than on the table:
+        its lowest observed point is below floor_max_height. An object under
+        the tabletop also counts; its parking goal is then limited by the
+        overhead check (the torso cannot go under the table)."""
+        cloud = np.asarray(obs["object_pc"], dtype=float)
+        return float(np.min(cloud[:, 2])) < self.floor_max_height
+
+    def begin_pick(self, obs, fresh=False):
+        """Enter state 0 for a pick of the object where it lies now, choosing
+        the table or the floor pick by where it is.
+
+        fresh=False: the episode's first pick (state 999 has prepared
+        everything). fresh=True: re-enter the pick later, e.g. to recover a
+        dropped object: forget the previous grasp, parking goal, plan and
+        transport state and rebuild the drive-to-table maps. The caller must
+        first bring the arm into the travel pose (travel_joint_targets, the
+        planner's transit starts there) with the fingers open, and must not
+        call this while the arm still holds anything. See scratch/HANDBACK.md
+        (drop recovery) for what is still open."""
+        floor = bool(self.floor_pick) and self._object_on_floor(obs)
+        self.pick_mode = "floor" if floor else "table"
+        self.navigate_grasp.set_floor_mode(
+            floor, min_reach=self.floor_min_reach, max_reach=self.floor_max_reach,
+            preferred_reach=0.5 * (self.floor_min_reach + self.floor_max_reach))
+        if fresh:
+            self.navigate_grasp.reset()
+            self.travel_joint_targets.update(self._pick_travel_targets)
+            # State 5 replaced the map by the transport map (whole table
+            # blocked); the drive to the grasp needs the parking map again.
+            self.create_map(self.env, True)
+            self.inflated_occupancy = self.create_navigable_map()
+            self.path = None
+            self._path_goal = None
+            self.waypoint_index = 0
+            self.curved_nav.reset()
+            for name in ("grasp_follower", "grasp_plan", "grasp_error", "_hold_ticks", "_hold_roll",
+                         "_finger_hold", "_retreat_away", "_retreat_goal", "_lost_ticks", "_yaw", "_raise_path"):
+                if hasattr(self, name):
+                    delattr(self, name)
+        print(f"Pick mode: {self.pick_mode} (object at {np.round(obs['object_pos'], 3).tolist()})")
+        self.state = 0
+
+    def _plan_floor_raise(self, obs, seconds=30.0):
+        """After a floor pick's 0.15 m lift: a collision-checked torso+arm path,
+        object attached, to the post-lift pose the yaw carry expects (gripper
+        pointing down as now, at the same place over the floor, object centre
+        at floor_lift_height). Returns the path (motion_indices order) or
+        None. The straight Cartesian lift that far up fails in the planner
+        (the arm must change its configuration on the way), although the
+        goal pose itself has IK solutions at every height (HANDBACK §2)."""
+        from custom_libraries.grasp import _ManipulatorIK, planning_clock
+        planner = self.grasp_planner
+        cid = planner.client
+        qpos = np.asarray(obs["qpos"], dtype=float)
+        idx = planner.motion_indices
+        st = p.getLinkState(planner.robot, planner.ee, computeForwardKinematics=True, physicsClientId=cid)
+        target = np.asarray(st[4], dtype=float).copy()
+        target[2] += self.floor_lift_height - float(obs["object_pos"][2])
+        lower, upper = planner.lower[idx].copy(), planner.upper[idx].copy()
+        start = np.clip(qpos[idx], lower, upper)
+        lower[planner.wrap] = np.maximum(lower[planner.wrap], start[planner.wrap] - np.pi)
+        upper[planner.wrap] = np.minimum(upper[planner.wrap], start[planner.wrap] + np.pi)
+        deadline = planning_clock() + seconds
+        ik = _ManipulatorIK(planner, qpos)
+        try:
+            goal = ik.solve(target, np.asarray(st[5], dtype=float), start, lower, upper,
+                            min(deadline, planning_clock() + 5.0), restarts=12)
+        finally:
+            ik.close()
+        if goal is None:
+            print("Floor raise: no IK for", np.round(target, 3).tolist())
+            return None
+        return self._plan_tuck(obs, goal, seconds=max(1.0, deadline - planning_clock()))
+
+    def _floor_raise_step(self, obs):
+        """State 31: follow the floor raise path (planned on entry) with the
+        base held and the fingers at the hold command, at the fixed carry's
+        tuck rates; then continue with the retreat (state 5). Without a path
+        the state is left at once and the carry starts from the low pose (the
+        yaw carry raises the torso as far as it goes; the fixed carry tucks)."""
+        planner = self.grasp_planner
+        idx = planner.motion_indices
+        qpos = np.asarray(obs["qpos"], dtype=float)
+        if getattr(self, "_raise_path", None) is None:
+            path = self._plan_floor_raise(obs)
+            if path is None:
+                self.state = 5
+                return self.action.copy()
+            print("Floor raise:", len(path), "waypoints")
+            self._raise_path, self._raise_index, self._raise_base = path, 0, qpos[:3].copy()
+            self._raise_ticks = 0
+        self._raise_ticks += 1
+        action = self.action.copy()
+        action[:3] = self._raise_base
+        action[13:15] = self._finger_hold
+        target = self._raise_path[self._raise_index]
+        error = target - qpos[idx]
+        limits = np.r_[0.002, np.full(len(idx) - 1, self.tuck_rate)]
+        action[idx] = qpos[idx] + error / max(1.0, float(np.max(np.abs(error) / limits)))
+        if np.max(np.abs(error)) < 0.03:
+            if self._raise_index < len(self._raise_path) - 1:
+                self._raise_index += 1
+            elif np.max(np.abs(np.asarray(obs["qvel"])[idx])) < 0.05:
+                action[idx] = target
+                self._raise_path = None
+                self.state = 5
+        if self._raise_path is not None and self._raise_ticks > 800:
+            print("Floor raise: timed out at waypoint", self._raise_index, "of", len(self._raise_path))
+            self._raise_path = None
+            self.state = 5
+        self.action = np.clip(action, self.action_lower_bound, self.action_upper_bound)
+        return self.action.copy()
+
     ## This function is called every time step.
     def get_action(self,env):
         obs = env._get_obs()
-        if self.state in (5, 67, 68) and self._check_holding(obs):
+        if self.state in (5, 31, 67, 68) and self._check_holding(obs):
             return self.action.copy()
+
+        if self.state == 31:     ## floor pick: raise the object to the carry height
+            return self._floor_raise_step(obs)
 
         if self.state == 999:    ## wait for object to spawn
             # The object spawns at z=5 and lands on the table after ~50 steps;
@@ -256,7 +388,7 @@ class Solver:
                 and 2 * np.arccos(min(1.0, abs(float(np.dot(poses[0, 3:], poses[-1, 3:]))))) < 0.05
             )
             if self.wait <= 0 or (landed and self._travel_pose_complete):
-                self.state = 0
+                self.begin_pick(obs)
             return action
 
         if self.state == 0:
@@ -413,10 +545,12 @@ class Solver:
                 self._hold_roll = self.action[i]
             if self._hold_ticks >= self.hold_before_transport and (aligned > 0.995 or self._hold_ticks > 200):
                 # Retreat target in qpos coordinates (base x = qpos[0] - 2).
-                self._retreat_goal = qpos[:2] + self.retreat_distance * away
+                retreat = self.floor_retreat_distance if self.pick_mode == "floor" else self.retreat_distance
+                self._retreat_goal = qpos[:2] + retreat * away
                 if self.carry_mode == "yaw" and self.mass_adaptive:
                     self._adapt_to_weight()
-                self.state = 5
+                # A floor pick first raises the object to the carry height.
+                self.state = 31 if self.pick_mode == "floor" else 5
             return self.action.copy()
 
         if self.state == 5:
