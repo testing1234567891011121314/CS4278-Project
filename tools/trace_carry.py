@@ -29,7 +29,7 @@ pl, cid = s.grasp_planner, env.pb_physics_client
 for item in filter(None, os.environ.get("SOLVER_SET", "").split(",")):
     key, value = item.split("=")
     assert hasattr(s, key), key
-    setattr(s, key, type(getattr(s, key))(float(value)))
+    setattr(s, key, value if isinstance(getattr(s, key), str) else type(getattr(s, key))(float(value)))
 f = open(out, "w")
 f.write("step,state,nav,phase,bx,by,dbase_mm,dcmd_mm,arm_qvel,f0,f1,bil,drift_mm,other,dx_mm,dy_mm,dz_mm,align_deg,yaw,yphase,galign_deg,dgrip_mm\n")
 ref = prev_q = prev_g = None

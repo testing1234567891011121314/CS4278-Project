@@ -57,6 +57,13 @@ with quiet:
     env = PickNavReachEnv(seed=seed, object_idx=obj, maze_urdf_path=maze, gui=False)
     env.reset()
     solver = Solver(env)
+# Experiments: SOLVER_SET="carry_mode=fixed" or "yaw_carry_speed=0.024,..." overrides
+# solver attributes (numbers, booleans as 0/1, or strings), as in trace_carry.py.
+for item in filter(None, os.environ.get("SOLVER_SET", "").split(",")):
+    key, value = item.split("=")
+    assert hasattr(solver, key), key
+    old = getattr(solver, key)
+    setattr(solver, key, value if isinstance(old, str) else type(old)(float(value)))
 planner = solver.grasp_planner
 cid = env.pb_physics_client
 fingers = set(planner.finger_ids)
