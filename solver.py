@@ -56,6 +56,20 @@ class Solver:
         self.reach_rate = 0.012           # rad per tick for the final arm move to the goal
         self.reach_backoff_cells = 7      # cells to back off along the path before reaching to the goal
         self.stop_short_of_goal = True    # end the carry that many cells short instead of driving in and backing off
+        # How the object is carried through the maze (see _yaw_carry_plan):
+        # "yaw":   the arm stays as it is after the lift (forward, gripper down),
+        #          the base turns to follow the route with the object riding on
+        #          it, and the object is driven straight onto the goal;
+        # "fixed": the base keeps one yaw, the arm swings the object into the
+        #          fingers-up pose and the arm reaches to the goal at the end.
+        # "yaw" falls back to "fixed" when it finds no valid route or pose.
+        self.carry_mode = "yaw"
+        self.yaw_carry_speed = 0.030      # m per tick of the object along its path (actual, not commanded)
+        self.yaw_carry_accel = 0.0017     # m per tick^2
+        self.yaw_rate_limit = 0.05        # rad per tick of base yaw
+        self.roll_rate_limit = 0.06       # rad per tick the wrist must turn relative to the base
+        self.yaw_carry_margin = 0.04      # m between the swept robot+object outline and any wall
+        self.carry_object_height = 0.90   # target height of the object centre (the goal is at 0.9 m)
 
         # Travel targets retained; navigation rebuilds the map after preparation.
         # Pose used while driving to the table: arm forward, ready to plan a
@@ -364,6 +378,12 @@ class Solver:
                 self.state = 67
                 self.path = None
                 self._path_goal = None
+                if self.carry_mode == "yaw":
+                    self._yaw = self._yaw_carry_plan(obs)
+                    if self._yaw is not None:
+                        print("Retreat complete; carrying with base yaw.")
+                        return self.action.copy()
+                    print("Yaw carry unavailable; falling back to the fixed-yaw carry.")
                 # Re-tuck the arm (now carrying the object) and rebuild the
                 # navigation map for that pose; the flags are left over from
                 # the drive to the table.
@@ -418,6 +438,9 @@ class Solver:
         
         if self.state == 68:
             return self.reach_goal(obs)
+
+        if self.state == 67 and getattr(self, "_yaw", None) is not None:
+            return self._yaw_carry_step(obs)
 
         if self.state == 67:
             carrying = getattr(self, "_finger_hold", None) is not None
@@ -496,6 +519,179 @@ class Solver:
         # route, sharp turns): a kick across the pads is what slides the
         # object out. Small errors only slow the base a little.
         return 0.0 if abs(error) > 0.3 else float(np.cos(error) ** 2)
+
+    def _yaw_carry_plan(self, obs):
+        """Plan the yaw carry from the end of the retreat, or return None.
+
+        The arm keeps its post-lift configuration (forward, gripper down,
+        object hanging below the fingers); only the torso rises so that the
+        object is carried at the goal's height. The object's centre rides on
+        a smooth route from the base to the goal and the base trails it (see
+        custom_libraries/yaw_carry.py), so the object is driven straight onto
+        the goal and no final arm move is needed. Checked here:
+        - the gripper points down (the wrist roll can then turn the closing
+          axis about the vertical; side grasps fall back to the fixed carry);
+        - the swept outline of every robot link and the object (from the
+          live pose and point cloud) stays yaw_carry_margin from the walls and
+          the table along the whole route, and during the turn on the spot
+          from the present yaw to the route's starting yaw;
+        - the raised-torso pose is collision free with the object attached.
+        """
+        from custom_libraries.yaw_carry import (ClearanceField, route_cells, shortcut, fillet,
+                                                CarryTrajectory, spin_clear, outline, wrap)
+        from custom_libraries.wall_projection import robot_xy_polygons, convex_hull
+        from custom_libraries.grasp import planning_clock
+        env, planner = self.env, self.grasp_planner
+        cid = planner.client
+        q = np.asarray(obs["qpos"], dtype=float)
+        base, yaw = np.array([q[0] - 2.0, q[1]]), float(q[2])
+        st = p.getLinkState(planner.robot, planner.ee, computeForwardKinematics=True, physicsClientId=cid)
+        rot = np.asarray(p.getMatrixFromQuaternion(st[5])).reshape(3, 3)
+        if rot[2, 0] > -0.9:
+            print(f"Yaw carry: gripper not pointing down (approach z {rot[2, 0]:.2f})")
+            return None
+        # The whole table is an obstacle from here on (create_map(env, False)).
+        self.create_map(env, False)
+        occupancy = self.wall_occupancy | self.extra_occupancy
+        field = ClearanceField(occupancy, self.x_min, self.y_max, self.cell_size)
+        c, s = np.cos(yaw), np.sin(yaw)
+        to_base = np.array([[c, -s], [s, c]])          # row vector @ to_base: world -> base frame
+        polygons = [np.asarray(poly) @ to_base for poly in robot_xy_polygons(env)]
+        cloud = (np.asarray(obs["object_pc"])[:, :2] - base) @ to_base
+        footprint = outline(polygons + [convex_hull(cloud)])
+        offset = (np.asarray(obs["object_pos"])[:2] - base) @ to_base
+        goal = np.asarray(obs["goal_pos"], dtype=float)[:2]
+        margin = self.yaw_carry_margin
+        route = route_cells(field, base, goal, self.cell_size, self.x_min, self.y_max, occupancy.shape,
+                            self.robot_radius + 0.05)
+        if route is None:
+            print("Yaw carry: no route for the base")
+            return None
+        chosen = None
+        for clearance, radius in ((0.40, 0.5), (0.40, 0.3), (0.45, 0.5), (0.36, 0.3)):
+            path = fillet(shortcut(route, field, clearance), field, clearance, radius)
+            traj = CarryTrajectory(path, offset)
+            if not traj.valid:
+                continue
+            bad = traj.collisions(field, footprint, margin)
+            if bad:
+                print(f"Yaw carry: route ({clearance}, {radius}) collides at {len(bad)} samples, "
+                      f"first at base {np.round(traj.base[bad[0]], 2).tolist()}")
+                continue
+            # Turn on the spot to the route's starting yaw, the short way if clear.
+            short = yaw + float(wrap(traj.yaw[0] - yaw))
+            for yaw0 in (short, short - 2 * np.pi * np.sign(short - yaw)):
+                if spin_clear(field, footprint, base, yaw, yaw0, margin):
+                    chosen = (traj, yaw0)
+                    break
+            if chosen:
+                break
+            print("Yaw carry: no clear turn on the spot at", np.round(base, 2).tolist())
+        if chosen is None:
+            return None
+        traj, yaw0 = chosen
+        traj.yaw = traj.yaw - traj.yaw[0] + yaw0      # continuous with the turn
+        traj.speed_profile(self.yaw_carry_speed, 1.2 * self.yaw_carry_speed, self.yaw_rate_limit,
+                           self.roll_rate_limit, self.yaw_carry_accel)
+        # Torso: carry the object at the goal's height if the torso allows.
+        t = self._travel_torso_index
+        torso = float(np.clip(q[t] + self.carry_object_height - float(obs["object_pos"][2]),
+                              self.action_lower_bound[t] + 0.01, self.action_upper_bound[t] - 0.005))
+        object_pose = p.getBasePositionAndOrientation(env.object_id, physicsClientId=cid)
+        attached = p.multiplyTransforms(*p.invertTransform(st[4], st[5]), *object_pose)
+        valid, start, _, _ = self._held_object_validity(obs, attached, planning_clock() + 5.0)
+        raised = start.copy()
+        raised[0] = torso
+        with planner._snapshot():
+            if not valid(raised):
+                print("Yaw carry: raised torso pose invalid", planner._last_invalid)
+                torso = float(q[t])
+        # Wrist roll model, valid while the gripper points down: the closing
+        # axis heading is base yaw + c0 + k * roll.
+        i = self._wrist_roll_index
+        k = 1.0 if rot[2, 0] >= 0 else -1.0
+        c0 = float(np.arctan2(rot[1, 1], rot[0, 1])) - yaw - k * float(q[i])
+        print(f"Yaw carry: route {traj.s[-1]:.2f} m, object {traj.L:.2f} m ahead, turn "
+              f"{np.degrees(yaw0 - yaw):.0f} deg, about {traj.duration():.0f} ticks driving, torso {q[t]:.3f}->{torso:.3f}")
+        return dict(traj=traj, yaw0=yaw0, yaw_cmd=yaw, hold=base.copy(), L=traj.L, bias=traj.bias,
+                    k=k, c0=c0, roll=float(self.action[i]), torso=float(self.action[t]), torso_target=torso,
+                    s=float(traj.sg[0]), v=0.0, phase="spin_roll" if abs(yaw0 - yaw) > 0.15 else "drive_roll")
+
+    def _yaw_carry_step(self, obs):
+        """State 67 in the yaw carry: turn the wrist so the closing axis lies
+        along the object's direction of motion, turn on the spot, turn the
+        wrist again, then drive the planned route with a speed ramp."""
+        from custom_libraries.yaw_carry import wrap
+        Y, traj = self._yaw, self._yaw["traj"]
+        q = np.asarray(obs["qpos"], dtype=float)
+        action = self.action.copy()
+        action[13:15] = self._finger_hold
+        t, i = self._travel_torso_index, self._wrist_roll_index
+        Y["torso"] += float(np.clip(Y["torso_target"] - Y["torso"], -0.002, 0.002))
+        action[t] = Y["torso"]
+        accel = self.yaw_carry_accel
+
+        def roll_for(psi, theta):
+            # Roll that puts the closing axis along heading psi at base yaw
+            # theta; the fingers are symmetric, so take the nearest of the
+            # equivalent rolls (modulo pi).
+            r = Y["k"] * (psi - theta - Y["c0"])
+            return r + np.pi * np.round((Y["roll"] - r) / np.pi)
+
+        def roll_toward(target):
+            Y["roll"] += float(np.clip(target - Y["roll"], -self.grip_align_rate, self.grip_align_rate))
+            action[i] = Y["roll"]
+            return abs(target - q[i])
+
+        hold = np.r_[Y["hold"][0] + 2.0, Y["hold"][1]]
+        phase = Y["phase"]
+        if phase == "spin_roll":
+            # While turning on the spot the object moves at right angles to the arm.
+            psi = Y["yaw_cmd"] + Y["bias"] + np.pi / 2
+            action[:3] = np.r_[hold, Y["yaw_cmd"]]
+            if roll_toward(roll_for(psi, Y["yaw_cmd"])) < 0.05:
+                Y["phase"] = "spin"
+        elif phase == "spin":
+            remaining = Y["yaw0"] - Y["yaw_cmd"]
+            v = min(self.yaw_carry_speed, self.yaw_rate_limit * Y["L"], Y["v"] + accel,
+                    np.sqrt(2 * accel * Y["L"] * abs(remaining)) + 1e-4)
+            Y["v"] = v
+            if abs(remaining) <= v / Y["L"]:
+                Y["yaw_cmd"] = Y["yaw0"]
+            else:
+                Y["yaw_cmd"] += float(np.sign(remaining) * v / Y["L"])
+            action[:3] = np.r_[hold, Y["yaw_cmd"]]
+            action[i] = Y["roll"]
+            if Y["yaw_cmd"] == Y["yaw0"] and abs(wrap(q[2] - Y["yaw0"])) < 0.02:
+                Y["phase"], Y["v"] = "drive_roll", 0.0
+        elif phase == "drive_roll":
+            _, _, theta, psi = traj.pose(traj.sg[0])
+            action[:3] = np.r_[hold, Y["yaw_cmd"]]
+            if roll_toward(roll_for(psi, theta)) < 0.05:
+                Y["phase"] = "drive"
+        elif phase == "drive":
+            x, y, theta, psi = traj.pose(Y["s"])
+            lag = np.hypot(x - (q[0] - 2.0), y - q[1])
+            v = min(Y["v"] + accel, float(np.interp(Y["s"], traj.sg, traj.back)))
+            if lag > 0.10 or abs(Y["roll"] - q[i]) > 0.3:
+                v = 0.0      # wait for the base or the wrist to catch up
+            Y["v"] = v
+            Y["s"] = min(float(traj.sg[-1]), Y["s"] + v)
+            x, y, theta, psi = traj.pose(Y["s"])
+            action[:3] = [x + 2.0, y, q[2] + float(wrap(theta - q[2]))]
+            roll_toward(roll_for(psi, theta))
+            if Y["s"] >= traj.sg[-1] and lag < 0.02:
+                Y["phase"] = "end"
+        else:
+            # Route finished without reaching the goal: place with the arm.
+            print("Yaw carry: route finished; reaching with the arm.")
+            action[:3] = q[:3]
+            self._reach_base_hold = q[:3].copy()
+            self._reach_attempts = 0
+            self._reach_phase = "plan"
+            self.state = 68
+        self.action = np.clip(action, self.action_lower_bound, self.action_upper_bound)
+        return self.action.copy()
 
     def reach_goal(self, obs):
         """State 68: put the held object on the goal sphere.
