@@ -88,8 +88,12 @@ for step in range(1, max_steps + 1):          # step = number of env.step calls 
         action = solver.get_action(env)
         obs, info = env.step(action)
     state = solver.state
-    if not states or states[-1][1] != state:
-        states.append((step, state))
+    # The yaw carry's sub-phases (turn, wrist roll, drive) are logged as "67:phase".
+    label = state
+    if state == 67 and getattr(solver, "_yaw", None):
+        label = f"67:{solver._yaw['phase']}"
+    if not states or states[-1][1] != label:
+        states.append((step, label))
     z = float(obs["object_pos"][2])
     if state == 2 and planned is None:
         plan = solver.grasp_plan
