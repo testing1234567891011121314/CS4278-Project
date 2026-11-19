@@ -57,7 +57,7 @@ if not args.report:
     # assets/ (150 MB) never changes: link it into the snapshot when the
     # platform allows, copy it otherwise.
     skip = shutil.ignore_patterns(".git", ".claude", "pnr", "__pycache__", "pristine", "*.mp4", "*.jsonl", "imgs",
-                                  "assets", "runs", "paper_review")
+                                  "assets", "runs", "paper_review", "scratch")
 
     def ignore(folder, names):
         # OUT_DIR may be inside the repo: never copy it into its own snapshot.
