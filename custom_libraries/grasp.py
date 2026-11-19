@@ -1502,8 +1502,10 @@ class GraspFollower:
                     or rotated > 0.10 + self.watch_allowance[1]):
                 return self._fail('Object moved; stop and obtain a fresh plan.', q)
         flange = getattr(self.plan, 'flange', None)
-        if flange is not None and phase == 'close':
-            # The plate may only pivot about its far edge (see GraspConfig.flange_fallback).
+        if flange is not None and phase == 'close' and not self._contacts():
+            # Until both fingers hold it, the plate may only pivot about its
+            # far edge (see GraspConfig.flange_fallback); once pinched, the pads
+            # set its tilt and the far edge may leave the table.
             hinge = (np.asarray(obs['object_pos'], float)
                      + Rotation.from_quat(obs['object_xyzw']).apply(flange['hinge_local']))
             if np.linalg.norm(hinge - flange['hinge']) > owner.config.flange_hinge_drift:
