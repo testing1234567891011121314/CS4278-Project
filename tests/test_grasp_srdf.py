@@ -12,6 +12,8 @@ IK performance, or physical grasp success.
 """
 from __future__ import annotations
 
+import types
+
 import copy
 import importlib.util
 from pathlib import Path
@@ -99,7 +101,15 @@ class FakeBullet:
         if self.fail_query:
             raise RuntimeError('injected collision-query failure')
         rows = self.self_contacts if body_a == body_b else self.obstacle_contacts
+        # The planner queries self-collision pair by pair (linkIndexA/B).
+        pair = {kwargs.get('linkIndexA'), kwargs.get('linkIndexB')}
+        if body_a == body_b and None not in pair:
+            rows = [row for row in rows if {row[3], row[4]} == pair]
         return [row for row in rows if row[8] <= distance]
+
+    def getAABB(self, body, link=-1, **kwargs):
+        # Every box overlaps every other, so no pair is skipped by the box test.
+        return (0., 0., 0.), (1., 1., 1.)
 
     def saveState(self, **kwargs):
         key = len(self.saved) + 1
@@ -208,7 +218,8 @@ class SRDFTests(unittest.TestCase):
         motion = np.r_[0.12, np.full(7, 0.1)]
         target = planner._full(parked, motion, np.array([0.03, 0.03]))
         np.testing.assert_allclose(target[planner.motion_indices], motion)
-        follower = grasp.GraspFollower(planner, None)
+        plan = types.SimpleNamespace(waypoints=np.array([parked, target]), phases=['transit', 'transit'])
+        follower = grasp.GraspFollower(planner, plan)
         self.assertNotIn(planner.torso_index, follower.pinned)
         head_index = planner.action_names.index('head_pan_joint')
         self.assertIn(head_index, follower.pinned)
