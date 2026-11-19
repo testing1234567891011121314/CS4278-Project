@@ -292,17 +292,33 @@ class Solver:
         start = np.clip(qpos[idx], lower, upper)
         lower[planner.wrap] = np.maximum(lower[planner.wrap], start[planner.wrap] - np.pi)
         upper[planner.wrap] = np.minimum(upper[planner.wrap], start[planner.wrap] + np.pi)
+        from scipy.spatial.transform import Rotation
         deadline = planning_clock() + seconds
+        g_rot = Rotation.from_quat(st[5])
+        # The full height in the present orientation first; then the gripper
+        # turned about the vertical (it points down, so this only turns the
+        # object about the vertical, which the yaw carry does anyway), then
+        # lower targets (the yaw carry's torso raise makes up up to ~0.3 m).
+        rise = target[2] - float(st[4][2])
+        candidates = [(h, a) for h in (1.0, 0.85, 0.7) for a in (0.0, 0.5, -0.5, np.pi)]
         ik = _ManipulatorIK(planner, qpos)
         try:
-            goal = ik.solve(target, np.asarray(st[5], dtype=float), start, lower, upper,
-                            min(deadline, planning_clock() + 5.0), restarts=12)
+            for share, turn in candidates:
+                if planning_clock() >= deadline - 2.0:
+                    break
+                aim = np.asarray(st[4], dtype=float) + [0.0, 0.0, share * rise]
+                quat = (Rotation.from_rotvec([0.0, 0.0, turn]) * g_rot).as_quat()
+                goal = ik.solve(aim, quat, start, lower, upper,
+                                min(deadline, planning_clock() + 3.0), restarts=12)
+                if goal is None:
+                    print("Floor raise: no IK for", np.round(aim, 3).tolist(), "turn", round(turn, 2))
+                    continue
+                path = self._plan_tuck(obs, goal, seconds=min(10.0, max(1.0, deadline - planning_clock())))
+                if path is not None:
+                    return path
         finally:
             ik.close()
-        if goal is None:
-            print("Floor raise: no IK for", np.round(target, 3).tolist())
-            return None
-        return self._plan_tuck(obs, goal, seconds=max(1.0, deadline - planning_clock()))
+        return None
 
     def _floor_raise_step(self, obs):
         """State 31: follow the floor raise path (planned on entry) with the
