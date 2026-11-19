@@ -9,6 +9,7 @@ from custom_libraries.curved_navigator import CurvedNavigator
 from custom_libraries.navigate_to_grasp import NavigateToGrasp
 from custom_libraries.grasp import GraspPlanner, GraspFollower
 from custom_libraries.grasp import PlanningError
+from scipy.spatial.transform import Rotation
 from custom_libraries.a_star import a_star
 from custom_libraries.wall_projection import build_wall_collision_grid
 
@@ -362,6 +363,11 @@ class Solver:
     ## This function is called every time step.
     def get_action(self,env):
         obs = env._get_obs()
+        # Recent object poses: how much the object moves by itself before the
+        # grasp (see the follower's watch allowance in state 1).
+        history = getattr(self, "_object_history", [])
+        self._object_history = (history + [(np.asarray(obs["object_pos"], float).copy(),
+                                            np.asarray(obs["object_xyzw"], float).copy())])[-40:]
         if self.state in (5, 31, 67, 68) and self._check_holding(obs):
             return self.action.copy()
 
@@ -522,6 +528,14 @@ class Solver:
 
             self.grasp_plan = plan
             self.grasp_follower = GraspFollower(self.grasp_planner, plan)
+            # An object that rocks by itself (mustard bottle on its side:
+            # +-0.05 rad, never settles) would trip the follower's watch with
+            # no contact; allow the motion seen over the last 40 steps.
+            pos, quat = np.asarray(obs["object_pos"], float), Rotation.from_quat(obs["object_xyzw"])
+            spread_d = max(float(np.linalg.norm(h[0] - pos)) for h in self._object_history)
+            spread_r = max(float((quat.inv() * Rotation.from_quat(h[1])).magnitude())
+                           for h in self._object_history)
+            self.grasp_follower.watch_allowance = (min(spread_d, 0.010), min(spread_r, 0.15))
             self.state = 2
             return self.action.copy()
 
