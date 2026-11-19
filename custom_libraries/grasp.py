@@ -493,6 +493,11 @@ class GraspPlanner:
         self.client = physics_client_id if physics_client_id is not None else getattr(env, 'pb_physics_client', 0)
         self.urdf_path = Path(robot_urdf_path).expanduser().resolve()
         self.sample_stats, self.last_stats = {}, {}
+        # Exploration for ranker data (set by the Solver before plan()): 0
+        # keeps the score order; K > 0 tries the first pass's top K antipodal
+        # candidates in a seeded random order (families shuffled, then their
+        # members, taken round robin). explore_seed None: fresh entropy.
+        self.explore, self.explore_seed = 0, None
         if env is None:  # Standalone geometric sampler (also usable by navigation).
             return
         if p is None:
@@ -804,23 +809,16 @@ class GraspPlanner:
                     candidates.append(c)
         return candidates
 
-    def _precheck_flags(self, candidate, cloud):
-        """Reasons (tight / palm / support) a candidate is likely to fail,
-        from the point cloud alone, at the current tcp_offset."""
+    def _gripper_box_corners(self, candidate, tcp=None):
+        """World corners of the two finger boxes (16) and the palm box (8) at
+        the candidate's opened width and the given (default: current) tcp
+        offset, as one (24, 3) array: fingers first, then the palm."""
         cfg = self.config
         p1, p2, centre, quat = candidate[:4]
         width = float(np.linalg.norm(p2 - p1))
-        flags = []
-        if width > cfg.closed_gap + 2*cfg.finger_travel - cfg.preferred_opening_clearance:
-            flags.append('tight')
         rotation = Rotation.from_quat(quat).as_matrix()
-        tcp = np.asarray(cfg.tcp_offset, float)
-        local = (cloud - centre) @ rotation + tcp
+        tcp = np.asarray(cfg.tcp_offset if tcp is None else tcp, float)
         x0, x1, half_y, half_z = cfg.palm_box
-        m = cfg.palm_margin
-        if np.any((local[:, 0] >= x0 - m) & (local[:, 0] <= x1 + m)
-                  & (np.abs(local[:, 1]) <= half_y + m) & (np.abs(local[:, 2]) <= half_z + m)):
-            flags.append('palm')
         opened = min((width - cfg.closed_gap)/2 + cfg.opening_clearance/2, cfg.finger_travel)
         inner = cfg.closed_gap/2 + opened  # pad surface from the gripper axis
         half_x, half_z_pad = cfg.pad_length/2, cfg.pad_height/2
@@ -834,10 +832,182 @@ class GraspPlanner:
             for y in (-half_y, half_y):
                 for z in (-half_z, half_z):
                     corners.append((x, y, z))
-        world_z = (centre + (np.asarray(corners) - tcp) @ rotation.T)[:, 2]
+        return centre + (np.asarray(corners) - tcp) @ rotation.T
+
+    def _precheck_flags(self, candidate, cloud, tcp=None):
+        """Reasons (tight / palm / support) a candidate is likely to fail,
+        from the point cloud alone, at the current (or the given) tcp_offset."""
+        cfg = self.config
+        p1, p2, centre, quat = candidate[:4]
+        width = float(np.linalg.norm(p2 - p1))
+        flags = []
+        if width > cfg.closed_gap + 2*cfg.finger_travel - cfg.preferred_opening_clearance:
+            flags.append('tight')
+        rotation = Rotation.from_quat(quat).as_matrix()
+        tcp = np.asarray(cfg.tcp_offset if tcp is None else tcp, float)
+        local = (cloud - centre) @ rotation + tcp
+        x0, x1, half_y, half_z = cfg.palm_box
+        m = cfg.palm_margin
+        if np.any((local[:, 0] >= x0 - m) & (local[:, 0] <= x1 + m)
+                  & (np.abs(local[:, 1]) <= half_y + m) & (np.abs(local[:, 2]) <= half_z + m)):
+            flags.append('palm')
+        world_z = self._gripper_box_corners(candidate, tcp)[:, 2]
         if world_z.min() < cloud[:, 2].min() + 0.001:
             flags.append('support')
         return flags
+
+    def candidate_features(self, candidate, cloud, normals, com, *, pad_band=0.003, pad_cells=(9, 4)):
+        """Planning-time features of one candidate as a flat dict of floats,
+        for a learned grasp ranker (units in tools/README_ranker_data.md).
+
+        Pure geometry from the observed cloud, its outward normals, the
+        object's centre of mass and the candidate (p1, p2, centre, xyzw,
+        score) at the current grasp depth (config.tcp_offset; a flange
+        candidate uses its own). No simulation and no random numbers.
+        pad_band: distance (m) from a pad plane within which cloud points count
+        as touching that pad; pad_cells: grid (along x, along z) over each
+        63 x 24 mm pad footprint for the coverage fraction.
+        """
+        cfg = self.config
+        pts, ns = np.asarray(cloud, float), np.asarray(normals, float)
+        norms = np.linalg.norm(ns, axis=1)
+        ok = np.isfinite(pts).all(axis=1) & np.isfinite(ns).all(axis=1) & (norms > 1e-9)
+        pts, ns = pts[ok], ns[ok] / norms[ok, None]
+        p1, p2, centre = (np.asarray(v, float) for v in candidate[:3])
+        quat, score = candidate[3], float(candidate[4])
+        flange = getattr(candidate, 'flange', None)
+        depth = float(flange['tcp']) if flange is not None else float(cfg.tcp_offset[0])
+        tcp = np.array([depth, 0., 0.])
+        rotation = Rotation.from_quat(quat).as_matrix()
+        approach, closing = rotation[:, 0], rotation[:, 1]
+        width = float(np.linalg.norm(p2 - p1))
+        d = (p2 - p1) / width if width > 1e-9 else closing
+        # Roll variant: signed angle about d from the sampler's base approach
+        # (world down projected orthogonal to d) to the actual approach.
+        x0 = np.array([0., 0., -1.]) - d * d[2]
+        if np.linalg.norm(x0) < 1e-6:
+            x0 = np.array([1., 0., 0.]) - d * d[0]
+        x0 /= np.linalg.norm(x0)
+        roll = np.degrees(np.arctan2(np.dot(np.cross(x0, approach), d), np.dot(x0, approach)))
+        bottom = float(pts[:, 2].min())
+        height = float(pts[:, 2].max()) - bottom
+        com = np.asarray(com, float)
+        rel = com - centre
+        perp = rel - np.dot(rel, d) * d          # centre of mass from the grasp line
+        # Gravity's moment about the grasp line per unit weight: what turns the
+        # object about the closing axis (zero when that axis is vertical).
+        torque_arm = abs(float(np.dot(np.cross(rel, [0., 0., -1.]), d)))
+        i1 = int(np.argmin(np.linalg.norm(pts - p1, axis=1)))
+        i2 = int(np.argmin(np.linalg.norm(pts - p2, axis=1)))
+        quality = min(float(-ns[i1] @ d), float(ns[i2] @ d))
+        local = (pts - centre) @ rotation + tcp
+        half_x, half_z = cfg.pad_length/2, cfg.pad_height/2
+        in_foot = (np.abs(local[:, 0]) <= half_x) & (np.abs(local[:, 2]) <= half_z)
+        covers, spreads, counts = [], [], []
+        for contact in (p1, p2):
+            y_pad = float(((contact - centre) @ rotation + tcp)[1])
+            patch = in_foot & (np.abs(local[:, 1] - y_pad) <= pad_band)
+            cx = np.clip(((local[patch, 0] + half_x) / cfg.pad_length * pad_cells[0]).astype(int), 0, pad_cells[0] - 1)
+            cz = np.clip(((local[patch, 2] + half_z) / cfg.pad_height * pad_cells[1]).astype(int), 0, pad_cells[1] - 1)
+            covers.append(len(set(zip(cx.tolist(), cz.tolist()))) / float(pad_cells[0] * pad_cells[1]))
+            counts.append(int(patch.sum()))
+            if patch.sum() >= 2:
+                mean = ns[patch].mean(axis=0)
+                mean /= max(np.linalg.norm(mean), 1e-9)
+                spreads.append(float(np.degrees(np.arccos(np.clip(ns[patch] @ mean, -1., 1.))).mean()))
+            else:
+                spreads.append(float('nan'))
+        corners = self._gripper_box_corners(candidate, tcp)
+        flags = self._precheck_flags(candidate, pts, tcp)
+        centred = pts - pts.mean(axis=0)
+        axes = np.linalg.svd(centred, full_matrices=False)[2]
+        proj = centred @ axes.T
+        extents = np.sort(proj.max(axis=0) - proj.min(axis=0))[::-1]
+        mm = 1000.
+        return dict(
+            tilt_deg=float(np.degrees(np.arccos(np.clip(-approach[2], -1., 1.)))),
+            closing_deg=float(np.degrees(np.arcsin(min(1., abs(closing[2]))))),
+            roll_deg=float(roll),
+            width_mm=width*mm,
+            margin_mm=(cfg.closed_gap + 2*cfg.finger_travel - width)*mm,
+            depth_mm=depth*mm,
+            centre_h_mm=(float(centre[2]) - bottom)*mm,
+            centre_h_frac=(float(centre[2]) - bottom) / height if height > 1e-9 else float('nan'),
+            com_dist_mm=float(np.linalg.norm(perp))*mm,
+            com_dz_mm=float(perp[2])*mm,
+            com_dxy_mm=float(np.linalg.norm(perp[:2]))*mm,
+            torque_arm_mm=torque_arm*mm,
+            quality=quality,
+            score=score,
+            pad_cov_min=min(covers), pad_cov_max=max(covers),
+            pad_spread_min_deg=float(np.nanmin(spreads)) if not np.isnan(spreads).all() else float('nan'),
+            pad_spread_max_deg=float(np.nanmax(spreads)) if not np.isnan(spreads).all() else float('nan'),
+            pad_pts_min=float(min(counts)),
+            finger_low_mm=(float(corners[:16, 2].min()) - bottom)*mm,
+            palm_low_mm=(float(corners[16:, 2].min()) - bottom)*mm,
+            flag_tight=float('tight' in flags), flag_palm=float('palm' in flags),
+            flag_support=float('support' in flags),
+            ext1_mm=float(extents[0])*mm, ext2_mm=float(extents[1])*mm, ext3_mm=float(extents[2])*mm,
+            height_mm=height*mm,
+        )
+
+    @staticmethod
+    def _family_key(candidate):
+        """Near-duplicate family of a candidate: contact centre rounded to
+        1 cm and the unsigned grasp line rounded to 0.25. Roll and closing
+        direction variants of one contact pair share a family."""
+        p1, p2, centre = (np.asarray(v, float) for v in candidate[:3])
+        d = p2 - p1
+        n = np.linalg.norm(d)
+        d = d / n if n > 1e-9 else Rotation.from_quat(candidate[3]).as_matrix()[:, 1]
+        d = d * np.sign(d[np.argmax(np.abs(d))])
+        return tuple(np.round(np.r_[centre / 0.01, d / 0.25]).astype(int).tolist())
+
+    def _explore_order(self, candidates, k, rng):
+        """The top k candidates in a seeded random order: families (see
+        _family_key) shuffled, members shuffled within each, then taken round
+        robin (every family's first member, then every second member...), so
+        near-duplicates do not dominate. The rest keep their order."""
+        groups = {}
+        for c in candidates[:k]:
+            groups.setdefault(self._family_key(c), []).append(c)
+        families = list(groups.values())
+        families = [families[i] for i in rng.permutation(len(families))]
+        families = [[f[i] for i in rng.permutation(len(f))] for f in families]
+        top = [f[level] for level in range(max((len(f) for f in families), default=0))
+               for f in families if level < len(f)]
+        return top + list(candidates[k:])
+
+    def _record_choice(self, stats, candidate, obs):
+        """Put the chosen candidate's planning-time data in stats['choice']:
+        its rank in the sampler's order (None: added by the pre-check retry),
+        its index in the order tried, the candidates tried before it, the pass
+        (normal / precheck) and source (normal, precheck, precheck_retry, rim,
+        flange), its family, the exploration setting and its features."""
+        ctx = self._choice_ctx
+        rank = ctx['ranks'].get(id(candidate))
+        fams = list(dict.fromkeys(self._family_key(c) for c in ctx['original']))
+        key = self._family_key(candidate)
+        if ctx['kind'] != 'antipodal':
+            source = ctx['kind']
+        elif rank is None:
+            source = 'precheck_retry'
+        else:
+            source = 'precheck' if ctx['precheck'] else 'normal'
+        choice = dict(rank=rank, order=next((i for i, c in enumerate(ctx['order']) if c is candidate), None),
+                      tried_before=stats['tried'] - 1, pass_='precheck' if ctx['precheck'] else 'normal',
+                      source=source, family=fams.index(key) if key in fams else None,
+                      family_key='_'.join(map(str, key)),
+                      family_size=sum(self._family_key(c) == key for c in ctx['original']),
+                      explore=ctx['explore'], explore_seed=ctx['explore_seed'],
+                      depth_mm=1000. * float(candidate.flange['tcp'] if getattr(candidate, 'flange', None)
+                                             is not None else self.config.tcp_offset[0]))
+        try:
+            choice['features'] = self.candidate_features(candidate, obs['object_pc'], obs['object_normals'],
+                                                         obs['object_pos'])
+        except Exception as error:  # logging must never cost a plan
+            choice['features_error'] = repr(error)
+        stats['choice'] = choice
 
     def _order_by_precheck(self, candidates, cloud):
         """Stable partition: candidates without pre-check flags come first."""
@@ -1058,6 +1228,12 @@ class GraspPlanner:
         cfg = self.config
         original = cfg.tcp_offset
         attempts = []
+        self._explore_rng, self._explore_seed_used = None, None
+        if int(self.explore or 0) > 0:
+            seed = self.explore_seed
+            if seed is None or seed < 0:
+                seed = int(np.random.SeedSequence().entropy % 2**31)
+            self._explore_rng, self._explore_seed_used = np.random.default_rng(int(seed)), int(seed)
         try:
             for use_precheck in ((False, True) if cfg.precheck_fallback else (False,)):
                 self._use_precheck = use_precheck
@@ -1120,6 +1296,15 @@ class GraspPlanner:
             stats['reason'] = 'no_antipodal_pairs'
             return None
         use_precheck = getattr(self, '_use_precheck', False)
+        kind = ('flange' if self.sample_stats.get('flange_candidates') else
+                'rim' if self.sample_stats.get('rim_candidates') else 'antipodal')
+        self._choice_ctx = dict(original=list(candidates), ranks={id(c): k for k, c in enumerate(candidates)},
+                                kind=kind, precheck=use_precheck, explore=0, explore_seed=None)
+        explore = int(self.explore or 0)
+        if explore > 0 and not use_precheck and kind == 'antipodal' and getattr(self, '_explore_rng', None) is not None:
+            candidates = self._explore_order(candidates, explore, self._explore_rng)
+            self._choice_ctx.update(explore=explore, explore_seed=self._explore_seed_used)
+            stats['explore'] = dict(k=explore, seed=self._explore_seed_used)
         if use_precheck:
             candidates = self._order_by_precheck(candidates, obs['object_pc'])
         clean = len(candidates) - stats['precheck_flagged']['total'] if use_precheck else len(candidates)
@@ -1136,6 +1321,7 @@ class GraspPlanner:
             candidates = candidates[:clean] + added + candidates[clean:]
             stats['candidates'] = len(candidates)
             stats['precheck_retry'] = dict(clean_before=clean, sampled=len(more), clean_added=len(added))
+        self._choice_ctx['order'] = candidates
         lower = self.lower[self.motion_indices].copy()
         upper = self.upper[self.motion_indices].copy()
         start = parked[self.motion_indices].copy()
@@ -1169,6 +1355,8 @@ class GraspPlanner:
                         plan = self._plan_flange(candidate, obs, ik, parked, start, lower, upper,
                                                  deadline, object_pose)
                         if plan is not None:
+                            self._record_choice(stats, candidate, obs)
+                            plan.stats['choice'] = stats['choice']
                             return plan
                         continue
                     p1, p2, centre, quat, _ = candidate
@@ -1262,6 +1450,7 @@ class GraspPlanner:
                             waypoints.append(self._full(parked, arm, fingers))
                             phases.append(phase)
                     stats['reason'] = 'success'
+                    self._record_choice(stats, candidate, obs)
                     # Only measured/query poses get the small overshoot allowance.
                     # Returned motor targets obey the original URDF limits.
                     commands = np.clip(np.asarray(waypoints), self.lower, self.upper)
