@@ -1,6 +1,6 @@
 """Score one headless trial against the rubric in readme.md.
 
-Usage: python tools/score.py PROJECT_DIR OBJ SEED [MAX_STEPS]
+Usage: python tools/score.py PROJECT_DIR OBJ SEED [MAX_STEPS] [REPEAT]
 
 "Step" means one env.step call (assumed; see handoff.md). Prints one line,
 SCORE:{json}, with:
@@ -20,6 +20,12 @@ SCORE:{json}, with:
   stopped        why the trial ended: success / state4 / dropped / stall /
                  max_steps
   points         rubric points for this trial (see POINTS below); max 40
+  g_*            the executed grasp candidate: features at planning time, rank,
+                 pass and source, family, exploration setting, object mass
+  slide_*        the object's displacement toward the fingertips and rotation
+                 in the gripper frame since the end of the lift, at the end of
+                 the hold, retreat and carry setup and at the last held step
+                 (tools/README_ranker_data.md lists every column with units)
 
 Stops at the first success, 50 steps after a drop, on state 4, on a stall
 (no joint moved by > 0.1 mm for 400 steps after the lift) or at MAX_STEPS
@@ -31,6 +37,7 @@ import os
 import sys
 import tempfile
 import time
+import zlib
 
 project = os.path.abspath(sys.argv[1])
 sys.path.insert(0, project)
@@ -50,6 +57,7 @@ DROP_STEPS, STALL_STEPS = 30, 400
 
 obj, seed = int(sys.argv[2]), int(sys.argv[3])
 max_steps = int(sys.argv[4]) if len(sys.argv) > 4 else REACH_BUDGET
+repeat = int(sys.argv[5]) if len(sys.argv) > 5 else 0
 
 quiet = contextlib.redirect_stdout(open(os.devnull, "w"))   # the env and solver print every step
 maze = os.path.join(tempfile.gettempdir(), f"score_maze_{os.getpid()}.urdf")
@@ -64,6 +72,10 @@ for item in filter(None, os.environ.get("SOLVER_SET", "").split(",")):
     assert hasattr(solver, key), key
     old = getattr(solver, key)
     setattr(solver, key, value if isinstance(old, str) else type(old)(float(value)))
+# Grasp exploration without a fixed seed: one per object, seed and repeat, so
+# repeats differ and a trial can be re-run with the same shuffle.
+if solver.grasp_explore > 0 and solver.grasp_explore_seed < 0:
+    solver.grasp_explore_seed = zlib.crc32(f"{obj}:{seed}:{repeat}".encode()) & 0x7FFFFFFF
 planner = solver.grasp_planner
 cid = env.pb_physics_client
 fingers = set(planner.finger_ids)
@@ -88,6 +100,12 @@ hold_contact = 0
 lost = still = 0
 last_q = None
 states = []
+# Slide in the grip: object pose in the gripper frame relative to the end of
+# the lift, sampled while both fingers hold it.
+SETUP_LABELS = ("67:spin_roll", "67:spin", "67:drive_roll")
+slide_ref = None
+slide = {}            # phase -> (x toward the fingertips mm, rotation deg, pivot about the closing axis deg)
+slide_max = [0.0, 0.0]
 exec_steps = {}       # env steps spent in each phase of the grasp execution (state 2)
 t0 = time.perf_counter()
 for step in range(1, max_steps + 1):          # step = number of env.step calls made
@@ -122,6 +140,20 @@ for step in range(1, max_steps + 1):          # step = number of env.step calls 
     if r["lift_step"] is not None:
         held = bilateral()
         since = step - r["lift_step"]
+        g_pos, g_rot = gripper_pose()
+        rel_p = g_rot.inv().apply(np.asarray(obs["object_pos"]) - g_pos)
+        rel_r = g_rot.inv() * Rotation.from_quat(obs["object_xyzw"])
+        if slide_ref is None:
+            slide_ref = (rel_p, rel_r)
+        if held and r["drop"] is None:
+            turn = rel_r * slide_ref[1].inv()           # rotation in the gripper frame since the lift
+            v = (1000 * float(rel_p[0] - slide_ref[0][0]), float(np.degrees(turn.magnitude())),
+                 float(np.degrees(turn.as_rotvec()[1])))
+            phase = "hold" if state == 3 else "retreat" if state == 5 else "setup" if label in SETUP_LABELS else None
+            if phase:
+                slide[phase] = v
+            slide["end"] = v
+            slide_max = [max(slide_max[0], abs(v[0])), max(slide_max[1], v[1])]
         if since <= HOLD_STEPS:
             hold_contact += held
             r["hold_min_cm"] = min(r["hold_min_cm"], round(100 * (z - rest_z), 1))
@@ -183,6 +215,19 @@ r.update(
                    "closure_fail", "lift_fail", "tcp_attempts", "tcp_offset", "flange")},
     wall_s=round(time.perf_counter() - t0, 1),
 )
+choice = (planner.last_stats or {}).get("choice") if hasattr(solver, "grasp_plan") else None
+if choice:
+    g = {k: v for k, v in choice.items() if k not in ("features", "pass_")}
+    g["pass"] = choice.get("pass_")
+    g.update(choice.get("features") or {})
+    g["tcp_attempts"] = len(planner.last_stats.get("tcp_attempts") or [])
+    g["mass_kg"] = p.getDynamicsInfo(env.object_id, -1, physicsClientId=cid)[0]
+    r.update({f"g_{k}": (round(v, 4) if isinstance(v, float) else v) for k, v in g.items()})
+for phase in ("hold", "retreat", "setup", "end"):
+    v = slide.get(phase)
+    r[f"slide_{phase}_x_mm"], r[f"slide_{phase}_rot_deg"], r[f"slide_{phase}_pivot_deg"] = (
+        [round(x, 2) for x in v] if v else (None, None, None))
+r["slide_max_x_mm"], r["slide_max_rot_deg"] = ([round(x, 2) for x in slide_max] if slide else (None, None))
 with contextlib.suppress(OSError):
     os.remove(maze)
 print("\nSCORE:" + json.dumps(r, default=str), flush=True)

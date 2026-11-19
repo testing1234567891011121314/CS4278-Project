@@ -10,7 +10,9 @@ prints a markdown table plus totals. Re-run with only OUT_DIR --report to
 print the table again. With --resume an interrupted batch continues from the
 snapshot already in OUT_DIR and runs only the trials that have no score yet.
 Every run also writes OUT_DIR/results.csv (one row per trial) and prints a
-per-object summary (delivered per seed, points, delivery steps).
+per-object summary (delivered per seed, points, delivery steps). The CSV ends
+with the executed grasp's g_* columns and the slide_* labels of the SCORE line
+(see tools/README_ranker_data.md).
 """
 import argparse
 import concurrent.futures as cf
@@ -45,7 +47,7 @@ def run(job):
     log = os.path.join(out, f"o{o}_s{s}_r{k}.log")
     with open(log, "w") as f:
         subprocess.run([sys.executable, os.path.join(snap, "tools", "score.py"), snap, str(o), str(s),
-                        str(args.max_steps)], stdout=f, stderr=subprocess.STDOUT)
+                        str(args.max_steps), str(k)], stdout=f, stderr=subprocess.STDOUT)
     return log
 
 
@@ -113,14 +115,18 @@ if n:
 cols = ["object", "name", "seed", "repeat", "lift_step", "lift_cm", "hold_min_cm", "hold_50", "grasp_pos_err",
         "grasp_ang_err", "success_step", "drop_step", "drop_state", "stopped", "final_state", "steps", "total",
         "carry", "err", "wall_s"]
+# Then the executed grasp (g_*) and the slide labels (slide_*), in the order
+# they first appear; trials without a plan leave them empty.
+extra = list(dict.fromkeys(k for r in rows for k in r if k.startswith(("g_", "slide_"))))
+extra = [k for k in extra if k.startswith("g_")] + [k for k in extra if k.startswith("slide_")]
 if rows or crashed:      # never overwrite an existing results.csv when there are no logs to read
     with open(os.path.join(out, "results.csv"), "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(cols + [f"pts_{k}" for k in keys])
+        w.writerow(cols + [f"pts_{k}" for k in keys] + extra)
         for r in rows:
             d = dict(r, name=NAMES[r["object"]], drop_step=(r["drop"] or {}).get("step"),
                      drop_state=(r["drop"] or {}).get("state"))
-            w.writerow([d.get(c) for c in cols] + [r["points"][k] for k in keys])
+            w.writerow([d.get(c) for c in cols] + [r["points"][k] for k in keys] + [r.get(c) for c in extra])
         for name in crashed:
             w.writerow([name, "CRASH"])
 
