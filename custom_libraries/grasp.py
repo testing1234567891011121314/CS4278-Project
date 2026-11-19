@@ -784,7 +784,9 @@ class GraspPlanner:
             if (strip & (rad > 0)).sum() < 5 or (strip & (rad < 0)).sum() < 5:
                 continue
             edge = float(rad[strip].max())
-            far = float(-rad[strip].min())
+            # The plate pivots on the far side of its foot ring (lowest points).
+            foot = strip & (rad < 0) & (pts[:, 2] <= bottom + 0.002)
+            far = float(-rad[foot].min()) if foot.any() else float(-rad[strip].min())
             top = float(pts[strip & (rad >= edge - cfg.rim_span), 2].max())
             if top - bottom < cfg.flange_min_rim_height:
                 continue
