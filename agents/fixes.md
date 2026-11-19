@@ -478,6 +478,127 @@ losses come from torsion about the closing axis and from the object acting as
 an inverted pendulum in the fingers-up pose, so the offset between the grasp
 centre and the centre of mass matters.
 
+## Session 3, part 4: carrying with base yaw
+
+Work of 2026-11-19 on branch `worktree-agent-a0d15e881c9cb4b97` (off
+e57127d). The user asked to redesign the navigation so that the base turns
+to follow the route. Results and the before/after table are in handoff.md,
+Session 3, part 4.
+
+### 31. The arm swing and the fixed yaw cost 500 steps and lost objects (`solver.py`, new `custom_libraries/yaw_carry.py`)
+**Symptom.** Deliveries took 1,690-2,000 steps; 18 of 30 reference trials
+were delivered (12 of the 30 lost in state 67, most during or just after the
+250-330-step swing to the fingers-up pose).
+**Fix.** `Solver.carry_mode = "yaw"` (default; `"fixed"` is the old carry).
+- **No swing.** After the retreat the arm keeps its post-lift configuration
+  (forward, gripper straight down, object hanging below the fingers, about
+  0.75-0.77 m ahead of the base centre on every reference trial). Only the
+  torso rises (checked with `_held_object_validity`, object attached) so
+  that the object is carried at the goal's height, 0.9 m.
+- **Route.** `route_cells`: A* over 0.1 m cells where the base circle fits
+  (clearance >= base radius + 5 cm, from `ClearanceField`, an exact distance
+  transform of the walls and the whole table at 2 cm), with a cost that keeps
+  to the corridor centre line. `shortcut` (line of sight with 0.40 m
+  clearance) and `fillet` (circular corners up to 0.5 m radius, each using at
+  most half of each leg) make it smooth.
+- **Object on the path, base trailing.** `CarryTrajectory`: the object's
+  centre moves along the path; the base centre is the point of the same
+  path one arm length (chord) behind it; the base yaw points from base to
+  object. The arm and object therefore stay on the inside of every corner,
+  and the object's direction of motion is the path tangent at the object.
+- **Swept collision check.** The outline of every robot collision link
+  (`robot_xy_polygons`, live pose) plus the disc that the object and fingers
+  sweep when the wrist turns (centred on the gripper axis, out to the
+  farthest object point, at least 7 cm), as points every 1 cm, is placed at every 1 cm of the trajectory and must stay
+  4 cm from walls and table (`yaw_carry_margin`); the turn on the spot from
+  the present yaw to the route's starting yaw is checked every 0.01 rad (the
+  short way, else the long way). Four path variants are tried; if none fits,
+  or the gripper does not point down (side grasps), the old fixed carry runs.
+- **Wrist.** The closing axis is kept along the object's direction of motion:
+  tangential (at right angles to the arm) during the turn on the spot, the
+  path tangent while driving. Roll model, valid with the gripper vertical:
+  closing heading = base yaw + c0 + k * roll, calibrated once.
+- **Speed.** Object speed 30 mm per tick (the actual speed the old carry
+  reached at 36 mm commanded), ramp 1.7 mm per tick^2, base speed <= 36 mm,
+  base yaw <= 0.05 rad per tick, wrist roll <= 0.04 rad per tick, slowing in
+  time for every limit ahead (backward pass); the controller ramps up from
+  rest. The base target is the trajectory point itself (a carrot), so all
+  three base joints lag by the same 1.2 ticks and the base stays on the path.
+- **No final reach.** The trajectory ends with the object on the goal, so
+  delivery happens while driving (state 68 is entered only if the route ends
+  without success).
+**Result.** Reference batch, 30 trials each: 18/30 delivered before (median
+1,806 steps), 25/30 with the first version (median 1,220), 26/30 with the
+slower wrist roll (median 1,262). Seeds 1, 2, 3: 12/15 (fixed carry 12/15),
+median 1,262 against 1,744.
+
+### 32. Rolling the wrist fast slid objects out (`solver.py`)
+**Cause.** Every joint's velocity is a sawtooth within a tick, so a turning
+joint gives the held object an angular kick each tick in proportion to the
+rate. At 0.1 rad per tick (the old `grip_align_rate`) with the base still, a
+banana slid 3 mm per tick toward the fingertips and was lost (2 of 4 traced
+runs, both in the roll after the turn on the spot).
+**Fix.** `roll_rate_limit` = 0.04 rad per tick for every wrist roll in the
+yaw carry. 25/30 -> 26/30 on the reference batch, within the noise; bananas
+were still lost in 2 of 9 trials, once in the roll after the turn on the
+spot and once in the turn itself.
+
+### 33. Heavy objects (`solver.py`)
+**Fix.** `mass_adaptive`: at the end of the hold the object is weighed from
+the finger contact forces (vertical sum of normal and friction forces; equal
+to m*g within 0.01 N on the soup can and foam brick while still), and the
+retreat and yaw-carry speeds and rates are scaled by 0.35 kg / mass, at
+least 0.5. Objects up to the soup can (0.32 kg) are unaffected. Open
+question: whether this counts as reading the mass from the simulator.
+**Result.** Bleach cleanser (never delivered before) delivered in 3 of the 4
+trials that got past the pick, at 2,216-2,414 steps; hammer 1 of 2 at full
+speed (it weighs in under 0.35 kg); sugar box 0 of 4.
+
+### 34. Apples crept out of the fingers (`solver.py`; not fixed)
+**Symptom.** With the gripper down, gravity points toward the fingertips. In
+some apple grasps the apple slid steadily downward while driving straight
+at constant speed (2 to 23 mm over 370 ticks, then lost); in others it did
+not move at all. The finger contact normals are the pad normals (no
+squeeze-out component), so this is creep under the per-tick kicks.
+**Tried: `slip_governor`** (kept, off by default): while driving, the
+object's position along the gripper x axis is compared with its position at
+the start of the drive; the speed is cut for good to `slip_slowdown` (60 %
+at 6 mm and 40 % at 10 mm of slide).
+**Result.** Apple alone: 9/15 delivered without it, 10/12 with it
+(1,272-1,340 steps); 10/12 at a uniform 18 mm per tick (1,697-1,792 steps).
+Reference batch: 27/30 and 23/30 in two runs with it (50/60; 8 and 3
+trials slowed, up to 2,165 steps), 21/30 at a milder 75 % / 60 %, against
+25/30 and 26/30 without it (51/60, all within 1,500 steps). No measurable
+gain, so it is off.
+
+### Tools
+- `tools/trace_carry.py`: base yaw, yaw-carry phase, the angle between the
+  closing axis and the gripper's own motion (`galign_deg`), the gripper's
+  step (`dgrip_mm`); one GRASP line with finger contacts and a weight check.
+- `tools/score.py`: `SOLVER_SET` overrides (strings too, e.g.
+  `carry_mode=fixed`); yaw-carry sub-phases in `states`; `carry` and
+  `gentle` fields.
+- `tools/phases.py` (new): step breakdown by phase for a batch directory.
+- `tests/test_yaw_carry.py` (new): geometry tests (no PyBullet).
+
+### Tried, not kept in part 4
+- **Base on the path with yaw along the tangent** (the arm sticks out of
+  every corner): on the same smoothed paths (seeds 42, 7, 1; samples every
+  2 cm) it comes within the 4 cm margin of a wall at 3-4 samples with a 0.5
+  m arm and 17-26 with the real 0.77 m arm; object-on-path clears them up to
+  a 1.0 m arm (offline check on footprints dumped from live runs, arm
+  length varied by shifting the arm and object points; script not
+  committed).
+- **Turning on the spot at a corner**: no maze corner allows a full turn with
+  arms of 0.5 m or more (0-2 of 5-6 corners clear at 0.5 m, none at 0.6 m).
+- **Retracting the arm**: not needed; the post-lift pose fits every route.
+- **Slower everything for light objects** (18-24 mm per tick, 0.025 rad per
+  tick yaw and roll): banana 3/6 at 24 mm against 4-5/6 at 30 mm; no clear
+  gain and 200-500 more steps.
+- **No wrist roll around the turn on the spot** (`spin_roll` False, closing
+  axis radial while turning): banana 1/4 and 5/6 in two small runs; not
+  adopted.
+
 ## Known limitations / next steps
 
 - **Foam brick is lost in 2 of 2 trials** at 84202b1 (seed 42 in state 67 at

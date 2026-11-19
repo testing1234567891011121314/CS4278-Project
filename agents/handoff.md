@@ -3,10 +3,83 @@
 Read `agents/fixes.md` first. It explains every change made so far and why.
 This file covers where things stand, how to test, and what to do next.
 
+## Session 3, part 4: carrying with base yaw
+
+Date: 2026-11-19. Newest section. Branch `worktree-agent-a0d15e881c9cb4b97`
+(off e57127d on `fix/pick-nav-reach`), local only. Fixes 31-34 in fixes.md
+explain the changes; this section has the numbers.
+
+**What changed.** `Solver.carry_mode = "yaw"` (default). After the retreat
+the arm stays as it is after the lift (forward, gripper down, object hanging
+0.75-0.77 m ahead of the base), the torso lifts the object to 0.9 m, the base
+turns on the spot to face the route, and the object's centre is driven along
+a smooth centre-line route with the base trailing it like a trailer; the
+route ends with the object on the goal, so there is no arm reach. The
+wrist keeps the closing axis along the object's motion. Heavy objects are
+carried slower (weighed from the contact forces); a slip governor (slow
+down once the object slides toward the fingertips) exists but is off.
+`carry_mode = "fixed"` is the old
+carry; the yaw carry falls back to it by itself when the gripper does not
+point down or no route passes the swept check. Code: `solver.py`
+(`_yaw_carry_plan`, `_yaw_carry_step`, `_adapt_to_weight`,
+`_slip_toward_tips`), `custom_libraries/yaw_carry.py` (geometry, no
+PyBullet), `tests/test_yaw_carry.py`.
+
+**Before / after.** Objects 5 6 7 14 2, seeds 42 and 7. "Before" is
+e57127d run from an extracted copy of that commit (30 trials); "fixed" is
+this branch with `SOLVER_SET="carry_mode=fixed"`, which runs the same code
+path as e57127d.
+
+FINAL_TABLE
+
+Steps by phase, medians over delivered trials:
+
+PHASE_TABLE
+
+**Where drops happen now.** DROPS_TEXT
+
+**Heavy objects** (1 sugar box, 13 hammer, 4 potted meat can, 8 bleach
+cleanser; seeds 42 and 7). Fixed carry: 1/8 (potted meat can, 1,959 steps).
+Yaw carry with the weight scaling: 2/8 (bleach 2,263, hammer 1,252); with
+uniformly gentle settings on 1, 13, 8: 2/6 (both bleach, 2,216 and 2,414).
+The sugar box was lost in all 4 yaw trials (early in the drive) and both
+fixed ones. Potted meat can: one grasp was a side grasp (fell back to the
+fixed carry and was lost), one plan failed. Bleach cleanser now picks
+(lift at 567-610) but one trial failed the grasp ("Object moved").
+
+**What did not work** (details in fixes.md, part 4): base on the path with
+yaw along the tangent (the arm swings out and hits the walls at every
+corner); turning on the spot at corners; retracting the arm (not needed);
+slower everything for light objects (no clear gain, 200-500 more steps);
+no wrist roll around the turn on the spot (inconclusive).
+
+**Not verified.**
+- Only maze seeds 42, 7, 1, 2, 3; routes were found and passed the swept
+  check on all of them, with the post-lift pose of objects 2, 5, 6, 7, 14.
+- The swept check uses the convex hull of each collision link projected to
+  the floor (walls are 2 m tall, so height is ignored) and a 4 cm margin;
+  tracking error is not modelled. No wall contact was seen in the traces,
+  but contacts were not logged systematically.
+- Side grasps: the fallback path was tested only by forcing it
+  (`yaw_carry_margin=0.6`: soup can delivered by the fixed carry at 1,786).
+- The weight estimate reads contact forces from the simulator; whether that
+  is allowed is the same open question as reading the mass.
+
+**Next.**
+1. Apples and bananas remain the weak objects (creep toward the fingertips;
+   angular kicks on long objects). A grasp choice that holds round objects
+   lower on the pads, or carrying them gripper-up without the swing, would
+   address the cause.
+2. About 120 steps go to the turn on the spot and its two 90-degree wrist
+   rolls; a curved start (combined retreat and turn) would remove most of
+   it, and the 60-step hold could overlap the retreat.
+3. The sugar box needs more than a slower carry.
+
 ## Session 3, part 3: toward 1,500 steps
 
-Date: 2026-11-19. This is the newest section; it is placed above part 2
-because this file lists the newest work first. Read it first, then part 2.
+Date: 2026-11-19. Placed above part 2 because this file lists the newest
+work first; part 4 above supersedes its carry description. Read it after
+part 4, then part 2.
 
 **New target.** The user now wants the whole episode (pick, carry and reach)
 within 1,500 `env.step` calls for full credit; it was 3,000. The code at
