@@ -154,15 +154,16 @@ class SRDFTests(unittest.TestCase):
 
     def obs(self):
         return {'qpos': np.array([self.bullet.q[j] for j in self.env.joint_indices]),
-                'object_pc': np.empty((0, 3)), 'object_normals': np.empty((0, 3))}
+                'object_pc': np.empty((0, 3)), 'object_normals': np.empty((0, 3)),
+                'object_pos': np.zeros(3), 'object_xyzw': np.array([0., 0., 0., 1.])}
 
     def write_srdf(self, entries, name='fetch'):
         self.srdf.write_text(f'<robot name="{name}">{entries}</robot>')
 
-    def assert_restored(self, before):
+    def assert_restored(self, before, restores=1):
         self.assertEqual((self.bullet.q, self.bullet.vel), before)
         self.assertEqual(self.bullet.saved, {})
-        self.assertEqual(self.bullet.restores, 1)
+        self.assertEqual(self.bullet.restores, restores)
 
     def test_all_ten_supplied_exclusions_are_loaded(self):
         planner = self.planner()
@@ -180,7 +181,8 @@ class SRDFTests(unittest.TestCase):
         self.assertIsNone(planner.plan(self.obs()))  # Empty cloud, not an invalid start.
         self.assertTrue(planner.last_stats['start_valid'])
         self.assertEqual(planner.last_stats['reason'], 'no_antipodal_pairs')
-        self.assert_restored(before)
+        # plan() makes one attempt per grasp depth, each restoring the state.
+        self.assert_restored(before, restores=len(planner.config.tcp_offsets))
 
     def test_unrelated_collision_still_blocks_before_sampling_or_ik(self):
         planner = self.planner()
@@ -251,7 +253,10 @@ class SRDFTests(unittest.TestCase):
 
     def test_start_deadline_reports_time_budget(self):
         planner = self.planner()
-        with patch.object(grasp.time, 'monotonic', side_effect=[0., 31.]):
+        # Budgets are in process CPU time (planning_clock); every reading is
+        # 100 s after the last, past the deadline of each depth attempt.
+        ticks = iter(range(0, 100000, 100))
+        with patch.object(grasp, 'planning_clock', side_effect=lambda: float(next(ticks))):
             self.assertIsNone(planner.plan(self.obs()))
         self.assertEqual(planner.last_stats['reason'], 'time_budget')
         self.assertFalse(planner.last_stats['start_valid'])
