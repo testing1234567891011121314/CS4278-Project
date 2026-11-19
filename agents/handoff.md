@@ -3,6 +3,27 @@
 Read `agents/fixes.md` first. It explains every change made so far and why.
 This file covers where things stand, how to test, and what to do next.
 
+## Session 3, part 5: turn-rate limit and the 450-trial comparison
+
+- Default `object_turn_rate = 0.025` (fixes.md 35). Independent 50-trial runs:
+  37/50 without, 38/50 with; banana 3/10 -> 7/10, apple 6/10 -> 5/10, foam
+  brick 9/10 -> 6/10. No overall gain shown; about 90 steps slower
+  (deliveries 1,216-1,467). `spin_counter_roll` exists, off.
+- Comparison being collected by the user on another machine: 15 objects x
+  seeds 42 7 1 2 3 4 5 6 8 9 x 3 repeats = 450 trials per side, tag
+  `before-turn-limit` (7df67c6) against the commit with the limit:
+  `python tools/batch.py runs/NAME --objects 0 ... 14 --seeds 42 7 1 2 3 4 5 6 8 9 --repeat 3 -j 10 --max-steps 3000`
+  (`--resume` continues an interrupted batch; results in `runs/NAME/results.csv`).
+- Success is judged as a rate across seeds; seed 42 is the demo seed.
+- `mass_adaptive` (weighing from finger contact forces) stays a flag, on by
+  default, to be ablated with `SOLVER_SET="mass_adaptive=0"` (the solver reads
+  SOLVER_SET itself, so it also works for demo recordings).
+- Open: banana grasps about 1 rad off the planned angle (lost early); apple
+  creep toward the fingertips; heavy objects (sugar box, hammer, potted meat
+  can, bleach cleanser) lost in the carry; bowl and plate need a rim grasp;
+  master chef can has under 1 mm of finger room in the code; mug lands on the
+  floor.
+
 ## Session 3, part 4: carrying with base yaw
 
 Date: 2026-11-19. Newest section. Branch `worktree-agent-a0d15e881c9cb4b97`

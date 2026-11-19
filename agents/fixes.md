@@ -599,6 +599,39 @@ gain, so it is off.
   axis radial while turning): banana 1/4 and 5/6 in two small runs; not
   adopted.
 
+### 35. Object turn rate in corners (`solver.py`; part 5, gain not established)
+
+`object_turn_rate = 0.025` rad per tick (was unlimited, about 0.06 in
+corners) limits how fast the held object turns about the vertical during the
+drive. Motivation: banana and sugar box traces show the object sliding in
+every rotation about the vertical. Cost: about 90 steps (drive about 807
+instead of about 715); deliveries now run 1,216-1,467 steps.
+
+Objects 5 6 7 14 2, seeds 42 7 1 2 3:
+
+| code | trials | delivered | banana | apple | foam brick | soup can | strawberry |
+|---|---|---|---|---|---|---|---|
+| 6c05a0c, no limit (my run) | 50 | 37 | 3/10 | 6/10 | 9/10 | 10/10 | 9/10 |
+| 20cd852, limit 0.025 (agent: one 25-trial and one 20-trial batch) | 45 | 37 | 10/15 | 13/15 | 5/5 | 5/5 | 4/5 |
+| 20cd852, limit 0.025 (my run) | 50 | 38 | 7/10 | 5/10 | 6/10 | 10/10 | 10/10 |
+
+The two independent 50-trial runs differ by one delivery, so no overall gain
+is shown; banana is better in every run with the limit, apple and foam brick
+moved the other way in mine. Kept as the default because it is not worse and
+is to be settled by the 450-trial comparison (15 objects x 10 seeds x 3) of
+tag `before-turn-limit` against this commit.
+
+Tried in part 5, not kept: `spin_counter_roll` (turn on the spot with the
+wrist counter-rotating; setup 40 steps instead of about 120, object moved
+0.5 mm instead of 2.4 mm, but no fewer banana/apple drops and soup can 5/10
+with the turn limit; in the code, off); `object_turn_rate = 0.04` (no gain);
+a deeper grasp for round objects (depth 0.0 never planned for the apple,
+reverted). Banana grasps that end about 1 rad off the planned angle were lost
+early in 7 of 9 cases: a pick-side problem, open.
+
+`tools/batch.py` now has `--resume`, writes `results.csv` (one row per trial)
+and prints a per-object summary.
+
 ## Known limitations / next steps
 
 - **Foam brick is lost in 2 of 2 trials** at 84202b1 (seed 42 in state 67 at
