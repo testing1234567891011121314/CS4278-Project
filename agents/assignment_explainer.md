@@ -3,12 +3,19 @@
 Preparation material for the written report. It explains the CS4278/CS5478
 default course project and how our code solves it, with parameter values and
 `file:line` references taken from the code on branch `fix/pick-nav-reach` at
-commit `c24b00b`. Measured results come from the team notes
-(`agents/handoff.md`, `agents/fixes.md`, `agents/slippage_by_object.md`) and
-from the hand-back note of the yaw-carry work (`scratch/HANDBACK.md` in the
-worktree that developed it; not committed). Where the notes and the code
-disagree, this document follows the code and says so. Items that could not be
-checked from the code or the measured results are marked **(unverified)**.
+commit `5d374bc` (first written at `c24b00b`; brought up to date with the
+twelve commits `7df67c6` … `5d374bc`: the yaw-carry options of part 5, the
+batch runner's `--resume` and `results.csv`, the floor pick and the unit
+test fixes). Measured results come from the team notes (`agents/handoff.md`,
+`agents/fixes.md`, `agents/slippage_by_object.md`), from the result files of
+the 450-trial comparison (`xeon-results/all15/results.csv` and
+`xeon-results/all15_after/results.csv`), and from two hand-back notes that are
+not committed: the yaw-carry one (`scratch/HANDBACK.md` in the worktree that
+developed it, cited as "HANDBACK") and the floor-pick one
+(`.claude/worktrees/agent-a51d02711d07e7e7c/scratch/HANDBACK.md`, cited as
+"floor HANDBACK"). Where the notes and the code disagree, this document
+follows the code and says so. Items that could not be checked from the code or
+the measured results are marked **(unverified)**.
 
 Contents
 
@@ -57,7 +64,14 @@ per-run maze URDF path so that trials can run in parallel. Its physics
   1 sugar box, 2 tomato soup can, 3 mustard bottle, 4 potted meat can,
   5 banana, 6 strawberry, 7 apple, 8 bleach cleanser, 9 bowl, 10 mug,
   11 plate, 12 large marker, 13 hammer, 14 foam brick. `env.reset()` drops
-  it from z = 5 m onto the table (`pick_nav_reach_env_multi.py:335`).
+  it from z = 5 m onto the table (`pick_nav_reach_env_multi.py:335`). The
+  mug bounces off: on every seed it comes to rest on its side on the floor at
+  about (−2.007, −2.072, 0.045), in the open start room 2.07 m from the
+  robot's start and about 1.5 m from the tabletop edge (floor HANDBACK,
+  section 1; the drop does not depend on the seed, since only the maze is
+  seeded). The table's legs are visual only: its single collision shape is the
+  1.5 m × 1.0 m × 0.05 m top centred at z = 0.6 m (`pybullet_data`
+  `table/table.urdf`), so the top spans z = 0.575–0.625 m.
 - **Maze.** A 12 × 16 grid of 1 m × 1 m × 2 m wall cubes, plus a 6-column
   room on the left that holds the robot and table
   (`pick_nav_reach_env_multi.py:182-227`). The seed picks the entrance and
@@ -142,8 +156,12 @@ fits with the 4-point line is unclear (section 7).
 
 **The team's own step target.** The team works to a stricter target than the
 rubric: the whole episode (pick, carry and reach) within 1,500 `env.step`
-calls (`handoff.md`, Session 3 part 3; it was 3,000 before that). Current
-deliveries take about 1,200–1,400 calls (section 6). How credit scales with
+calls (`handoff.md`, Session 3 part 3; it was 3,000 before that). In the
+450-trial run with the current default settings, deliveries of the five
+reference objects took 1,166–1,612 calls (median 1,278, 115 of 117 within
+1,500); over all objects the median was 1,303. The heavy objects take longer:
+bleach cleanser 2,132–2,548, sugar box 1,853–2,279; the floor-picked mug
+1,580–2,275 (sections 6.6, 6.7). How credit scales with
 steps, whether the lift limit scales too, and which objects count are open
 questions for the teaching staff.
 
@@ -155,16 +173,16 @@ questions for the teaching staff.
 
 | File | Role |
 |---|---|
-| `solver.py` | `Solver`: the state machine called once per `env.step`; all settings in `__init__`, with `SOLVER_SET` overrides; occupancy and parking maps; base navigation; the yaw carry (`_yaw_carry_plan`, `_yaw_carry_step`, contact-force weighing `_held_weight` / `_adapt_to_weight`); the fixed carry and arm reach (`_tuck_with_object`, `reach_goal`, `_solve_reach`) |
+| `solver.py` | `Solver`: the state machine called once per `env.step`; all settings in `__init__`, with `SOLVER_SET` overrides; occupancy and parking maps; base navigation; the choice of table or floor pick (`_object_on_floor`, `begin_pick`) and the floor raise of state 31 (`_plan_floor_raise`, `_floor_raise_step`); the yaw carry (`_yaw_carry_plan`, `_yaw_carry_step`, contact-force weighing `_held_weight` / `_adapt_to_weight`); the fixed carry and arm reach (`_tuck_with_object`, `reach_goal`, `_solve_reach`) |
 | `custom_libraries/yaw_carry.py` | Geometry for the yaw carry, numpy/scipy only, no PyBullet: `ClearanceField`, `route_cells`, `shortcut`, `fillet`, `CarryTrajectory` (object-on-path trajectory, swept collision check, speed profile), `spin_clear`, `outline` |
 | `custom_libraries/grasp.py` | `GraspConfig` (parameters); `sample_antipodal_grasps`; `_ManipulatorIK` (private IK model); `RRTConnect`; `GraspPlanner` (collision checking, Cartesian approach and lift, full plan); `GraspFollower` (runs the plan with a moving command point) |
-| `custom_libraries/navigate_to_grasp.py` | `NavigateToGrasp`: picks a grasp, chooses a parking cell near the table, turns the base to face the object |
+| `custom_libraries/navigate_to_grasp.py` | `NavigateToGrasp`: picks a grasp, chooses a parking cell near the object, turns the base to face it; `set_floor_mode` swaps in the parking limits for an object on the floor, `reset` forgets the grasp and goal for a fresh pick |
 | `custom_libraries/a_star.py` | 8-connected grid A* |
 | `custom_libraries/curved_navigator.py` | `CurvedNavigator`: rounds path corners with collision-checked Bézier curves and follows the result |
 | `custom_libraries/wall_projection.py` | Projects every robot collision link onto the floor plane and inflates the maze walls by that footprint; its projection is also the robot outline used by the yaw carry |
 | `tests/test_yaw_carry.py` | 5 `unittest` geometry tests of `yaw_carry.py` on an L-shaped corridor (no PyBullet) |
-| `tests/test_grasp_srdf.py` | SRDF loading tests for the grasp planner |
-| `tools/score.py`, `tools/batch.py`, `tools/phases.py` | Rubric scorer for one trial; parallel batch runner over a frozen copy of the repo; step breakdown by phase over a batch directory |
+| `tests/test_grasp_srdf.py` | 25 `unittest` tests of the grasp planner against a fake PyBullet: SRDF loading and validation, collision-query handling, state restore, pinned joints, time budget (brought back in line with the planner in `138be62`, `5d374bc`) |
+| `tools/score.py`, `tools/batch.py`, `tools/phases.py` | Rubric scorer for one trial; parallel batch runner over a frozen copy of the repo (`--resume`, `OUT_DIR/results.csv` with one row per trial, per-object summary); step breakdown by phase over a batch directory |
 | `tools/trace_carry.py` | Per-step CSV trace of the carry (grip forces, drift of the object in the gripper, alignment) |
 | `tools/run_one.py`, `tools/trace_hold.py`, `tools/trace_nav.py`, `tools/summarize_sweep.py` | Older single-run and tracing tools |
 
@@ -182,14 +200,15 @@ stateDiagram-v2
     S1: 1 settle, then plan grasp
     S2: 2 execute grasp (open, transit, approach, close, lift)
     S3: 3 hold lifted object, tighten grip, align wrist, weigh object
-    S5: 5 retreat 1.0 m from table
+    S31: 31 floor raise - object to 0.90 m, gripper still pointing down
+    S5: 5 retreat 1.0 m from table (0 m after a floor pick)
     S67Y: 67 yaw carry (default) - wrist roll, turn on the spot, wrist roll, drive
     S67F: 67 fixed carry (fallback) - swing to fingers-up pose, A* + curved navigation
     S68: 68 arm reach to the goal
     S4: 4 failed (hold last command)
 
     [*] --> S999
-    S999 --> S0: object landed and arm tucked, or 200 steps
+    S999 --> S0: begin_pick (table or floor mode), once object landed and arm tucked, or 200 steps
     S0 --> S0: NAVIGATE_TO_GRASP / PREPARE_GRASP
     S0 --> S1: decision GRASP
     S0 --> S4: RuntimeError (no candidate, height out of range)
@@ -197,16 +216,31 @@ stateDiagram-v2
     S1 --> S4: plan is None
     S2 --> S3: follower done
     S2 --> S4: follower failed
-    S3 --> S5: 60 ticks and wrist aligned (cap 200)
+    S3 --> S5: table pick - 60 ticks and wrist aligned (cap 200)
+    S3 --> S31: floor pick - same condition
+    S31 --> S5: raise done, no raise path, or 800 ticks
     S5 --> S67Y: at retreat goal, yaw carry planned
     S5 --> S67F: at retreat goal, no yaw plan or carry_mode fixed
     S67Y --> S68: route ended without success
     S67F --> S68: stop cell 7 cells short of the goal reached
     S5 --> S4: 30 ticks without bilateral contact
+    S31 --> S4: 30 ticks without bilateral contact
     S67Y --> S4: 30 ticks without bilateral contact
     S67F --> S4: 30 ticks without bilateral contact
     S68 --> S4: 30 ticks without bilateral contact
 ```
+
+**Table or floor pick.** State 999 no longer sets state 0 itself; it calls
+`begin_pick` (`solver.py:240-273`, called at `:407`), which chooses the pick
+mode from where the object lies: "floor" when `floor_pick` is on and the
+lowest point of the observed cloud is below `floor_max_height` = 0.30 m
+(`_object_on_floor`, `:232-238`), "table" otherwise. The mode sets the
+parking limits of `NavigateToGrasp` (section 3.2) and, after the hold, sends
+a floor pick through state 31 with no retreat (section 3.10). A table pick
+runs exactly as before: `begin_pick` only sets state 0 and the table limits,
+which equal the old ones. `begin_pick(obs, fresh=True)` also resets
+everything a second pick would need (for a drop recovery), but no state calls
+it that way yet (section 7).
 
 The episode is counted as delivered by the environment as soon as
 `dist_to_goal < 0.1`. In the yaw carry this normally happens while driving,
@@ -223,13 +257,14 @@ grasp, no route, no swept-clear route variant or no clear turn on the spot).
 ```mermaid
 flowchart TD
     R[env.reset: object dropped from z = 5 m] --> I[Solver.__init__: settings, SOLVER_SET overrides]
-    I -->|cube_positions| M1[create_map: 0.1 m grid of walls;<br/>table legs as obstacles, tabletop kept as overhead box]
-    I -->|robot collision links| M2[create_navigable_map: walls inflated by<br/>projected footprint + 0.05 m; legs by base radius + 0.05 m]
+    I -->|cube_positions| M1[create_map: 0.1 m grid of walls;<br/>tabletop kept as overhead box, not an obstacle]
+    I -->|robot collision links| M2[create_navigable_map: walls inflated by<br/>projected footprint + 0.05 m; other boxes by base radius + 0.05 m]
     M2 --> PM[_parking_map: also block cells where<br/>the torso would be under the tabletop]
-    W[State 999: tuck to travel pose, wait until the object has landed] --> G0
+    W[State 999: tuck to travel pose, wait until the object has landed] --> BP
+    BP[begin_pick: lowest cloud point below 0.30 m?<br/>floor mode, else table mode] --> G0
     PM --> G0
     G0[State 0: NavigateToGrasp.update] -->|object_pc, object_normals, object_pos| SA[sample_antipodal_grasps: best candidate]
-    SA --> PK[nearest_free_goal: parking cell 0.25-0.90 m from grasp]
+    SA --> PK[nearest_free_goal: parking cell 0.25-0.90 m from grasp,<br/>0.48-0.62 m in floor mode]
     PK -->|grid goal| NAV[navigate: A* on the parking map, CurvedNavigator]
     NAV -->|base x, y targets| ENV[(env.step)]
     PK -->|arrived| TURN[_prepare: turn yaw to face object, settle]
@@ -237,7 +272,11 @@ flowchart TD
     S1 -->|qpos, object_pc, normals, object_pos| GP[GraspPlanner.plan:<br/>sample, IK, RRT-Connect, Cartesian approach, closure check, Cartesian lift 0.15 m]
     GP -->|GraspPlan waypoints| GF[State 2: GraspFollower.step, command point moving along the plan]
     GF -->|joint targets with integral term| ENV
-    GF --> H[State 3: hold, tighten grip, align wrist, weigh object] --> RT[State 5: straight retreat 1.0 m, ramped]
+    GF --> H[State 3: hold, tighten grip, align wrist, weigh object]
+    H -->|table pick| RT[State 5: straight retreat 1.0 m, ramped]
+    H -->|floor pick| FR[State 31: planned raise, object attached,<br/>object centre to 0.90 m, gripper still down]
+    FR -->|torso + arm targets, base held| ENV
+    FR -->|retreat 0 m| RT
     RT -->|whole table as obstacle| YP[_yaw_carry_plan: clearance field, centre-line route,<br/>shortcut and fillet, object-on-path trajectory,<br/>swept check, turn check, speed profile, torso raise]
     YP -->|plan| YS[State 67 yaw: wrist roll, turn on the spot, wrist roll,<br/>drive with the object on the route and the base trailing]
     YS -->|base x, y, yaw, torso, wrist roll| ENV
@@ -255,11 +294,11 @@ flowchart TD
 
 Unless stated otherwise, parameter values come from `GraspConfig`
 (`custom_libraries/grasp.py:56-129`) and `Solver.__init__`
-(`solver.py:16-187`). Any `Solver` setting can be overridden without editing
+(`solver.py:16-214`). Any `Solver` setting can be overridden without editing
 code through the environment variable `SOLVER_SET`, for example
 `SOLVER_SET="mass_adaptive=0"` or `"carry_mode=fixed,yaw_carry_speed=0.024"`
 (numbers, booleans as 0/1, or strings). `Solver.__init__` reads it at its end
-(`solver.py:179-187`), so it applies to every runner, including the course's
+(`solver.py:206-214`), so it applies to every runner, including the course's
 own demo loop; it was added for ablations (commit `5367609`).
 
 ### 3.1 Grasp generation: antipodal sampling with friction cones
@@ -344,41 +383,56 @@ reach 0.25–0.90 m, preferred 0.55 m, grasp height in the base frame
 0.20–1.30 m, |lateral| ≤ 0.60 m, arrival tolerance 0.06 m, yaw tolerance
 0.05 rad, yaw step 0.02 rad per call, 5 settled calls.
 
-1. `select_grasp` takes the top candidate from the sampler (`:110-136`).
-2. `classify_reachability` (`:208-221`) is a coarse check. If the height is
+1. `select_grasp` takes the top candidate from the sampler (`:144-170`).
+2. `classify_reachability` (`:242-255`) is a coarse check. If the height is
    out of range, `update` raises `RuntimeError` and the solver goes to
-   state 4.
-3. `nearest_free_goal` (`:251-302`) does a breadth-first search of the free
+   state 4; the message now names the mode and the range (`:416-420`).
+3. `nearest_free_goal` (`:285-336`) does a breadth-first search of the free
    cells of the grid it is given (the parking map, below) reachable from the
    robot (8-connected, no cutting blocked corners). It keeps cells
    0.25–0.90 m from the grasp centre that clear the tabletop by the torso's
    forward reach plus 3 cm plus the arrival tolerance (`_overhead_clear`,
-   `:106-108`), and picks the one minimising |d − 0.55| + 0.15 × travel
+   `:140-142`), and picks the one minimising |d − 0.55| + 0.15 × travel
    distance.
-4. The solver drives there (section 3.6). Then `_prepare` (`:304-345`) turns
+4. The solver drives there (section 3.6). Then `_prepare` (`:338-379`) turns
    the yaw to face the grasp centre, holding x and y. It reports ready after
    5 consecutive calls with yaw error ≤ 0.05 rad, all joints still
    (|Δq| < 0.0005, |q̇| < 0.01) and base x, y within 1 cm of the snapshot. It
    raises after 600 calls.
 5. If the object moves by more than 1 cm or 0.1 rad, the grasp and goal are
-   re-selected (`:367-374`).
+   re-selected (`:401-408`).
+
+**Floor mode.** `set_floor_mode(on, ...)` (`navigate_to_grasp.py:89-106`)
+swaps these limits for an object on the floor, and back to the `__init__`
+values (kept in `_table_limits`, `:82-87`) with `on=False`. `begin_pick`
+calls it with the solver's settings (`solver.py:252-256`): horizontal reach
+`floor_min_reach` = 0.48 to `floor_max_reach` = 0.62 m, preferred 0.55 m
+(their midpoint), grasp height −0.05 to 0.30 m in the base frame, arrival
+tolerance 0.04 m. The band comes from a reachability study with the
+planner's own IK and collision check (floor HANDBACK, section 2): with the
+gripper pointing down and the pad centre 5–7 cm above the floor,
+collision-free IK exists for 0.45–0.65 m from the base centre; at 0.35 m the
+forearm, wrist or gripper hits the base, and from 0.75 m there is no IK
+solution. Side approaches have no IK at floor height, so the floor pick is
+top-down. `reset()` (`:108-115`) forgets the grasp, the parking goal, the
+failed goals and the turn, for a fresh pick.
 
 **Why the overhead check.** The travel map leaves out boxes whose lower
-z ≥ 0.35 m (the tabletop, `solver.py:1491`), so the base can tuck under the
+z ≥ 0.35 m (the tabletop, `solver.py:1688`), so the base can tuck under the
 table. The torso cannot tuck under, and its front reaches about 8.8 cm ahead
 of the base centre at tabletop height. `overhead_link_reach`
-(`solver.py:1523-1544`) measures that reach from the collision geometry
+(`solver.py:1720-1741`) measures that reach from the collision geometry
 (`fixes.md` §3).
 
 **The parking map.** The overhead check above applies to the goal cell only.
 A route planned on the travel map could still pass under the table, where the
 torso jams against the edge: the bleach cleanser rolled to the far side of
 the table, and the robot stayed in state 0 for the whole episode (commit
-`4ad8305`). `_parking_map` (`solver.py:1365-1379`) therefore copies the
+`4ad8305`). `_parking_map` (`solver.py:1562-1576`) therefore copies the
 inflated travel map and also blocks every free cell whose centre is closer to
 the tabletop rectangle than the torso reach + 3 cm. State 0 passes it both to
-`NavigateToGrasp.update` and to the A* of the drive (`solver.py:252-258,
-314`).
+`NavigateToGrasp.update` and to the A* of the drive (`solver.py:412-418,
+474`).
 
 ### 3.3 Inverse kinematics: a private fixed-base model
 
@@ -552,16 +606,20 @@ the end of the lift (section 6.3).
 These are used for the drive to the table and for the fixed carry. The yaw
 carry plans its own route (section 3.8).
 
-**Occupancy grid** (`create_map`, `solver.py:1315-1363`). The grid has 0.1 m
+**Occupancy grid** (`create_map`, `solver.py:1512-1560`). The grid has 0.1 m
 cells and covers the wall centres ± 0.5 m. Wall cubes are rasterised exactly.
-Other bodies come from their link AABBs (`get_extra_obstacle_bounds`,
-`:1447-1521`), excluding the robot, the object, the goal marker, the floor and
-the merged maze body. For the drive to the table (`is_2d=True`), boxes with
-lower z ≥ 0.35 m (the tabletop) are left out and recorded as overhead boxes.
-For transport (`is_2d=False`, called on leaving state 5) the whole table is
-an obstacle.
+Other bodies come from the AABBs of their links that have a collision shape
+(`get_extra_obstacle_bounds`, `:1644-1718`), excluding the robot, the object,
+the goal marker, the floor and the merged maze body. For the drive to the
+table (`is_2d=True`), boxes with lower z ≥ 0.35 m (the tabletop) are left out
+and recorded as overhead boxes. For transport (`is_2d=False`, called on
+leaving state 5) the whole table is an obstacle. The table's legs have no
+collision shapes (section 1.2), so in practice the drive-to-table map holds
+the walls only, and the transport map the walls plus the tabletop's
+footprint. (A code comment at `solver.py:1683-1687` says "Table legs start
+at z=0 and still count"; for this table URDF there are none.)
 
-**Inflation** (`create_navigable_map`, `solver.py:1381-1415`):
+**Inflation** (`create_navigable_map`, `solver.py:1578-1612`):
 
 - **Walls** are inflated by the robot's actual projected footprint.
   `robot_xy_polygons` (`wall_projection.py:93-154`) projects the collision
@@ -571,18 +629,19 @@ an obstacle.
   `inflate_walls` (`:79-90`) marks every base cell that would put any part of
   the robot on a wall. Projection ignores height, which is conservative for
   2 m walls. The held object is **not** part of this footprint.
-- **Table legs and other extras** are dilated by a square of radius
+- **Other obstacle boxes** (here only the tabletop, and only on the
+  transport map) are dilated by a square of radius
   ceil((base radius + 0.05)/0.1) cells. The base radius is measured from the
-  base collision mesh vertices (`get_base_radius`, `:1184-1311`).
+  base collision mesh vertices (`get_base_radius`, `:1381-1508`).
 
 This navigation keeps the yaw fixed, so the footprint is only valid for the
 arm pose it was measured in. The inflated map is rebuilt each time a travel
-pose is reached (`navigate`, `solver.py:1061-1071`). Two arm poses are used:
+pose is reached (`navigate`, `solver.py:1258-1268`). Two arm poses are used:
 
-- `travel_joint_targets` (`solver.py:106-115`), arm forward, for the drive to
+- `travel_joint_targets` (`solver.py:132-141`), arm forward, for the drive to
   the table. The grasp planner starts from this pose. State 999 already
   moves the arm there while the object falls;
-- `carry_joint_targets` (`solver.py:127-136`), used only by the fixed carry:
+- `carry_joint_targets` (`solver.py:153-162`), used only by the fixed carry:
   gripper pointing straight up at about 1.6 m with every link within 0.289 m
   of the base centre, so the fixed-yaw inflation does not seal the maze's
   narrowest passage (the travel pose reaches 0.84 m forward, `fixes.md` §9,
@@ -607,29 +666,31 @@ diagonal moves past a blocked corner. Returns `[]` when there is no path.
   Status becomes `reached` within 3 cm of the end. If no acceptable target is
   found, the status is `blocked_or_off_path` and the step is zero.
 - The base command is the measured position plus that step
-  (`solver.py:1110-1140`).
+  (`solver.py:1307-1337`).
 
 ### 3.7 Transport: the common start (hold, weigh, retreat)
 
 Both carries share these steps.
 
-1. **State 3, hold** (`solver.py:379-408`). The arm holds `follower.hold`.
+1. **State 3, hold** (`solver.py:539-570`). The arm holds `follower.hold`.
    The finger command is tightened by a further 0.5 mm per tick, up to
-   `carry_grip_extra` = 30 mm, floored at 0 (`:385-388`). With the 30 mm
+   `carry_grip_extra` = 30 mm, floored at 0 (`:545-548`). With the 30 mm
    squeeze already in the plan, this ends with the fingers commanded shut for
-   every width the sampler accepts. Meanwhile `_align_grip` (`:536-562`)
+   every width the sampler accepts. Meanwhile `_align_grip` (`:698-724`)
    turns the wrist roll at up to 0.1 rad per tick so that the closing axis
    lies along the retreat direction (modulo π): the per-step kick of the base
    is then taken as a normal force by the fingers, not by friction across the
    pads. The hold ends once at least `hold_before_transport` = 60 ticks have
    passed and the alignment factor exceeds 0.995, or after 200 ticks
-   (`:402`).
-2. **Weighing** (`mass_adaptive` = True; yaw carry only; `:405-406`). At the
-   end of the hold, `_held_weight` (`:669-677`) sums the vertical components
+   (`:562`). A table pick then goes to state 5; a floor pick goes to state 31
+   (the floor raise, section 3.10) with a retreat distance of
+   `floor_retreat_distance` = 0 m (`:564-569`).
+2. **Weighing** (`mass_adaptive` = True; yaw carry only; `:566-567`). At the
+   end of the hold, `_held_weight` (`:847-855`) sums the vertical components
    of the normal and friction forces of all robot–object contacts. While
    everything is still this equals the object's weight; it matched m·g within
    0.01 N on the soup can and foam brick (`fixes.md` §33). `_adapt_to_weight`
-   (`:679-687`) computes the factor clip(`gentle_mass` / mass, `gentle_min`,
+   (`:857-865`) computes the factor clip(`gentle_mass` / mass, `gentle_min`,
    1) with `gentle_mass` = 0.35 kg and `gentle_min` = 0.5, and multiplies
    `yaw_carry_speed`, `yaw_carry_accel`, `yaw_rate_limit`, `roll_rate_limit`
    and `carry_speed` by it; it also caps `object_turn_rate` at
@@ -638,19 +699,21 @@ Both carries share these steps.
    pads or a wrist force sensor. Whether reading contact forces from the
    simulator is acceptable is an open question (section 7), so it is a flag
    that can be ablated with `SOLVER_SET="mass_adaptive=0"`.
-3. **State 5, retreat** (`:410-440`). Straight away from the object for
+3. **State 5, retreat** (`:572-602`). Straight away from the object for
    `retreat_distance` = 1.0 m with the arm and fingers frozen, so the object
    clears the table before any arm or yaw motion. The base step comes from
-   `_ramped_speed` (`:525-534`): at most `carry_speed` = 36 mm per tick
+   `_ramped_speed` (`:687-696`): at most `carry_speed` = 36 mm per tick
    commanded (the base covers about 83 % of a command per tick, so about
    30 mm actual), changing by at most `carry_accel` = 2 mm per tick², and
    low enough to stop at the goal. It takes 46 steps (section 6.3). Within
    3 cm of the goal the solver plans the yaw carry, or falls back to the
-   fixed carry (`:417-439`).
-4. **Drop detection** (`_check_holding`, `solver.py:189-203`). In states 5,
-   67 and 68, 30 consecutive ticks without bilateral finger contact send the
-   solver to state 4, and `grasp_error` records where. State 3 is not
-   covered.
+   fixed carry (`:579-601`). After a floor pick the retreat goal is the
+   present position, so the yaw carry is planned on the first call.
+4. **Drop detection** (`_check_holding`, `solver.py:216-230`). In states 5,
+   31, 67 and 68, 30 consecutive ticks without bilateral finger contact send
+   the solver to state 4, and `grasp_error` records where (called at
+   `:365`). State 3
+   is not covered.
 
 ### 3.8 Transport: the yaw carry (default)
 
@@ -664,11 +727,11 @@ route ends with the object on the goal, so no arm reach is needed. This
 replaced a 250–330-step arm swing to the fingers-up pose, during or just after
 which most objects of the fixed carry were lost (`fixes.md` §31).
 
-**Planning** (`_yaw_carry_plan`, `solver.py:564-667`), once, at the end of
+**Planning** (`_yaw_carry_plan`, `solver.py:726-845`), once, at the end of
 the retreat. Planning time costs no simulation steps.
 
 1. **Gate.** The gripper's approach axis must point within about 26° of
-   straight down (world z component < −0.9, `:591-593`); with the gripper
+   straight down (world z component < −0.9, `:753-755`); with the gripper
    vertical the wrist roll turns the closing axis about the vertical without
    moving anything else. Side grasps fall back to the fixed carry.
 2. **Clearance field.** `create_map(env, False)` makes the whole table an
@@ -677,7 +740,7 @@ the retreat. Planning time costs no simulation steps.
    the fine cell and subtracting one fine-cell diagonal makes the value a
    lower bound on the true distance to the occupied squares. Points off the
    map have clearance 0.
-3. **Swept footprint** (`solver.py:598-609`). The outline (points every 1 cm,
+3. **Swept footprint** (`solver.py:760-771`). The outline (points every 1 cm,
    `outline`, `yaw_carry.py:310-322`) of every robot collision link projected
    to the floor at the live pose (`robot_xy_polygons`), in the base frame,
    plus a ring of points around the gripper axis with radius = the farthest
@@ -697,7 +760,7 @@ the retreat. Planning time costs no simulation steps.
    sharp corner is kept otherwise. The result is sampled every 1 cm. Four
    (clearance, radius) variants are tried in order: (0.40, 0.5 =
    `yaw_fillet_radius`), (0.40, 0.3), (0.45, 0.5), (0.36, 0.3) m
-   (`solver.py:619`).
+   (`solver.py:781`).
 6. **Object-on-path trajectory** (`CarryTrajectory`, `yaw_carry.py:201-295`).
    The carried point is the object's centre, at offset (a, b) in the base
    frame, L = |(a, b)|. For every object position on the path, the base centre
@@ -713,45 +776,73 @@ the retreat. Planning time costs no simulation steps.
 7. **Swept collision check** (`collisions`, `yaw_carry.py:249-259`). The
    footprint is placed at the base pose of every 1 cm object sample and must
    stay at least `yaw_carry_margin` = 4 cm from walls and table. A variant
-   that fails is skipped (`solver.py:624-628`).
+   that fails is skipped (`solver.py:786-790`).
 8. **Turn on the spot** (`spin_clear`, `yaw_carry.py:298-307`). The turn from
    the present yaw to the route's starting yaw is checked every 0.01 rad, the
-   short way first, then the long way (`solver.py:629-634`). If no variant
+   short way first, then the long way (`solver.py:791-796`). If no variant
    passes both checks, the plan returns `None` and the fixed carry runs.
 9. **Speed profile** (`speed_profile`, `yaw_carry.py:261-290`). Per sample,
    the object speed is the smallest of: `yaw_carry_speed` = 30 mm per tick
    (the actual speed the fixed carry reached at 36 mm commanded); a base speed
    of 1.2 × that (36 mm); `yaw_rate_limit` = 0.05 rad per tick of base yaw;
    `roll_rate_limit` = 0.04 rad per tick of wrist roll; and
-   `object_turn_rate` on the object's own heading (1e9, i.e. off), each
-   converted to object speed through the trajectory's rate of change per
-   metre; at least 2 mm per tick. A backward pass with
-   `yaw_carry_accel` = 1.7 mm per tick² makes the speed fall in time for every
-   later limit and to 0 at the end.
-10. **Torso** (`solver.py:644-656`). The torso target puts the object's
+   `object_turn_rate` on the object's own heading (1e9, i.e. off, at
+   `solver.py:96`), each converted to object speed through the trajectory's
+   rate of change per metre; at least 2 mm per tick (`solver.py:804-805`). A
+   backward pass with `yaw_carry_accel` = 1.7 mm per tick² makes the speed
+   fall in time for every later limit and to 0 at the end. **The turn-rate
+   limit was on and is off again.** On a 0.5 m corner at 30 mm per tick the
+   object turns about 0.06 rad per tick (`solver.py:89-91`). Commit
+   `1ce4e81` made `object_turn_rate` = 0.025 rad per tick the default,
+   because banana and sugar box traces show the object sliding in every
+   rotation about the vertical; it costs about 90 steps (drive about 807
+   instead of about 715). Commit `05252b7` switched it off again after the
+   450-trial comparison showed no gain (160 against 159 of 450 delivered,
+   section 6.6). It remains an ablation option,
+   `SOLVER_SET="object_turn_rate=0.025"` (`fixes.md` §35). Heavy objects
+   still get a limit of 0.04 rad per tick × the weighing factor from
+   `_adapt_to_weight` (`solver.py:864`).
+10. **Torso** (`solver.py:806-818`). The torso target puts the object's
     centre at `carry_object_height` = 0.90 m, the goal's height, within the
     torso limits; it is checked collision-free with the object attached
-    (`_held_object_validity`, `:839-895`), otherwise the torso stays.
-11. **Wrist model** (`:657-661`). With the gripper vertical, the closing-axis
+    (`_held_object_validity`, `:1036-1092`), otherwise the torso stays.
+11. **Wrist model** (`:819-823`). With the gripper vertical, the closing-axis
     heading = base yaw + c0 + k × roll, with c0 and k read once from the live
     pose.
+12. **Counter-rolled turn** (only with `spin_counter_roll`, off by default,
+    `solver.py:81-88`; `:830-844`). If the turn exceeds 0.02 rad the plan
+    starts in phase `spin_hold` instead of `spin_roll`. It computes dh, the
+    change of the closing-axis heading from now to the route's starting
+    tangent, taken modulo π (the fingers are symmetric, so at most 90°), and
+    a yaw-rate cap such that the object's heading turns at most
+    `roll_rate_limit` and the wrist joint at most `yaw_rate_limit` per tick.
 
-**Execution** (`_yaw_carry_step`, `solver.py:698-778`), once per tick in
+**Execution** (`_yaw_carry_step`, `solver.py:876-975`), once per tick in
 state 67. The fingers keep the hold command and the torso moves toward its
 target at 2 mm per tick. Phases:
 
 1. **spin_roll** (only if `spin_roll` is True and the turn exceeds 0.15 rad):
    base still; the wrist rolls at ≤ 0.04 rad per tick until the closing axis
    is tangential to the coming turn (at right angles to the arm), within
-   0.05 rad (`:726-731`).
+   0.05 rad (`:904-909`).
 2. **spin**: the base turns on the spot with a trapezoidal profile: the
    object speed v rises by the ramp, is at most 30 mm per tick and
    0.05 rad per tick × L, and falls in time to stop at the target yaw; each
    tick the yaw advances by v / L. The phase ends when the target is
-   commanded and the measured yaw is within 0.02 rad (`:732-744`).
+   commanded and the measured yaw is within 0.02 rad (`:929-941`).
+   **spin_hold** replaces spin_roll and spin when `spin_counter_roll` is on
+   (`:910-928`): the same trapezoidal turn with the cap above, while the
+   wrist roll is commanded so that the closing-axis heading moves linearly
+   with the turn's progress from its present value to the route's (dh in
+   all); then straight to drive_roll. Part 5 measured it: setup about
+   40 steps instead of about 120, the object moved 0.5 mm in the gripper
+   instead of 2.4 mm, but the same banana and apple drops as with the two
+   rolls (9 of 20), and with the turn-rate limit on the soup can was
+   delivered 5 of 10 with it against 5 of 5 without, so it is off
+   (`solver.py:85-87`; `fixes.md` §35).
 3. **drive_roll**: base still; the wrist rolls the closing axis onto the path
-   tangent at the start (`:745-749`).
-4. **drive** (`:750-768`): the carrot's arc length s advances by v per tick,
+   tangent at the start (`:942-946`).
+4. **drive** (`:947-965`): the carrot's arc length s advances by v per tick,
    with v ≤ previous v + ramp and ≤ the backward-pass profile. The base
    target is the trajectory pose (x, y, yaw) at s itself, so all three base
    joints lag by the same amount and the base stays on the path. The wrist
@@ -760,14 +851,14 @@ target at 2 mm per tick. Phases:
    exceeds 0.3 rad. Optional `slip_governor` (off by default): the object's
    position along the gripper x axis is compared with its value at the start
    of the drive, and the speed is cut for good to 60 % at 6 mm and 40 % at
-   10 mm of slide toward the fingertips (`slip_slowdown`, `:754-759`). It made
+   10 mm of slide toward the fingertips (`slip_slowdown`, `:951-956`). It made
    no measurable difference on the reference batch (section 6.2), so it is
    off.
 5. **end**: once s is at the end of the route and the lag is under 2 cm. The
    route ends with the object over the goal at goal height, so the
    environment has normally declared success already. If not, the solver
    holds the base and enters state 68 straight in the "plan" phase
-   (`:769-776`).
+   (`:966-973`).
 
 Measured phase lengths: about 40 steps for each wrist roll and 40 for the
 turn, 119 in all, and about 715 for the drive (section 6.3). The wrist roll
@@ -778,26 +869,32 @@ rate was 0.1 rad per tick at first; with the base still that slid a banana
 **Fallback.** `_yaw_carry_plan` returns `None`, and the fixed carry runs
 unchanged, when the gripper does not point down (side grasps), when no base
 route exists, or when no route variant passes the swept check and the turn
-check. The fallback path was tested by forcing it
+check. The fallback path was first tested by forcing it
 (`SOLVER_SET="yaw_carry_margin=0.6"`: soup can delivered by the fixed carry
 at 1,786 steps). On maze seeds 42, 7, 1, 2, 3 with the post-lift poses of
 objects 2, 5, 6, 7, 14 every yaw trial planned a route (`handoff.md`,
 part 4). In the heavy-object batch one potted meat can grasp was a side grasp
-and fell back (HANDBACK, section c).
+and fell back (HANDBACK, section c). In the 450-trial comparison over ten
+seeds (section 6.6) the fallback ran on its own 4 times in 247 lifted trials
+on the side without the turn-rate limit, and all 4 were delivered (banana
+seed 3 at 1,612 steps; hammer seed 6 at 1,834 and seed 4 at 1,657 and 1,663),
+and 0 times in 243 lifted trials on the other side
+(`xeon-results/*/results.csv`, column `carry`). One floor-picked mug (seed 8)
+also fell back and was delivered at 2,275 steps (floor HANDBACK, section 5).
 
 ### 3.9 Transport fallback: the fixed carry and the goal reach
 
 `carry_mode = "fixed"`, or the automatic fallback. This is the carry of
 commit `e57127d`, unchanged.
 
-1. **Swing** (`_tuck_with_object`, `solver.py:932-970`; `_plan_tuck`,
-   `:897-930`). The arm moves to `carry_joint_targets` (fingers up) along a
+1. **Swing** (`_tuck_with_object`, `solver.py:1129-1167`; `_plan_tuck`,
+   `:1094-1127`). The arm moves to `carry_joint_targets` (fingers up) along a
    collision-checked path with the object attached: the straight joint-space
    edge if valid, else RRT-Connect (30 CPU-s); a straight joint move if no
    path is found. It is followed at `tuck_rate` = 0.012 rad per tick, torso
    2 mm per tick, with a common scale. The inflated map is then rebuilt for
-   this footprint (`navigate`, `:1061-1071`).
-2. **Drive** (`solver.py:486-523`). A* on the inflated map to the goal's
+   this footprint (`navigate`, `:1258-1268`).
+2. **Drive** (`solver.py:648-685`). A* on the inflated map to the goal's
    cell; once a route exists the goal is replaced by the cell
    `reach_backoff_cells` = 7 before its end (`stop_short_of_goal`, commit
    `6a8e1f4`; before, the robot drove onto the goal cell and backed off
@@ -807,16 +904,16 @@ commit `e57127d`, unchanged.
    axis along the direction of travel, the base waits while the error is above
    0.3 rad, and below that its speed scales with cos² of the error. The
    fingers are commanded to the hold value throughout.
-3. **Reach** (state 68, `reach_goal`, `:780-837`). The backoff phase is now a
+3. **Reach** (state 68, `reach_goal`, `:977-1034`). The backoff phase is now a
    no-op, since the carry already stopped 7 cells short. Then up to 3 plan
-   attempts with `_solve_reach` (`:972-1054`), each with a 60 s CPU budget:
+   attempts with `_solve_reach` (`:1169-1251`), each with a 60 s CPU budget:
    - read the object's offset in the gripper frame and treat the object as
      attached;
    - obstacles = every body except the robot, the held object and the goal
      marker; no support contacts are allowed; the held object is not checked
      against the gripper links (it moves rigidly with them), only against the
      walls and the rest of the robot; the start is clipped to the joint limits
-     (`_held_object_validity`, `:839-895`; `fixes.md` §19, §23);
+     (`_held_object_validity`, `:1036-1092`; `fixes.md` §19, §23);
    - candidate gripper orientations: the current one plus 9 variants (roll 0,
      ±π/2 × yaw 0, ±0.5), sorted by how little they turn the gripper from the
      current one; aim points: the goal centre, then 5 points 5 cm from it
@@ -833,32 +930,107 @@ commit `e57127d`, unchanged.
    tolerance is 0.03 rad, 0.01 at the last. Then **hold**. If all three plan
    attempts fail, the robot holds its pose short of the goal.
 
+### 3.10 Floor pick: objects that land on the floor
+
+Added in commits `7d763be`, `28c648b` and `0bfa33d` (the same code as
+`9c36c9c`, `cf5a02d`, `4b12def` on the branch that developed it; design notes
+and measurements in the floor HANDBACK). Its target is the mug, which bounces
+off the table onto the floor on every seed (section 1.2); before this change
+the solver went to state 4 on the first state-0 call, because the grasp
+height (about 0.044 m) was below the table pick's `min_z` = 0.20 m. Settings
+(`solver.py:114-127`): `floor_pick` = True (a flag;
+`SOLVER_SET="floor_pick=0"` restores the old behaviour), `floor_max_height` =
+0.30 m, `floor_min_reach` = 0.48 m, `floor_max_reach` = 0.62 m,
+`floor_lift_height` = 0.90 m (the same as `carry_object_height`),
+`floor_retreat_distance` = 0 m; the attribute `pick_mode` records "table" or
+"floor".
+
+1. **Choice of mode** (`begin_pick`, `solver.py:240-273`; `_object_on_floor`,
+   `:232-238`). At the end of state 999 the mode is "floor" when the lowest
+   point of the observed cloud is below 0.30 m (the tabletop's underside is
+   at 0.575 m). An object under the tabletop also counts; its parking goal
+   is then limited by the overhead check.
+2. **Parking** (state 0). As in section 3.2, with the floor limits: reach
+   0.48–0.62 m, preferred 0.55 m, grasp height −0.05 to 0.30 m in the base
+   frame, arrival tolerance 0.04 m.
+3. **Planning and grasp** (states 1, 2). `GraspPlanner.plan` is unchanged.
+   The floor plane is an obstacle like any other body, so every moving link,
+   the fingers included, must stay 2 mm above it during transit, approach
+   and closure; the object–floor contacts at planning time become support
+   contacts that the lift may keep only if they get no deeper, as for the
+   table (floor HANDBACK, section 4). On the mug lying on its side the deep
+   depth (0.010) fails on 9 of 10 seeds after its 60 CPU-s budget, because
+   the palm touches the top of the mug during the approach; the shallow depth
+   (0.025) then plans with the 1st to 3rd candidate. This costs about 60 s of
+   wall time and no steps. The plan's lift stays at 0.15 m: a straight
+   0.55 m Cartesian lift to the carry height was tried first and failed on
+   every candidate, because the arm must change configuration on the way.
+4. **Hold** (state 3) as for a table pick, including the grip tightening,
+   the wrist alignment and the weighing; then state 31 instead of 5.
+5. **Floor raise** (state 31; `_plan_floor_raise`, `solver.py:275-321`;
+   `_floor_raise_step`, `:323-361`). On entry, the target is the gripper's
+   present position and orientation (pointing down), raised so that the
+   object's centre reaches `floor_lift_height`, the pose the yaw carry
+   expects. Candidates, in order: the full rise, then 85 % and 70 % of it,
+   each with the gripper turned about the vertical by 0, +0.5, −0.5 and π rad
+   (`:303`; turning a downward gripper only turns the object about the
+   vertical, which the yaw carry does anyway, and the yaw carry's torso raise
+   makes up a lower target). For each, IK with 12 restarts (at most 3 s),
+   then `_plan_tuck`: the straight joint-space edge if collision-free with
+   the object attached, else RRT-Connect (at most 10 s), within 30 CPU-s in
+   all. The path is followed with the base held and the fingers at the hold
+   command, at the fixed carry's tuck rates (2 mm of torso and
+   `tuck_rate` = 0.012 rad of arm per tick, on a common scale, `:346`), with
+   a waypoint tolerance of 0.03 rad; at the last waypoint it waits until
+   every motion joint's measured velocity is below 0.05 (`:348-354`). The
+   state ends with
+   state 5 when the path is done, when no path was found (the carry then
+   starts from the low pose), or after 800 ticks. State 31 is covered by the
+   drop check. The turned and lower candidates were added by `0bfa33d`: in
+   the first mug batch the full-height IK failed on seed 1, the yaw carry ran
+   with the object at about 0.2 m, and the delivery came only through a
+   state-68 arm reach.
+6. **Carry.** State 5 has a retreat distance of 0 m (no table to back away
+   from), so it plans the yaw carry at once from where the robot stands; then
+   state 67 as after a table pick.
+
+**Drop recovery is not built.** `begin_pick(obs, fresh=True)` resets what a
+second pick would need: the `NavigateToGrasp` state (`reset`), the original
+travel targets (`_pick_travel_targets`, saved at `solver.py:169`), the
+drive-to-table maps, the path and curved navigator, and the per-pick
+attributes (`:257-271`). Nothing calls it with `fresh=True` yet; a drop still
+leads to state 4. The floor HANDBACK (section 6) lists what a recovery state
+would have to do first (leave drops out of state 4, open the fingers and wait
+for the object to settle, bring the arm to the travel pose with a planned
+move, undo the in-place speed scaling of `_adapt_to_weight`).
+
 ---
 
 ## 4. Code walkthrough: one call to `Solver.get_action`
 
 The evaluation loop (for example `tools/score.py`) calls
 `action = solver.get_action(env)` and then `env.step(action)`, once per step.
-`get_action` (`solver.py:206-523`) reads a fresh observation with
+`get_action` (`solver.py:363-685`) reads a fresh observation with
 `env._get_obs()` and dispatches on `self.state`.
 
 | Order | Code | What happens |
 |---|---|---|
-| construction | `Solver.__init__` (`solver.py:16-187`) | base radius from the collision mesh; settings (speeds, carry mode, yaw-carry limits, weighing); latch `travel_joint_targets` and `carry_joint_targets`; `create_map(env, True)` + `create_navigable_map()`; build `GraspPlanner` (loads SRDF, computes self-collision pairs), `CurvedNavigator`, `NavigateToGrasp`; give it the tabletop rectangle and the torso reach; `state = 999`, `wait = 200`; finally apply `SOLVER_SET` overrides (`:179-187`) |
-| every call | `solver.py:207-209` | in states 5/67/68, `_check_holding` first. (The per-step printing of the state and of every robot contact was removed in `a70a4b7`.) |
-| 999 | `solver.py:211-248` | `moving_pose` tucks the arm into the travel pose (and rebuilds the inflated map once it is there); the object's pose is recorded each call; leave for 0 once the object has stayed within 3 mm and turned < 0.05 rad over the last 15 calls and the arm is tucked, or after 200 calls. State 0 starts at step 62–160 instead of 200 (`fixes.md` §25) |
-| 0 | `solver.py:250-318` | `navigate_grasp.update(obs, self._parking_map(), ...)` returns one of three decisions. `NAVIGATE_TO_GRASP`: `navigate(env, goal, parking map)` (`:1056-1140`) runs A* once per goal and calls `curved_nav.step` each tick. `PREPARE_GRASP`: return the alignment action. `GRASP`: latch `qpos` as `_grasp_hold_target`, go to 1. A `RuntimeError` leads to 4 |
-| 1 | `solver.py:320-366` | command the latched pose; wait for 12 consecutive "settled" calls (object moved < 1 mm, max \|q̇\| < 0.05); then call `grasp_planner.plan(obs)` synchronously, inside this one call. If a plan is found, build a `GraspFollower` and go to 2, otherwise go to 4 |
-| 2 | `solver.py:368-377` | `grasp_follower.step(obs)`; `done` leads to 3, `failed` to 4 |
-| 3 | `solver.py:379-408` | command `follower.hold`; tighten the finger command by 0.5 mm per tick up to 30 mm; turn the wrist toward the retreat direction; after ≥ 60 calls and aligned (or > 200): set the retreat goal 1.0 m away along base minus object, weigh the object (yaw carry with `mass_adaptive`), go to 5 |
-| 5 | `solver.py:410-440` | ramped base step toward the retreat goal; within 3 cm: in the yaw mode call `_yaw_carry_plan` (`:564-667`) and stay in 67 with that plan; if it returns `None` (or in the fixed mode) switch the travel targets to the carry pose, set `_tuck_rate`, `create_map(env, False)`; go to 67 |
-| 67, yaw | `solver.py:483-484`, `_yaw_carry_step` `:698-778` | spin_roll, spin, drive_roll, drive, end (section 3.8); at the end without success go to 68 in the "plan" phase |
-| 67, fixed | `solver.py:486-523` | `navigate(...)`: planned swing to the carry pose, rebuild the map, A*, set the stop cell 7 cells short; cap and ramp the base step, align the wrist; command the finger hold; when `curved_nav.status == "reached"`, go to 68 |
-| 68 | `solver.py:480-481`, `reach_goal` `:780-837` | backoff (a no-op now), plan (`_solve_reach`), arm, hold |
-| 4 | `solver.py:442-444` | return the last command, so the episode keeps running |
+| construction | `Solver.__init__` (`solver.py:16-214`) | base radius from the collision mesh; settings (speeds, carry mode, yaw-carry limits and options, weighing, floor pick); latch `travel_joint_targets` and `carry_joint_targets`, and keep a copy of the travel targets as `_pick_travel_targets` (`:169`); `create_map(env, True)` + `create_navigable_map()`; build `GraspPlanner` (loads SRDF, computes self-collision pairs), `CurvedNavigator`, `NavigateToGrasp`; give it the tabletop rectangle and the torso reach; `state = 999`, `wait = 200`; finally apply `SOLVER_SET` overrides (`:206-214`) |
+| every call | `solver.py:364-369` | in states 5/31/67/68, `_check_holding` first; in state 31, `_floor_raise_step` and return. (The per-step printing of the state and of every robot contact was removed in `a70a4b7`.) |
+| 999 | `solver.py:371-408` | `moving_pose` tucks the arm into the travel pose (and rebuilds the inflated map once it is there); the object's pose is recorded each call; once the object has stayed within 3 mm and turned < 0.05 rad over the last 15 calls and the arm is tucked, or after 200 calls, call `begin_pick(obs)` (`:240-273`), which chooses the table or floor mode, sets the parking limits and enters state 0. State 0 starts at step 62–160 instead of 200 (`fixes.md` §25) |
+| 0 | `solver.py:410-478` | `navigate_grasp.update(obs, self._parking_map(), ...)` returns one of three decisions. `NAVIGATE_TO_GRASP`: `navigate(env, goal, parking map)` (`:1253-1337`) runs A* once per goal and calls `curved_nav.step` each tick. `PREPARE_GRASP`: return the alignment action. `GRASP`: latch `qpos` as `_grasp_hold_target`, go to 1. A `RuntimeError` leads to 4 |
+| 1 | `solver.py:480-526` | command the latched pose; wait for 12 consecutive "settled" calls (object moved < 1 mm, max \|q̇\| < 0.05); then call `grasp_planner.plan(obs)` synchronously, inside this one call. If a plan is found, build a `GraspFollower` and go to 2, otherwise go to 4 |
+| 2 | `solver.py:528-537` | `grasp_follower.step(obs)`; `done` leads to 3, `failed` to 4 |
+| 3 | `solver.py:539-570` | command `follower.hold`; tighten the finger command by 0.5 mm per tick up to 30 mm; turn the wrist toward the retreat direction; after ≥ 60 calls and aligned (or > 200): set the retreat goal 1.0 m away along base minus object (0 m after a floor pick), weigh the object (yaw carry with `mass_adaptive`), go to 5, or to 31 after a floor pick |
+| 31 | `_floor_raise_step` `solver.py:323-361`, `_plan_floor_raise` `:275-321` | floor pick only: on entry plan a raise of the object to 0.90 m with the gripper still pointing down (IK, then `_plan_tuck` with the object attached); follow it at the tuck rates with the base held; go to 5 when done, without a path, or after 800 ticks (section 3.10) |
+| 5 | `solver.py:572-602` | ramped base step toward the retreat goal; within 3 cm: in the yaw mode call `_yaw_carry_plan` (`:726-845`) and stay in 67 with that plan; if it returns `None` (or in the fixed mode) switch the travel targets to the carry pose, set `_tuck_rate`, `create_map(env, False)`; go to 67 |
+| 67, yaw | `solver.py:645-646`, `_yaw_carry_step` `:876-975` | spin_roll, spin, drive_roll, drive, end, or spin_hold in place of spin_roll and spin with `spin_counter_roll` (section 3.8); at the end without success go to 68 in the "plan" phase |
+| 67, fixed | `solver.py:648-685` | `navigate(...)`: planned swing to the carry pose, rebuild the map, A*, set the stop cell 7 cells short; cap and ramp the base step, align the wrist; command the finger hold; when `curved_nav.status == "reached"`, go to 68 |
+| 68 | `solver.py:642-643`, `reach_goal` `:977-1034` | backoff (a no-op now), plan (`_solve_reach`), arm, hold |
+| 4 | `solver.py:604-606` | return the last command, so the episode keeps running |
 
-Planning in states 1, 5 (the yaw plan) and 68 blocks inside a single
-`get_action` call, so it costs wall time but no simulation steps.
+Planning in states 1, 31 (the raise), 5 (the yaw plan) and 68 blocks inside a
+single `get_action` call, so it costs wall time but no simulation steps.
 
 ---
 
@@ -896,13 +1068,22 @@ Planning in states 1, 5 (the yaw plan) and 68 blocks inside a single
   (`--objects`, default 5 6 7 14 2; `--seeds`, default 42 7; `-j` jobs,
   default the CPU count; `--max-steps`, default 15000; `--repeat N`;
   `--report` re-prints the table of an existing directory) and prints a
-  markdown table and per-item totals. `tools/phases.py OUT_DIR ...` prints the
+  markdown table and per-item totals. Since `7df67c6` and `2c1b0c4` it also
+  writes `OUT_DIR/results.csv` (one row per trial: object, seed, repeat, lift
+  step and height, hold, grasp errors, success and drop steps, drop state,
+  stop reason, points per item, carry, error message, wall time; it is not
+  overwritten when the directory has no trial logs), prints a per-object
+  summary (trials, lifted, delivered, delivered per seed, mean points,
+  delivery-step range, and the number of objects delivered at least once),
+  and accepts `--resume`, which keeps the existing snapshot and runs only the
+  trials that have no score yet (`tools/batch.py:1-13, 61-84, 111-140`).
+  `tools/phases.py OUT_DIR ...` prints the
   steps spent per phase (pick, hold, retreat, setup, carry, reach) per trial
   and as medians over delivered trials.
 - **Frozen snapshots.** `batch.py` copies the working tree to `OUT_DIR/snap`
   before running, excluding `.git`, `.claude`, `pnr/`, caches, media,
-  `paper_review`, `scratch` and `OUT_DIR` itself, and links `assets/` instead
-  of copying 150 MB (`tools/batch.py:54-70`). Code edited during a batch
+  `runs`, `paper_review`, `scratch` and `OUT_DIR` itself, and links `assets/`
+  instead of copying 150 MB (`tools/batch.py:59-78`). Code edited during a batch
   therefore cannot mix versions. Each trial writes its own maze URDF, because
   parallel runs otherwise overwrite each other's.
 - **Unit tests.** `tests/test_yaw_carry.py` checks the yaw-carry geometry
@@ -912,6 +1093,15 @@ Planning in states 1, 5 (the yaw plan) and 68 blocks inside a single
   keeps the chord at 0.7 m with yaw from base to object and passes the swept
   check, a turn on the spot at the corner is correctly refused, and the speed
   profile ends at 0 and never exceeds 30 mm per tick.
+  `tests/test_grasp_srdf.py` (25 tests) checks the grasp planner against a
+  fake PyBullet: SRDF exclusions are loaded and validated, excluded pairs no
+  longer block and other collisions still do, the simulation state is
+  restored, the torso and head mapping of the follower, and the time-budget
+  report. Several of these had fallen out of step with the planner (the
+  pair-by-pair self-collision query, one plan attempt per grasp depth, the
+  object pose in the observation, CPU-time deadlines); commits `138be62` and
+  `5d374bc` updated the fake and the tests, not the planner. All 30 tests
+  pass (`python -m unittest discover -s tests`, run at `5d374bc`).
 - **Discipline.** Fix the earliest failure first, since each bug hid the next
   one. Change one thing at a time and re-run the whole reference set, so a fix
   for one object cannot silently break another. Judge by rates over pooled
@@ -921,7 +1111,7 @@ Planning in states 1, 5 (the yaw plan) and 68 blocks inside a single
 
 ### 5.2 Main bugs found and fixed
 
-From `fixes.md` (§1–34) and the commit log.
+From `fixes.md` (§1–35), the floor HANDBACK and the commit log.
 
 | # | Symptom | Cause | Fix |
 |---|---|---|---|
@@ -961,6 +1151,10 @@ From `fixes.md` (§1–34) and the commit log.
 | 32 | Banana slid out during the wrist roll | Angular kick per tick grows with the roll rate (0.1 rad/tick) | `roll_rate_limit` 0.04 |
 | 33 | Heavy objects lost in the carry | Same speeds for every mass | `mass_adaptive`: weigh from contact forces, slow by 0.35 kg / mass (≥ 0.5) |
 | 34 | Apples crept toward the fingertips (not fixed) | Creep under the per-tick kicks, gravity toward the tips | `slip_governor` tried; no measurable gain; off |
+| 35 | Banana and sugar box slide in every rotation about the vertical (not fixed) | Fast turns of the object in corners (about 0.06 rad per tick) | `object_turn_rate` 0.025 (`1ce4e81`); no gain over 450 trials (160 → 159 delivered), off again (`05252b7`) |
+| – | Mug: state 4 on the first state-0 call, every seed (`7d763be`, `28c648b`) | It lands on the floor; grasp height 0.044 m below the table pick's 0.20 m | Floor pick: mode chosen in `begin_pick`, floor parking limits, state 31 raises the object to 0.90 m |
+| – | Mug, seed 1: carried at about 0.2 m, delivered only by a state-68 reach (`0bfa33d`) | No IK for the full floor raise | Try the gripper turned about the vertical and 85 % / 70 % of the rise |
+| – | Unit tests out of step with the planner (`138be62`, `5d374bc`) | Fake simulator lacked pair-by-pair queries and `getAABB`; tests assumed one plan attempt, wall-clock deadlines, no object pose | Fake and tests updated; 30 of 30 pass |
 
 **Considered and rejected by team rule:** PyBullet's `frictionAnchor` on the
 finger links removed the creep completely (0 mm in 1,500 ticks) but changes
@@ -974,7 +1168,13 @@ footprint with room for the object); a slower arm swing (deliveries over
 3,000 steps); in the yaw carry, the base on the path with yaw along the
 tangent, turning on the spot at corners, retracting the arm, slower speeds for
 light objects (no clear gain, 200–500 more steps), and no wrist roll around
-the turn on the spot (inconclusive).
+the turn on the spot (inconclusive). In part 5 (`fixes.md` §35):
+`spin_counter_roll` (setup about 40 steps instead of about 120, but no fewer
+banana and apple drops; off), `object_turn_rate` = 0.04 (no gain) and 0.025
+(no gain over 450 trials; off), and a deeper grasp depth of 0.0 for round
+objects (never planned for the apple; reverted). For the floor pick (floor
+HANDBACK, section 4): a single 0.55 m Cartesian lift to the carry height
+(Cartesian IK failed on every candidate).
 
 ### 5.3 Development history (git)
 
@@ -987,7 +1187,7 @@ reach), `ebc11a8` (deeper grasp, centre-of-mass ranking), `dbc8248` (planned
 goal reach, drop detection), `9b62bd7` (`trace_hold.py`), `3514757`
 (`score.py`, `batch.py`) and `a7173ac` (CPU-time budgets).
 
-Since `a7173ac`, in four groups:
+Since `a7173ac`, in five groups:
 
 - **Scoring, lift and planning budgets** (Session 3): larger transit and
   search budgets (`ec604ba`), the 15 cm lift (`7b93fc6`), three goal-reach
@@ -1012,6 +1212,14 @@ Since `a7173ac`, in four groups:
   trials ending with it off (`2de85ec`, `cb606b9`, `63bad91`, `2879bb7`),
   `scratch/` out of snapshots (`96d3d72`), `SOLVER_SET` read by the solver
   itself (`5367609`), and the notes (`6c05a0c`, `c24b00b`).
+- **Part 5 and the floor pick**: `batch.py` `--resume`, `results.csv` and the
+  per-object summary (`7df67c6`, tagged `before-turn-limit`; `2c1b0c4`), the
+  `spin_counter_roll` option (`1a72ec4`), the object turn-rate limit of
+  0.025 rad per tick (`1ce4e81`; notes `7b99464`, tagged `with-turn-limit`),
+  switched off again after the 450-trial comparison (`05252b7`, notes
+  `13048fc`); the floor pick (`7d763be` `NavigateToGrasp.set_floor_mode` and
+  `reset`, `28c648b` `begin_pick` and state 31, `0bfa33d` floor-raise
+  fallbacks); and the unit-test fixes (`138be62`, `5d374bc`).
 
 ---
 
@@ -1041,9 +1249,17 @@ state sequence with the yaw-carry sub-phases as `67:spin_roll`, `67:spin`,
 `67:drive_roll`, `67:drive`, which carry ran (`carry`: yaw or fixed), the
 weighing factor (`gentle`) and the planner's reject counters
 (`tools/score.py:98-103, 166-185`). `tools/phases.py` turns the state
-sequence into the step breakdown of section 6.3.
+sequence into the step breakdown of section 6.3. For a floor pick the state
+sequence contains 31, and "lift ≥ 10 cm" is measured against the object's
+resting height on the floor, not against the table (section 7).
 
-### 6.2 Current results: reference objects
+### 6.2 Results on the reference objects (older; seeds 42, 7, 1, 2, 3)
+
+**Older results.** These batches, up to `6c05a0c`, compare carries on five
+seeds. The newest and largest measurement of the current default code is the
+450-trial run of section 6.6, which includes the reference objects on ten
+seeds (117 of 150 delivered on each side); the floor-picked mug is in
+section 6.7.
 
 Reference set: banana (5), strawberry (6), apple (7), foam brick (14), tomato
 soup can (2). Delivered = within 10 cm of the goal; "steps" = the delivery
@@ -1112,7 +1328,12 @@ rubric's 3,000 and 15,000 either way (derived here from the figures above).
 
 ### 6.4 Failure analysis: where drops happen now
 
-Yaw carry (`handoff.md`, part 4; HANDBACK section b):
+Yaw carry (`handoff.md`, part 4; HANDBACK section b). The 450-trial run
+(section 6.6) confirms the picture at scale: on the side without the
+turn-rate limit, of the 87 lifted trials that were not delivered, 81 were
+lost in state 67, 5 in state 5 (all hammer) and 1 stalled (bleach
+cleanser); on the other side 78 in state 67, 5 in state 5 and 1 in state 3
+(`xeon-results/*/results.csv`, column `drop_state`).
 
 - **Mostly in the drive.** The apple creeps toward the fingertips (downward,
   since the gripper points down) over hundreds of steps and goes suddenly at
@@ -1120,7 +1341,11 @@ Yaw carry (`handoff.md`, part 4; HANDBACK section b):
   is creep under the per-tick kicks, not the object being squeezed out
   (`fixes.md` §34). In some apple grasps it does not move at all.
 - **The banana** is lost suddenly after corners or during the wrist rolls and
-  the turn on the spot: rotations of a long object about the vertical.
+  the turn on the spot: rotations of a long object about the vertical. Part
+  of it is on the pick side: banana grasps that end more than 0.5 rad off the
+  planned angle were delivered 0 of 7 times against 35 of 53 for the others
+  (both sides of the 450-trial run pooled; `fixes.md` §35, checked against
+  the `grasp_ang_err` column of the result files).
 - **In the setup**: a few banana and strawberry losses, in the wrist rolls or
   the turn.
 - **In the retreat**: a few, in code shared by both carries (bad grasps).
@@ -1131,7 +1356,12 @@ Fixed carry, for comparison: 12 of the 30 baseline trials were lost in
 state 67, most during or just after the swing to the fingers-up pose
 (`fixes.md` §31).
 
-### 6.5 All 15 objects
+### 6.5 All 15 objects (older runs)
+
+**Older results.** The runs below (2 seeds, fixed carry or 2 trials per
+cell) are superseded by the 450-trial run of section 6.6 (15 objects × 10
+seeds × 3 repeats, yaw carry) and, for the mug, by section 6.7. They are kept
+for the history.
 
 **All-objects run with the fixed carry** (objects 0–14 × seeds 42 and 7,
 30 traced trials; frozen code with the fingers-up carry, full-force squeeze
@@ -1166,6 +1396,117 @@ after the turn, 21 after the second roll, lost about 126 ticks into the
 drive), so rotations rather than translation loosen it; the hammer is lost in
 the retreat, before any yaw-carry motion (HANDBACK section c).
 
+### 6.6 All 15 objects, ten seeds: the 450-trial comparison
+
+The largest measurement so far, and the newest one of the table pick with the
+yaw carry. It compared the code without the object turn-rate limit (tag
+`before-turn-limit` = `7df67c6`; its default behaviour is that of the
+current code for every object on the table) with the code with the limit at
+0.025 rad per tick (tag `with-turn-limit` = `7b99464`). Each side: objects
+0–14 × seeds 42, 7, 1, 2, 3, 4, 5, 6, 8, 9 × 3 repeats = 450 trials, run by
+the user on a Xeon W-2155 with
+`tools/batch.py ... --repeat 3 -j 15 --max-steps 3000`. Sources: the result
+files `xeon-results/all15/results.csv` (before) and
+`xeon-results/all15_after/results.csv` (after), the log
+`xeon-results/all15/all15_log.txt`, and the write-up in `fixes.md` §35 and
+`handoff.md`, part 5. The totals below were recomputed from the result files
+and agree with the notes, except the median noted below.
+
+Note that `--max-steps 3000` ends each trial at 3,000 steps, so a delivery
+after 3,000 steps would count as a failure here; the rubric allows 15,000.
+The floor pick did not exist yet: the mug was never lifted in this run (see
+section 6.7).
+
+| | Without limit (`7df67c6`, current default) | With limit 0.025 (`7b99464`) |
+|---|---|---|
+| Delivered | 160/450 (35.6 %) | 159/450 (35.3 %) |
+| Mean points per trial | 18.8/40 | 18.6/40 |
+| Lifted (lift within 3,000 steps / ≥ 10 cm) | 247 / 247 | 243 / 242 |
+| Held 50 steps, grasp pose | 245, 245 | 242, 242 |
+| No drop | 161 | 159 |
+| Delivery steps, all objects | 1,166–2,548, median 1,303 | 1,209–2,594, median 1,402 |
+| Deliveries within 1,500 steps | 121 | 115 |
+| Reference objects (2, 5, 6, 7, 14) delivered | 117/150, 1,166–1,612 steps, median 1,278 | 117/150, 1,209–1,569 steps, median 1,361 |
+| Fixed-carry fallbacks among lifted trials | 4 (all delivered) | 0 |
+
+The notes give the "before" median as 1,304; the result file gives 1,303
+(the mean of the 80th and 81st of 160 sorted delivery steps).
+
+Per object, delivered of 30 (before / after) with the delivery steps of the
+"before" side and the cause of the failures:
+
+| Object | Lifted | Delivered | Delivery steps (before) | Failures (before) |
+|---|---|---|---|---|
+| tomato soup can (2) | 30 / 30 | 26 / 29 | 1,195–1,404 | 4 lost in state 67 |
+| foam brick (14) | 30 / 30 | 26 / 26 | 1,187–1,443 | 4 in state 67 |
+| bleach cleanser (8) | 29 / 28 | 27 / 27 | 2,132–2,548 | 1 in state 67, 1 stall; 1 "Object moved" before the grasp |
+| strawberry (6) | 30 / 30 | 25 / 21 | 1,289–1,506 | 5 in state 67 |
+| apple (7) | 30 / 30 | 24 / 22 | 1,254–1,479 | 6 in state 67 |
+| banana (5) | 30 / 30 | 16 / 19 | 1,166–1,612 | 14 in state 67 |
+| hammer (13) | 30 / 29 | 9 / 8 | 1,167–1,834 | 16 in state 67, 5 in state 5 |
+| sugar box (1) | 30 / 30 | 7 / 7 | 1,853–2,279 | 23 in state 67 |
+| potted meat can (4) | 8 / 6 | 0 / 0 | – | 20 "No plan found within the grasp search budget", 2 "the object did not rise", 8 lost in state 67 |
+| master chef can (0) | 0 / 0 | 0 / 0 | – | "No plan found" 26 / 25; the other 4 / 5 stopped in state 4 with no message recorded |
+| mustard bottle (3) | 0 / 0 | 0 / 0 | – | "No plan found" 30 / 30 |
+| large marker (12) | 0 / 0 | 0 / 0 | – | "No plan found" 30 / 30 |
+| bowl (9), plate (11) | 0 / 0 | 0 / 0 | – | stopped in state 4 before planning, no message recorded (one bowl trial on the "after" side: "No plan found"); section 6.5 gives the cause, "No antipodal grasp candidates found" |
+| mug (10) | 0 / 0 | 0 / 0 | – | stopped before planning (on the floor; floor pick not yet in the code) |
+
+- 8 of 15 objects were delivered at least once. The light reference objects
+  and the bleach cleanser deliver 80–90 %; the banana about half; the hammer
+  and the sugar box about a quarter; the other seven objects are not lifted.
+- The yaw route was planned on all ten mazes: 4 fallbacks to the fixed carry
+  in 247 lifted trials before, 0 in 243 after.
+- The turn-rate limit changed nothing overall (160 against 159, reference
+  objects 117 against 117) and cost about 100 steps of median delivery
+  (1,303 against 1,402), so it is off again. Per object it moved the banana
+  up (16 → 19) and the strawberry (25 → 21) and the apple (24 → 22) down;
+  with 30 trials per object, differences of this size are within the
+  batch-to-batch spread of section 5.1.
+- The bleach cleanser (2,132–2,548 steps) and the sugar box (1,853–2,279)
+  deliver, but above the team's 1,500-step target; both weigh more than
+  `gentle_mass` = 0.35 kg (0.64 kg and 0.97 kg in their URDFs under
+  `assets/ycb_objects/`), so they are carried at reduced speed
+  (section 3.7), and the bleach cleanser's lift already ends at about
+  570–610 steps (section 6.5).
+
+### 6.7 Floor pick: the mug
+
+Source: floor HANDBACK, section 5 (`tools/batch.py ... -j 1 --max-steps
+3000`; logs in `scratch/mug1`, `scratch/mug2`, `scratch/reg1` of that
+worktree). Seeds 42, 7, 1, 2, 3, 4, 5, 6, 8, 9.
+
+| Batch | Code | Lifted ≥ 10 cm and held 50 | Delivered | Lift step | Delivery steps |
+|---|---|---|---|---|---|
+| mug1 | `cf5a02d` (= `28c648b`, before the raise fallbacks) | 10/10 | 10/10 | 558–593 | 1,583–1,844 |
+| mug2 | `4b12def` (= `0bfa33d`, the merged code) | 10/10 | 10/10 | 548–596 | 1,580–2,275 (median about 1,775) |
+
+- 20 of 20 delivered by the developing agent, 40/40 points on every trial, no
+  drops, grasp position error 0–3 mm. An independent check on the merged
+  code delivered the mug 4 of 4 times at 1,561–2,185 steps (reported by the
+  team lead; no result file for it was found in the repository,
+  **(unverified)**).
+- Where the steps go (mug2): state 0 starts at step 170, parked and planning
+  at 309, grasp from 325, lift done at 548–596 (shallow depth on all 10),
+  hold to 608–656, floor raise 158–341 steps, carry from 794–977. 9 of 10
+  went by the yaw carry; seed 8 fell back to the fixed carry (2,275 steps; a
+  re-run of seed 8 went by the yaw carry, 1,761).
+- In mug1, seed 1's raise found no IK and the carry ran from a 0.2 m object
+  height, ending in a state-68 arm reach; `0bfa33d` added the fallbacks.
+- With `SOLVER_SET="floor_pick=0"` the old behaviour returns: state 4 at
+  step 171, "Grasp height 0.045 m is outside the table pick's height range
+  [0.2, 1.3]".
+- **No regression on table objects** (`4b12def`, objects 5, 6, 7, 14, 2, 1,
+  13, 8 × seeds 42 and 7): 16 of 16 lifted ≥ 10 cm and held 50 steps; state
+  31 occurred in none; 9 of 16 delivered, and all 7 losses were drops in
+  state 67, which the change does not touch.
+- The mug deliveries are above the 1,500-step target. From the step counts
+  above: state 999 lasts 170 steps (the note says the mug keeps rocking),
+  the lift ends at 548–596 against about 340 for a table pick (section 6.3),
+  and the raise adds 158–341 steps at the tuck rates. The failed deep-depth
+  attempt costs about 60 s of wall time but no steps (planning runs inside
+  one `get_action` call).
+
 ---
 
 ## 7. Limitations and open questions
@@ -1184,10 +1525,16 @@ the retreat, before any yaw-carry motion (HANDBACK section c).
   27 of 30 from batch to batch. All results are rates over seeds and repeats.
   The source of the run-to-run variation has not been pinned down
   **(unverified)**.
-- **Verified mazes.** The yaw carry was verified only on the mazes of seeds
-  42, 7, 1, 2 and 3, with the post-lift poses of objects 2, 5, 6, 7, 14; a
-  route that passed the swept check was found on all of them. The test seeds
-  are unknown; on another maze the yaw plan may fail and the fixed carry run.
+- **Verified mazes.** The yaw carry has now run on the mazes of ten seeds
+  (42, 7, 1, 2, 3, 4, 5, 6, 8, 9) with the post-lift poses of the eight
+  objects that are lifted; it planned a route in all but 4 of 490 lifted
+  trials, and those 4 fell back to the fixed carry and were delivered
+  (section 6.6). The test seeds are unknown; on another maze the yaw plan may
+  fail more often and the fixed carry run.
+- **The 450-trial run was capped at 3,000 steps** (`--max-steps 3000`), so
+  it measures delivery within 3,000 steps, not the rubric's 15,000. Trials
+  that would have delivered later (for example after a slow heavy-object
+  carry) count as failures there.
 - **The swept check ignores tracking error.** It uses the floor projection of
   each collision link's convex hull (height ignored, which is conservative
   for 2 m walls), the swept disc of the object and fingers, and a 4 cm margin,
@@ -1200,26 +1547,60 @@ the retreat, before any yaw-carry motion (HANDBACK section c).
   question as reading the object's mass from the simulator; it is a flag,
   on by default, that can be ablated with `SOLVER_SET="mass_adaptive=0"`
   (light objects up to 0.35 kg are unaffected either way).
-- **Objects not handled** (sections 6.4, 6.5):
-  - bowl and plate: no antipodal pair fits; they need a specialised rim
-    grasp;
-  - master chef can: 102–103 mm across, while the fingers open to at most
-    102.85 mm, so it fits with under 1 cm (in fact under 1 mm) to spare; the
-    sampler requires 8 mm of clearance (w ≤ 94.85 mm), so only off-centre
-    chords remain, and planning fails on IK and approach;
-  - mug: lands on the floor at `env.reset()`; it would need a pick from the
-    floor (the grasp height range is 0.20–1.30 m in the base frame);
-  - mustard bottle and large marker: no grasp plan (IK and approach
-    failures) in the all-objects run;
-  - heavy objects (sugar box, hammer, potted meat can, bleach cleanser) are
-    picked but mostly lost in the carry; the sugar box needs more than a
-    slower carry, the hammer is lost in the shared retreat;
-  - among the reference objects, the banana and the apple are the weak ones
-    (sections 6.2, 6.4).
-- **Side grasps** use the fixed carry, which was tested only by forcing it.
+- **Objects not handled** (sections 6.4–6.6; delivered of 30 in the
+  450-trial run, side without the limit):
+  - bowl and plate (0/30): no antipodal pair fits; they need a specialised
+    rim grasp;
+  - master chef can (0/30, never lifted, "No plan found" in 25–26): 102–103 mm
+    across, while the fingers open to at most 102.85 mm, so it fits with
+    under 1 cm (in fact under 1 mm) to spare; the sampler requires 8 mm of
+    clearance (w ≤ 94.85 mm), so only off-centre chords remain, and planning
+    fails on IK and approach;
+  - mustard bottle and large marker (0/30, "No plan found" in 30 of 30);
+  - potted meat can (0/30): never lifted in 20–24 of 30 ("No plan found"),
+    and the 6–8 lifted were lost in the carry or retreat;
+  - heavy objects: the sugar box (7/30) and the hammer (9/30) are lifted but
+    mostly lost in the carry (the hammer also in the shared retreat, 5 of
+    30); the bleach cleanser is now delivered 27/30, at 2,132–2,548 steps;
+  - among the reference objects, the banana (16/30) is the weak one; the
+    apple (24/30) less so (sections 6.2, 6.4, 6.6).
+- **The floor pick is verified on the mug only**, at its one landing spot in
+  the open start room (sections 3.10, 6.7). Not handled (floor HANDBACK,
+  section 7): objects lying in a corridor or next to a wall (the parking goal
+  must be free for the travel pose with fixed yaw, arm 0.84 m forward, which
+  leaves few or no cells in a 1 m corridor); objects against a wall (the
+  fingers or palm would touch it, and pushing the object is out of scope);
+  objects more than about 0.35 m under the tabletop edge (no parking cell).
+  The deep grasp depth wastes about 60 CPU-s per floor plan on the mug, and
+  the raise runs at the tuck rates (0.012 rad per tick); a faster raise was
+  not tried. The mug was not part of the 450-trial run.
+- **"Lift ≥ 10 cm above the table" for a floor pick.** The scorer measures
+  the lift against the object's resting height, which for the mug is the
+  floor; the object ends at 0.90 m, above the tabletop, but its lift item
+  is scored as 10 cm above the floor. How the rubric treats an object that
+  starts on the floor is a question for the teaching staff.
+- **No drop recovery.** After a drop the solver goes to state 4 and the
+  scorer ends the trial. `begin_pick(obs, fresh=True)` provides the re-entry
+  point for a second pick (section 3.10), but no recovery state uses it; a
+  second pick would cost about 400–700 steps plus the carry (floor HANDBACK,
+  section 7, estimate).
+- **Side grasps** use the fixed carry, as does any trial without a clear yaw
+  route. The fixed carry ran on its own in 4 trials of the 450-trial run (all
+  delivered; the result files do not record which of the reasons applied)
+  and once for the mug; otherwise it was tested by forcing it.
 - **Single parking attempt.** After a failed plan the solver goes to state 4.
-  `mark_goal_failed` exists in `NavigateToGrasp` but is never called, and
-  state 1 has no timeout.
+  `mark_goal_failed` exists in `NavigateToGrasp` (`navigate_to_grasp.py:265`)
+  but is never called, and state 1 has no timeout.
+- **Work on other branches, not merged and not described as done here.**
+  The mustard bottle pre-check ordering and the potted meat can work are on
+  branch `worktree-agent-aeaa444d618171732`, still in progress by another
+  agent: there the mustard bottle was lifted and delivered 7 of 10 (0 of 30
+  before) and the potted meat can lifted and held 5 of 5 but delivered 0 of
+  5. A lift-torque ranking of grasps (branch
+  `worktree-agent-a7da9f47fc8109257`) was tested and rejected: 12 of 25
+  light-object deliveries against about 19 expected. These figures were
+  reported by the team lead and not checked against result files here
+  **(unverified)**.
 - **Navigation failure modes.** In the fixed carry, if A* finds no route,
   `navigate` raises `PlanningError`, which `get_action` does not catch in
   state 67, so the episode would crash; if the curved navigator reports
@@ -1231,7 +1612,12 @@ the retreat, before any yaw-carry motion (HANDBACK section c).
   can brush a wall, and it is only valid for the arm pose and fixed yaw it was
   measured at. The yaw carry's swept check includes the object.
 - **The state 3 hold has no integral term or drop check.** A loss during the
-  hold goes unnoticed until state 5.
+  hold goes unnoticed until state 5 (or state 31 after a floor pick). The
+  scorer's own drop test caught one hammer trial lost in state 3 in the
+  450-trial run (side with the limit).
+- **The floor raise is followed without an integral term** (state 31
+  commands a rate-limited step toward each waypoint, like the fixed carry's
+  swing) and ends after at most 800 ticks wherever it is.
 - **Collision checking is discrete** (0.025 rad / 5 mm samples, 2 mm margin;
   1 cm and 0.01 rad samples in the yaw-carry checks), not continuous, and the
   robot can deviate from the checked path under dynamics.
@@ -1308,6 +1694,21 @@ the retreat, before any yaw-carry motion (HANDBACK section c).
   1 cm of the route.
 - **Turn on the spot.** A base rotation with x and y held, here at the start
   of the yaw carry to face the route.
+- **Counter-rolled turn.** The `spin_counter_roll` option (off): the turn on
+  the spot with the wrist roll turning against the base, so the object's
+  heading moves directly from its present value to the route's, with no
+  separate wrist rolls before and after.
+- **Object turn rate.** How fast the held object turns about the vertical,
+  by base yaw and wrist roll together; `object_turn_rate` can cap it in the
+  speed profile (off by default).
+- **Floor pick.** The pick mode for an object whose lowest point is below
+  0.30 m: parking 0.48–0.62 m from the grasp, a top-down grasp, then the
+  floor raise, no retreat.
+- **Floor raise.** State 31: a planned torso and arm move, object attached,
+  that raises a floor-picked object to 0.90 m with the gripper still
+  pointing down, the post-lift pose the yaw carry expects.
+- **Pick mode.** "table" or "floor", chosen by `begin_pick` from where the
+  object lies when the pick starts.
 - **Closing-axis alignment.** Turning the wrist roll so the closing axis lies
   along the object's direction of motion. The per-step kick then acts as a
   normal force on the fingers instead of having to be resisted by friction
