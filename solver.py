@@ -67,7 +67,20 @@ class Solver:
         self.yaw_carry_speed = 0.030      # m per tick of the object along its path (actual, not commanded)
         self.yaw_carry_accel = 0.0017     # m per tick^2
         self.yaw_rate_limit = 0.05        # rad per tick of base yaw
-        self.roll_rate_limit = 0.06       # rad per tick the wrist must turn relative to the base
+        # Rate of the wrist roll while carrying in the yaw mode, rad per tick.
+        # The env's position control makes every joint's velocity a sawtooth
+        # within a tick, so a rolling wrist gives the object an angular kick
+        # each tick, in proportion to the rate; at 0.1 rad per tick a banana
+        # slid 3 mm per tick out of the fingers.
+        self.roll_rate_limit = 0.04
+        # Turn the closing axis to face the motion of the turn on the spot
+        # (and back afterwards); False keeps it along the base x axis.
+        self.spin_roll = True
+        # Limit on how fast the object itself turns about the vertical while
+        # driving (rad per tick), whether by base yaw or wrist roll; on a
+        # 0.5 m corner at 30 mm per tick it would turn 0.06 rad per tick.
+        self.object_turn_rate = 1e9
+        self.yaw_fillet_radius = 0.5      # largest corner radius of the object's path (m)
         self.yaw_carry_margin = 0.04      # m between the swept robot+object outline and any wall
         self.carry_object_height = 0.90   # target height of the object centre (the goal is at 0.9 m)
 
@@ -568,7 +581,7 @@ class Solver:
             print("Yaw carry: no route for the base")
             return None
         chosen = None
-        for clearance, radius in ((0.40, 0.5), (0.40, 0.3), (0.45, 0.5), (0.36, 0.3)):
+        for clearance, radius in ((0.40, self.yaw_fillet_radius), (0.40, 0.3), (0.45, 0.5), (0.36, 0.3)):
             path = fillet(shortcut(route, field, clearance), field, clearance, radius)
             traj = CarryTrajectory(path, offset)
             if not traj.valid:
@@ -592,7 +605,7 @@ class Solver:
         traj, yaw0 = chosen
         traj.yaw = traj.yaw - traj.yaw[0] + yaw0      # continuous with the turn
         traj.speed_profile(self.yaw_carry_speed, 1.2 * self.yaw_carry_speed, self.yaw_rate_limit,
-                           self.roll_rate_limit, self.yaw_carry_accel)
+                           self.roll_rate_limit, self.yaw_carry_accel, turn_rate=self.object_turn_rate)
         # Torso: carry the object at the goal's height if the torso allows.
         t = self._travel_torso_index
         torso = float(np.clip(q[t] + self.carry_object_height - float(obs["object_pos"][2]),
@@ -615,7 +628,8 @@ class Solver:
               f"{np.degrees(yaw0 - yaw):.0f} deg, about {traj.duration():.0f} ticks driving, torso {q[t]:.3f}->{torso:.3f}")
         return dict(traj=traj, yaw0=yaw0, yaw_cmd=yaw, hold=base.copy(), L=traj.L, bias=traj.bias,
                     k=k, c0=c0, roll=float(self.action[i]), torso=float(self.action[t]), torso_target=torso,
-                    s=float(traj.sg[0]), v=0.0, phase="spin_roll" if abs(yaw0 - yaw) > 0.15 else "drive_roll")
+                    s=float(traj.sg[0]), v=0.0, phase="spin_roll" if self.spin_roll and abs(yaw0 - yaw) > 0.15 else
+                    ("spin" if abs(yaw0 - yaw) > 0.02 else "drive_roll"))
 
     def _yaw_carry_step(self, obs):
         """State 67 in the yaw carry: turn the wrist so the closing axis lies
@@ -639,7 +653,7 @@ class Solver:
             return r + np.pi * np.round((Y["roll"] - r) / np.pi)
 
         def roll_toward(target):
-            Y["roll"] += float(np.clip(target - Y["roll"], -self.grip_align_rate, self.grip_align_rate))
+            Y["roll"] += float(np.clip(target - Y["roll"], -self.roll_rate_limit, self.roll_rate_limit))
             action[i] = Y["roll"]
             return abs(target - q[i])
 

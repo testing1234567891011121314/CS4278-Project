@@ -258,7 +258,7 @@ class CarryTrajectory:
                 bad.append(k)
         return bad
 
-    def speed_profile(self, v_obj, v_base, yaw_rate, roll_rate, accel, v_end=0.0, v_min=0.002):
+    def speed_profile(self, v_obj, v_base, yaw_rate, roll_rate, accel, v_end=0.0, v_min=0.002, turn_rate=np.inf):
         """Largest object speed (m per step) at each sample under the per-step
         limits, slowing down in time for every later limit (backward pass)
         and to v_end at the end. Speeding up is left to the controller, which
@@ -274,6 +274,9 @@ class CarryTrajectory:
             cap = np.minimum(cap, v_base / np.maximum(base_ratio, 1e-9))
             cap = np.minimum(cap, yaw_rate / np.maximum(rate(self.yaw), 1e-9))
             cap = np.minimum(cap, roll_rate / np.maximum(roll, 1e-9))
+            # The object's own rotation about the vertical (its heading psi),
+            # whichever of base yaw and wrist roll produces it.
+            cap = np.minimum(cap, turn_rate / np.maximum(rate(self.psi), 1e-9))
         cap = np.maximum(cap, v_min)
         back = cap.copy()
         back[-1] = min(back[-1], v_end)
