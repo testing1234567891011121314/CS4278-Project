@@ -222,7 +222,7 @@ class Solver:
             setattr(self, key, value if isinstance(old, str) else type(old)(float(value)))
 
     def _check_holding(self, obs):
-        """While carrying (states 5, 67, 68): fail into state 4 once bilateral
+        """While carrying (states 5, 31, 67, 68): fail into state 4 once bilateral
         finger contact has been gone for 30 ticks, instead of driving on empty
         and trying to place nothing. Returns True when the object was lost."""
         follower = getattr(self, "grasp_follower", None)
@@ -434,6 +434,16 @@ class Solver:
                 # the table). Fail into state 4 holding the current pose instead of
                 # crashing the whole episode.
                 print("Grasp selection failed:", exc)
+                # The pick mode was chosen when the wait for the drop ended. If
+                # the object has since left the table (or the wait timed out
+                # while it was still moving), choose again once, from where it
+                # lies now, instead of failing with the wrong height limits.
+                mode = "floor" if (bool(self.floor_pick) and self._object_on_floor(obs)) else "table"
+                if mode != getattr(self, "pick_mode", mode) and not getattr(self, "_pick_mode_rechosen", False):
+                    self._pick_mode_rechosen = True
+                    self.begin_pick(obs, fresh=True)
+                    self.action = np.asarray(obs["qpos"], dtype=float).copy()
+                    return self.action.copy()
                 self.state = 4
                 self.action = np.asarray(obs["qpos"], dtype=float).copy()
                 return self.action.copy()
@@ -471,6 +481,10 @@ class Solver:
                 # "settled", so planning always began from a colliding start state.
                 self._grasp_hold_target = np.asarray(obs["qpos"], dtype=float).copy()
                 self.action = self._grasp_hold_target.copy()
+                # The follower's watch allowance is the object's OWN motion
+                # while everything is still; motion from before the robot
+                # parked (a nudge, the drop) must not widen it.
+                self._object_history = []
                 return self.action.copy()
 
             if decision_state in {

@@ -32,6 +32,7 @@ Stops at the first success, 50 steps after a drop, on state 4, on a stall
 (default 15000, the rubric's reach budget).
 """
 import contextlib
+import copy
 import json
 import os
 import sys
@@ -107,6 +108,7 @@ slide_ref = None
 slide = {}            # phase -> (x toward the fingertips mm, rotation deg, pivot about the closing axis deg)
 slide_max = [0.0, 0.0]
 exec_steps = {}       # env steps spent in each phase of the grasp execution (state 2)
+plan_stats = None     # copy of the planner's stats for the executed plan
 t0 = time.perf_counter()
 for step in range(1, max_steps + 1):          # step = number of env.step calls made
     with quiet:
@@ -126,7 +128,14 @@ for step in range(1, max_steps + 1):          # step = number of env.step calls 
         o_rot = Rotation.from_quat(plan.object_orientation)
         centre, quat = plan.candidate[2], plan.candidate[3]
         planned = (o_rot.inv().apply(centre - plan.object_position), o_rot.inv() * Rotation.from_quat(quat))
-        tcp = np.array([planner.last_stats.get("tcp_offset", planner.config.tcp_offset[0]), 0.0, 0.0])
+        # The planner's stats as they were when this plan was made: later
+        # planning calls (the floor raise, the tuck) write into last_stats.
+        plan_stats = copy.deepcopy(dict(planner.last_stats or {}))
+        # A flange grasp places the gripper with its own depth, not the depth
+        # of the attempt that succeeded.
+        depth = planner.config.flange_tcp if getattr(plan, "flange", None) else plan_stats.get(
+            "tcp_offset", planner.config.tcp_offset[0])
+        tcp = np.array([float(np.ravel(depth)[0]), 0.0, 0.0])
     if state == 2:
         fol = solver.grasp_follower
         ph = fol.plan.phases[fol.index]
@@ -210,17 +219,17 @@ r.update(
     exec_steps=exec_steps,
     exec_waypoints=({ph: solver.grasp_plan.phases.count(ph) for ph in dict.fromkeys(solver.grasp_plan.phases)}
                     if hasattr(solver, "grasp_plan") else None),
-    plan={k: v for k, v in (planner.last_stats or {}).items()
+    plan={k: v for k, v in (plan_stats or planner.last_stats or {}).items()
           if k in ("reason", "tried", "candidates", "ik_fail", "transit_fail", "approach_fail", "opening_fail",
                    "closure_fail", "lift_fail", "tcp_attempts", "tcp_offset", "flange")},
     wall_s=round(time.perf_counter() - t0, 1),
 )
-choice = (planner.last_stats or {}).get("choice") if hasattr(solver, "grasp_plan") else None
+choice = (plan_stats or {}).get("choice") if hasattr(solver, "grasp_plan") else None
 if choice:
     g = {k: v for k, v in choice.items() if k not in ("features", "pass_")}
     g["pass"] = choice.get("pass_")
     g.update(choice.get("features") or {})
-    g["tcp_attempts"] = len(planner.last_stats.get("tcp_attempts") or [])
+    g["tcp_attempts"] = len(plan_stats.get("tcp_attempts") or [])
     g["mass_kg"] = p.getDynamicsInfo(env.object_id, -1, physicsClientId=cid)[0]
     r.update({f"g_{k}": (round(v, 4) if isinstance(v, float) else v) for k, v in g.items()})
 for phase in ("hold", "retreat", "setup", "end"):

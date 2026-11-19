@@ -1237,8 +1237,10 @@ class GraspPlanner:
         try:
             for use_precheck in ((False, True) if cfg.precheck_fallback else (False,)):
                 self._use_precheck = use_precheck
+                kind = 'antipodal'
                 for depth in cfg.tcp_offsets:
                     cfg.tcp_offset = (float(depth), 0.0, 0.0)
+                    self._choice_ctx = {}
                     plan = self._plan_once(obs)
                     attempts.append((float(depth), self.last_stats.get('reason')))
                     self.last_stats['tcp_attempts'] = list(attempts)
@@ -1246,10 +1248,15 @@ class GraspPlanner:
                     if plan is not None:
                         self.last_stats['tcp_offset'] = float(depth)
                         return plan
-                    if self.last_stats.get('reason') == 'invalid_start_state':
-                        return None  # a deeper/shallower grasp cannot fix the start state
+                    if not self.last_stats.get('start_valid'):
+                        return None  # no depth or candidate order can fix the start state
+                    kind = self._choice_ctx.get('kind', 'antipodal')
+                    if kind == 'flange':
+                        break  # flange candidates carry their own depth: one attempt is all there is
                 if self.last_stats.get('reason') == 'no_antipodal_pairs':
                     return None  # nothing to reorder
+                if kind != 'antipodal':
+                    return None  # the pre-check ordering and its retry are for antipodal candidates only
             return None
         finally:
             cfg.tcp_offset = original
@@ -1309,8 +1316,12 @@ class GraspPlanner:
             candidates = self._order_by_precheck(candidates, obs['object_pc'])
         clean = len(candidates) - stats['precheck_flagged']['total'] if use_precheck else len(candidates)
         if use_precheck and clean < cfg.min_clean_candidates and cfg.retry_num_samples > len(candidates):
+            first_sample_stats = dict(self.sample_stats)
             more = self.sample_antipodal_grasps(points=obs['object_pc'], normals=obs['object_normals'],
                                                 com=obs['object_pos'], num_samples=cfg.retry_num_samples)
+            if self.sample_stats.get('rim_candidates') or self.sample_stats.get('flange_candidates'):
+                more = []  # the resample found no antipodal pair and fell back; those are not retry candidates
+            self.sample_stats = first_sample_stats
             flagged_first = stats['precheck_flagged']
             more = self._order_by_precheck(more, obs['object_pc'])
             more_clean = more[:len(more) - stats['precheck_flagged']['total']]
