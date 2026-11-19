@@ -92,6 +92,12 @@ class GraspConfig:
     # top-down grasp; at 2000 the shallow depth gives 52 with varied approach
     # tilts. Objects with enough clean candidates never pay for the retry.
     min_clean_candidates: int = 8
+    # The pre-check ordering changes which grasp is chosen, and for the bleach
+    # cleanser the reordered choice was dropped in the carry (2-3 of 6
+    # delivered against 6 of 6 on the same seeds). So plan() first plans in
+    # the sampler's own order, exactly as before, and uses the pre-check
+    # ordering only when that finds no plan at any depth.
+    precheck_fallback: bool = True
     retry_num_samples: int = 2000
     # Rim grasps, generated only when the antipodal sampler finds nothing
     # (bowl, plate: thin shells whose cloud has no antipodal pairs). Around
@@ -968,19 +974,25 @@ class GraspPlanner:
         original = cfg.tcp_offset
         attempts = []
         try:
-            for depth in cfg.tcp_offsets:
-                cfg.tcp_offset = (float(depth), 0.0, 0.0)
-                plan = self._plan_once(obs)
-                attempts.append((float(depth), self.last_stats.get('reason')))
-                self.last_stats['tcp_attempts'] = list(attempts)
-                if plan is not None:
-                    self.last_stats['tcp_offset'] = float(depth)
-                    return plan
-                if self.last_stats.get('reason') == 'invalid_start_state':
-                    return None  # a deeper/shallower grasp cannot fix the start state
+            for use_precheck in ((False, True) if cfg.precheck_fallback else (False,)):
+                self._use_precheck = use_precheck
+                for depth in cfg.tcp_offsets:
+                    cfg.tcp_offset = (float(depth), 0.0, 0.0)
+                    plan = self._plan_once(obs)
+                    attempts.append((float(depth), self.last_stats.get('reason')))
+                    self.last_stats['tcp_attempts'] = list(attempts)
+                    self.last_stats['precheck_pass'] = use_precheck
+                    if plan is not None:
+                        self.last_stats['tcp_offset'] = float(depth)
+                        return plan
+                    if self.last_stats.get('reason') == 'invalid_start_state':
+                        return None  # a deeper/shallower grasp cannot fix the start state
+                if self.last_stats.get('reason') == 'no_antipodal_pairs':
+                    return None  # nothing to reorder
             return None
         finally:
             cfg.tcp_offset = original
+            self._use_precheck = False
 
     def _plan_once(self, obs):
         """One planning attempt at the current config.tcp_offset."""
@@ -1022,9 +1034,11 @@ class GraspPlanner:
         if not candidates:
             stats['reason'] = 'no_antipodal_pairs'
             return None
-        candidates = self._order_by_precheck(candidates, obs['object_pc'])
-        clean = len(candidates) - stats['precheck_flagged']['total']
-        if clean < cfg.min_clean_candidates and cfg.retry_num_samples > len(candidates):
+        use_precheck = getattr(self, '_use_precheck', False)
+        if use_precheck:
+            candidates = self._order_by_precheck(candidates, obs['object_pc'])
+        clean = len(candidates) - stats['precheck_flagged']['total'] if use_precheck else len(candidates)
+        if use_precheck and clean < cfg.min_clean_candidates and cfg.retry_num_samples > len(candidates):
             more = self.sample_antipodal_grasps(points=obs['object_pc'], normals=obs['object_normals'],
                                                 com=obs['object_pos'], num_samples=cfg.retry_num_samples)
             flagged_first = stats['precheck_flagged']
