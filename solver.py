@@ -1,3 +1,5 @@
+import os
+
 import numpy as np
 import pybullet as p
 from utils import closest_joint_values  # Handles joint angle wrapping
@@ -173,6 +175,16 @@ class Solver:
         self.path = None
         self.state = 999
         self.wait = 200
+
+        # Ablations without editing this file: SOLVER_SET="mass_adaptive=0" or
+        # "carry_mode=fixed,yaw_carry_speed=0.024" in the environment overrides
+        # the settings above (numbers, booleans as 0/1, or strings).
+        for item in filter(None, os.environ.get("SOLVER_SET", "").split(",")):
+            key, value = item.split("=")
+            if not hasattr(self, key):
+                raise ValueError(f"SOLVER_SET: unknown setting {key}")
+            old = getattr(self, key)
+            setattr(self, key, value if isinstance(old, str) else type(old)(float(value)))
 
     def _check_holding(self, obs):
         """While carrying (states 5, 67, 68): fail into state 4 once bilateral
