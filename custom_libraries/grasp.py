@@ -126,7 +126,7 @@ class GraspConfig:
     max_approach_joint_jump: float = 0.18
     seed: int = 0
     measured_torso_limit_tolerance: float = 0.0002  # metres, measured state only
-    measured_finger_limit_tolerance: float = 0.002  # metres, measured state only
+    measured_finger_limit_tolerance: float = 0.005  # metres, measured state only (2.1 mm seen after a base turn)
 
 
 @dataclass
