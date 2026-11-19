@@ -198,7 +198,7 @@ class Solver:
             try:
                 decision = self.navigate_grasp.update(
                     obs,
-                    self.inflated_occupancy,
+                    self._parking_map(),
                     self.convert_to_grid,
                     self.convert_to_world,
                     self.cell_size,
@@ -258,7 +258,7 @@ class Solver:
                     )
 
                 goal = self.convert_to_grid(goal_world)
-                return self.navigate(env, goal)
+                return self.navigate(env, goal, self._parking_map())
 
             raise RuntimeError(
                 f"Unknown navigation/grasp decision: {decision_state}"
@@ -773,7 +773,7 @@ class Solver:
             ik.close()
         return None
 
-    def navigate(self, env, goal):
+    def navigate(self, env, goal, occupancy=None):
         obs = env._get_obs()
         qpos = obs["qpos"]
 
@@ -802,10 +802,10 @@ class Solver:
             self.curved_nav.reset()
 
         if self.path is None:
-            path = a_star(start, goal_key, self.inflated_occupancy)
+            path = a_star(start, goal_key, self.inflated_occupancy if occupancy is None else occupancy)
             print("Path length:", 0 if path is None else len(path))
             if path is None or len(path) == 0:
-                grid = self.inflated_occupancy
+                grid = self.inflated_occupancy if occupancy is None else occupancy
                 def cell_status(cell):
                     r, c = cell
                     if not (0 <= r < grid.shape[0] and 0 <= c < grid.shape[1]):
@@ -1081,6 +1081,22 @@ class Solver:
         )
 
         print("Map created. Occupancy grid : ", occupancy)
+
+    def _parking_map(self):
+        """Occupancy for driving to the grasp position: the travel map plus
+        every cell where the torso would touch an overhead obstacle (the
+        tabletop). The travel map leaves the tabletop out so the base can
+        tuck under its edge, but a route planned on it may cross under the
+        table, where the torso jams against the edge (bleach cleanser: the
+        bottle rolls to the far side and the parking spot is over there)."""
+        source = self.inflated_occupancy
+        if getattr(self, "_parking_source", None) is not source:
+            grid = np.asarray(source).astype(np.uint8).copy()
+            for cell in np.argwhere(grid == 0):
+                if not self.navigate_grasp._overhead_clear(self.convert_to_world(tuple(cell))):
+                    grid[tuple(cell)] = 1
+            self._parking_source, self._parking_grid = source, grid
+        return self._parking_grid
 
     def create_navigable_map(self):
         safety_margin = 0.05
