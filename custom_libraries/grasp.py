@@ -68,6 +68,23 @@ class GraspConfig:
     tcp_offsets: tuple = (0.010, 0.025)
     opening_clearance: float = 0.024  # total gap, metres
     min_opening_clearance: float = 0.008  # used when travel cannot fit the full clearance (wide objects)
+    # Geometric pre-check in plan(): candidates it flags are tried after all
+    # the others (never dropped), in the sampler's order. It flags
+    # - a width that leaves less total opening than preferred_opening_clearance.
+    #   The collision shape (convex decomposition) is about 3 mm per side
+    #   fatter than the point cloud and the check keeps a 2 mm margin, so the
+    #   mustard bottle across its 94 mm body (4-5 mm per side) failed the
+    #   approach on all 60 candidates;
+    # - the point cloud inside the palm box (gripper_link collision mesh in
+    #   the gripper frame: x -0.154..-0.032, |y| <= 0.063, |z| <= 0.040) plus
+    #   palm_margin, at the current depth. The sampler's obstruction test
+    #   covers only the pads;
+    # - a finger box or the palm box reaching below the lowest cloud point
+    #   (the support surface) at the grasp pose, e.g. a vertical closing axis
+    #   on an object lying on the table, which puts one finger in the table.
+    preferred_opening_clearance: float = 0.016
+    palm_box: tuple = (-0.154, -0.032, 0.063, 0.040)
+    palm_margin: float = 0.006
     # Total gap reduction the close phase commands past the point-cloud width.
     # Grip force is linear in it (6.6 N per mm per finger): 0.012 gave ~50 N,
     # which let heavy objects (sugar box, hammer) slide 10-28 mm in the
@@ -611,6 +628,54 @@ class GraspPlanner:
         self.sample_stats['candidates'] = min(len(candidates), num_samples)
         return candidates[:num_samples]
 
+    def _precheck_flags(self, candidate, cloud):
+        """Reasons (tight / palm / support) a candidate is likely to fail,
+        from the point cloud alone, at the current tcp_offset."""
+        cfg = self.config
+        p1, p2, centre, quat = candidate[:4]
+        width = float(np.linalg.norm(p2 - p1))
+        flags = []
+        if width > cfg.closed_gap + 2*cfg.finger_travel - cfg.preferred_opening_clearance:
+            flags.append('tight')
+        rotation = Rotation.from_quat(quat).as_matrix()
+        tcp = np.asarray(cfg.tcp_offset, float)
+        local = (cloud - centre) @ rotation + tcp
+        x0, x1, half_y, half_z = cfg.palm_box
+        m = cfg.palm_margin
+        if np.any((local[:, 0] >= x0 - m) & (local[:, 0] <= x1 + m)
+                  & (np.abs(local[:, 1]) <= half_y + m) & (np.abs(local[:, 2]) <= half_z + m)):
+            flags.append('palm')
+        opened = min((width - cfg.closed_gap)/2 + cfg.opening_clearance/2, cfg.finger_travel)
+        inner = cfg.closed_gap/2 + opened  # pad surface from the gripper axis
+        half_x, half_z_pad = cfg.pad_length/2, cfg.pad_height/2
+        corners = []
+        for side in (1., -1.):
+            for y in (inner, inner + 0.012):  # finger box thickness 12 mm
+                for x in (-half_x, half_x):
+                    for z in (-half_z_pad, half_z_pad):
+                        corners.append((x, side*y, z))
+        for x in (x0, x1):
+            for y in (-half_y, half_y):
+                for z in (-half_z, half_z):
+                    corners.append((x, y, z))
+        world_z = (centre + (np.asarray(corners) - tcp) @ rotation.T)[:, 2]
+        if world_z.min() < cloud[:, 2].min() + 0.001:
+            flags.append('support')
+        return flags
+
+    def _order_by_precheck(self, candidates, cloud):
+        """Stable partition: candidates without pre-check flags come first."""
+        cloud = np.asarray(cloud, float)
+        cloud = cloud[np.isfinite(cloud).all(axis=1)]
+        good, flagged, counts = [], [], {}
+        for c in candidates:
+            flags = self._precheck_flags(c, cloud)
+            for f in flags:
+                counts[f] = counts.get(f, 0) + 1
+            (flagged if flags else good).append(c)
+        self.last_stats['precheck_flagged'] = dict(counts, total=len(flagged))
+        return good + flagged
+
     @contextmanager
     def _snapshot(self):
         saved = p.saveState(physicsClientId=self.client)
@@ -872,6 +937,7 @@ class GraspPlanner:
         if not candidates:
             stats['reason'] = 'no_antipodal_pairs'
             return None
+        candidates = self._order_by_precheck(candidates, obs['object_pc'])
         lower = self.lower[self.motion_indices].copy()
         upper = self.upper[self.motion_indices].copy()
         start = parked[self.motion_indices].copy()
@@ -1019,6 +1085,11 @@ class GraspFollower:
                                 if i not in set(planner.motion_indices) | set(planner.finger_indices)])
         self.contact_stable = 0
         self.lost_contact_ticks = 0
+        # Extra (metres, radians) for the object watch before contact: how far
+        # the object moved by itself just before planning. The mustard bottle
+        # lying on its side rocks +-0.05 rad without ever settling, which
+        # tripped the fixed 0.10 rad limit with no robot contact at all.
+        self.watch_allowance = (0.0, 0.0)
         # The environment's P-only position controller sags under gravity; an
         # integral term on the commanded arm/torso targets removes the offset.
         self.integral = np.zeros(len(planner.action_ids))
@@ -1094,7 +1165,9 @@ class GraspFollower:
         if phase in ('open', 'transit', 'approach'):
             rotated = (Rotation.from_quat(self.plan.object_orientation).inv()
                        * Rotation.from_quat(obs['object_xyzw'])).magnitude()
-            if np.linalg.norm(np.asarray(obs['object_pos'])-self.plan.object_position) > 0.012 or rotated > 0.10:
+            moved = np.linalg.norm(np.asarray(obs['object_pos'])-self.plan.object_position)
+            if (moved > 0.012 + self.watch_allowance[0]
+                    or rotated > 0.10 + self.watch_allowance[1]):
                 return self._fail('Object moved; stop and obtain a fresh plan.', q)
         cfg, motion = owner.config, self.motion
         waypoints, phases = self.plan.waypoints, self.plan.phases
