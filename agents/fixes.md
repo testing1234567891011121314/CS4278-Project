@@ -599,7 +599,7 @@ gain, so it is off.
   axis radial while turning): banana 1/4 and 5/6 in two small runs; not
   adopted.
 
-### 35. Object turn rate in corners (`solver.py`; part 5, gain not established)
+### 35. Object turn rate in corners (`solver.py`; part 5, tested and switched off)
 
 `object_turn_rate = 0.025` rad per tick (was unlimited, about 0.06 in
 corners) limits how fast the held object turns about the vertical during the
@@ -628,6 +628,25 @@ with the turn limit; in the code, off); `object_turn_rate = 0.04` (no gain);
 a deeper grasp for round objects (depth 0.0 never planned for the apple,
 reverted). Banana grasps that end about 1 rad off the planned angle were lost
 early in 7 of 9 cases: a pick-side problem, open.
+
+**450-trial comparison (15 objects x seeds 42 7 1 2 3 4 5 6 8 9 x 3, run by
+the user on a Xeon W-2155; `xeon-results/`).** Tag `before-turn-limit`:
+160/450 delivered, 18.8/40, median delivery 1,304 steps, 121 deliveries
+within 1,500. Tag `with-turn-limit`: 159/450, 18.6/40, median 1,402, 115
+within 1,500. Reference objects 117/150 on both sides. The limit is
+therefore off by default again (`object_turn_rate = 1e9`); it has no
+theoretical grounding yet and stays available through SOLVER_SET.
+
+Per object, delivered of 30 (before / after): soup can 26/29, foam brick
+26/26, bleach cleanser 27/27 (2,132-2,594 steps), strawberry 25/21, apple
+24/22, banana 16/19, hammer 9/8, sugar box 7/7, potted meat can 0/0 (lifted
+8/6); master chef can, mustard bottle, bowl, mug, plate, large marker never
+lifted. 8 of 15 objects delivered at least once. Never lifted: "No plan
+found within the grasp search budget" for mustard bottle 30, large marker 30,
+master chef can 25-26, potted meat can 20-24; stopped before planning for
+bowl, plate, mug. The yaw route planned on the new mazes: 4 fallbacks to the
+fixed carry in 247 lifted trials before, 0 after. Banana grasps ending more
+than 0.5 rad off the plan: 0/7 delivered against 35/53.
 
 `tools/batch.py` now has `--resume`, writes `results.csv` (one row per trial)
 and prints a per-object summary.
