@@ -24,6 +24,9 @@ def run_trial(project_dir, trial_dir, seed, max_steps, gpu,
     import os
     import time
     import numpy as np
+    if os.environ.get('PICKLE_NO_VIDEO') == '1':
+        import pybullet as _pb_probe
+        _pb_probe.loadPlugin = lambda *a, **k: 0
     import pybullet as p
     from pick_nav_reach_env import PickNavReachEnv
     from solver import Solver
@@ -73,12 +76,23 @@ def run_trial(project_dir, trial_dir, seed, max_steps, gpu,
                         cameraTargetPosition=[0, 0, 0], physicsClientId=env.pb_physics_client)
                     os.chdir(trial)
                     try:
-                        record_navigation(
-                            env, solver,
-                            encoder_args=['-c:v', 'h264_nvenc', '-gpu', str(gpu),
-                                          '-preset', 'p1', '-rc', 'constqp', '-qp', '23'],
-                            label=f'object_{object_idx:02d}_seed_{seed}',
-                            max_steps=max_steps, interactive=False)
+                        if os.environ.get('PICKLE_NO_VIDEO') == '1':
+                            import time as _t
+                            deadline = _t.monotonic() + float(os.environ.get('PICKLE_NO_VIDEO_MAX_SECONDS', '1200'))
+                            obs = env._get_obs()
+                            steps = 0
+                            while steps < max_steps and not env.evaluate().get('success', False) \
+                                    and _t.monotonic() < deadline:
+                                action = solver.get_action(env)
+                                obs, info = env.step(np.asarray(action, dtype=float))
+                                steps += 1
+                        else:
+                            record_navigation(
+                                env, solver,
+                                encoder_args=['-c:v', 'h264_nvenc', '-gpu', str(gpu),
+                                              '-preset', 'p1', '-rc', 'constqp', '-qp', '23'],
+                                label=f'object_{object_idx:02d}_seed_{seed}',
+                                max_steps=max_steps, interactive=False)
                     finally:
                         os.chdir(project)
                     info = env.evaluate()

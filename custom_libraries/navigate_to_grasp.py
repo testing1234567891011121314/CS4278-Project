@@ -36,6 +36,10 @@ class NavigateToGrasp:
         self.grasp = None
         self.navigation_goal = None
         self.failed_goals = set()
+        self.latched_goal = None
+
+    def clear_goal_latch(self):
+        self.latched_goal = None
 
     def select_grasp(self, obs):
         """
@@ -59,6 +63,7 @@ class NavigateToGrasp:
             "p2": p2,
             "position_world": np.asarray(grasp_center, dtype=float),
             "orientation_world": np.asarray(ee_quat, dtype=float),
+            "object_xyzw": np.asarray(obs["object_xyzw"], dtype=float),
             "score": score,
         }
 
@@ -135,7 +140,10 @@ class NavigateToGrasp:
         Decide whether the arm can nominally reach the grasp.
         """
         x, y, z = grasp_position_base
-        distance = np.linalg.norm(grasp_position_base)
+        # Base stand-off is a horizontal decision; height is judged separately
+        # by min_z/max_z. Including z made table-top objects read unreachable
+        # from a perfectly reachable park cell.
+        distance = np.hypot(x, y)
 
         if distance > self.max_reach:
             return "MOVE_CLOSER"
@@ -154,6 +162,9 @@ class NavigateToGrasp:
     def mark_goal_failed(self, goal_world):
         """Called when the arm proved unable to grasp from a parked pose."""
         self.failed_goals.add(tuple(np.round(np.asarray(goal_world), 3)))
+        if self.latched_goal is not None \
+                and self.latched_goal in self.failed_goals:
+            self.latched_goal = None
 
     def nearest_free_goal(self, object_xy, occupancy, convert_to_grid,
                           convert_to_world, cell_size=0.1, robot_xy=None):
@@ -202,7 +213,18 @@ class NavigateToGrasp:
 
         if robot_xy is not None:
             robot_cell = np.asarray(convert_to_grid(robot_xy), dtype=float)
-            best = candidates[np.argmin(np.linalg.norm(candidates - robot_cell, axis=1))]
+            d_robot = np.linalg.norm(candidates - robot_cell, axis=1) * cell_size
+            # A cell ~d_pre from BOTH robot and object lies on the perpendicular
+            # bisector of the robot-object line: arriving there means the base
+            # already faces the object (bearing <= 60 deg, better when the path
+            # approaches from the robot side) at the planable stand-off.
+            # The arm plans best near 0.72 m with a lifted torso (measured:
+            # clean 0.70-0.75, transit-capped 0.80, closure-heavy <0.65).
+            planable = 0.72
+            cand_dist = np.linalg.norm(candidates - object_cell, axis=1) * cell_size
+            cost = np.abs(cand_dist - planable) \
+                + 0.25 * np.abs(d_robot - planable)
+            best = candidates[np.argmin(cost)]
         else:
             best = candidates[np.argmin(np.linalg.norm(candidates - object_cell, axis=1))]
 
@@ -221,6 +243,15 @@ class NavigateToGrasp:
         """
 
         object_pc = np.asarray(obs["object_pc"], dtype=float)
+
+        # A grasp cached while the object was still airborne (or after it was
+        # batted away) poisons reachability forever; re-sample when the object
+        # has left the cached contact region.
+        if self.grasp is not None:
+            object_centre = np.mean(object_pc, axis=0)
+            if np.linalg.norm(object_centre - self.grasp["position_world"]) > 0.05:
+                self.grasp = None
+                self.latched_goal = None
 
         # ---------------------------------------------------------
         # Generate a geometric grasp only once per base position.
@@ -247,6 +278,10 @@ class NavigateToGrasp:
                     ),
                     "orientation_world": np.asarray(
                         ee_quat,
+                        dtype=float,
+                    ),
+                    "object_xyzw": np.asarray(
+                        obs["object_xyzw"],
                         dtype=float,
                     ),
                     "score": score,
@@ -286,15 +321,20 @@ class NavigateToGrasp:
         )
 
         if reach_state != "WITHIN_REACH":
-            base_position, _ = self.get_base_pose(obs)
-            navigation_goal = self.nearest_free_goal(
-                self.grasp["position_world"][:2],
-                occupancy,
-                convert_to_grid,
-                convert_to_world,
-                cell_size,
-                robot_xy=base_position[:2],
-            )
+            # Latch the park cell: a robot-relative selection cost would let
+            # the goal chase the moving base, and the in-flight A* path would
+            # complete toward a stale goal (robot stops short, stalls).
+            if self.latched_goal is None:
+                base_position, _ = self.get_base_pose(obs)
+                self.latched_goal = self.nearest_free_goal(
+                    self.grasp["position_world"][:2],
+                    occupancy,
+                    convert_to_grid,
+                    convert_to_world,
+                    cell_size,
+                    robot_xy=base_position[:2],
+                )
+            navigation_goal = self.latched_goal
 
             return {
                 "state": "NAVIGATE_TO_GRASP",

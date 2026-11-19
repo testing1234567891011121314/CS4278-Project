@@ -1,0 +1,286 @@
+--- a/custom_libraries/grasp.py
++++ b/custom_libraries/grasp.py
+@@ -1,4 +1,4 @@
+-"""Antipodal grasps, fixed-base PyBullet IK, and arm RRT-Connect for Fetch.
++"""Antipodal grasps, fixed-base PyBullet IK, and torso/arm RRT-Connect for Fetch.
+ 
+ Dependencies: numpy, scipy, pybullet. Put in custom_libraries/grasp.py.
+     planner = GraspPlanner(env, robot_urdf_path='assets/fetch/fetch.urdf')
+@@ -8,7 +8,7 @@
+ 
+ plan() is synchronous: do not step the simulation concurrently. It temporarily
+ resets joints for collision queries inside saveState/restoreState (also on
+-failure). IK runs in a separate DIRECT client with ONLY seven arm DOFs. No
++failure). IK runs in a separate DIRECT client with eight DOFs (torso lift + seven arm joints). No
+ simulation step, motor command, or grasp constraint is issued by the planner.
+ The environment alone executes the returned absolute joint targets.
+ 
+@@ -39,6 +39,7 @@
+     'elbow_flex_joint', 'forearm_roll_joint', 'wrist_flex_joint',
+     'wrist_roll_joint',
+ )
++MANIPULATOR_NAMES = ('torso_lift_joint',) + ARM_NAMES
+ FINGER_NAMES = ('r_gripper_finger_joint', 'l_gripper_finger_joint')
+ 
+ 
+@@ -61,6 +62,11 @@
+     collision_margin: float = 0.002
+     contact_penetration: float = 0.0015
+     joint_resolution: float = 0.025  # max joint delta per collision sample, rad
++    torso_resolution: float = 0.005  # metres per collision sample
++    torso_metric_scale: float = 0.20  # metres equivalent to one radian in RRT
++    max_approach_torso_jump: float = 0.02  # metres per Cartesian waypoint
++    torso_action_step: float = 0.002  # metres per follower call; tune to timestep
++    torso_goal_tolerance: float = 0.001  # metres
+     rrt_step: float = 0.20
+     rrt_iterations: int = 2500
+     rrt_seconds: float = 1.0  # per candidate, within total budget
+@@ -93,7 +99,7 @@
+ def edge_samples(a, b, resolution):
+     """Includes both endpoints, even for a zero-length edge."""
+     a, b = np.asarray(a, float), np.asarray(b, float)
+-    n = max(1, int(np.ceil(np.max(np.abs(b - a)) / resolution)))
++    n = max(1, int(np.ceil(np.max(np.abs(b - a) / np.asarray(resolution, float)))))
+     return np.linspace(a, b, n + 1)
+ 
+ 
+@@ -176,8 +182,8 @@
+         return None
+ 
+ 
+-class _ArmIK:
+-    """Private kinematic URDF with all non-arm joints frozen at measured q."""
++class _ManipulatorIK:
++    """Private kinematic URDF with all non-manipulator joints frozen at measured q."""
+     def __init__(self, planner, measured):
+         self.owner, self.client = planner, -1
+         root = ET.parse(planner.urdf_path).getroot()
+@@ -188,7 +194,7 @@
+                     link.remove(element)  # IK needs no mesh assets
+         for joint in root.findall('joint'):
+             name, kind = joint.attrib['name'], joint.attrib['type']
+-            if name in ARM_NAMES or kind == 'fixed':
++            if name in MANIPULATOR_NAMES or kind == 'fixed':
+                 continue
+             if kind not in ('revolute', 'continuous', 'prismatic') or name not in by_name:
+                 raise ValueError(f'Unsupported/unmapped joint: {name}')
+@@ -227,10 +233,10 @@
+             info = [p.getJointInfo(self.robot, j, physicsClientId=self.client)
+                     for j in range(p.getNumJoints(self.robot, physicsClientId=self.client))]
+             names = {v[1].decode(): v[0] for v in info}
+-            self.ids = [names[name] for name in ARM_NAMES]
++            self.ids = [names[name] for name in MANIPULATOR_NAMES]
+             dofs = sorted((v for v in info if v[3] >= 0), key=lambda v: v[3])
+-            if len(dofs) != 7:
+-                raise PlanningError('Private IK model must contain exactly seven arm DOFs.')
++            if len(dofs) != len(MANIPULATOR_NAMES):
++                raise PlanningError('Private IK model must contain exactly eight torso/arm DOFs.')
+             slots = {v[0]: i for i, v in enumerate(dofs)}
+             self.slots = np.array([slots[j] for j in self.ids])
+             self.ee = next(v[0] for v in info if v[12].decode() == 'gripper_link')
+@@ -259,9 +265,9 @@
+                     self.robot, self.ee, position.tolist(), quaternion.tolist(),
+                     lowerLimits=lower[order].tolist(), upperLimits=upper[order].tolist(),
+                     jointRanges=(upper - lower)[order].tolist(), restPoses=q[order].tolist(),
+-                    jointDamping=[0.03] * 7, maxNumIterations=160,
++                    jointDamping=[0.03] * len(self.ids), maxNumIterations=160,
+                     residualThreshold=1e-5, physicsClientId=self.client)
+-                if len(result) != 7:
++                if len(result) != len(self.ids):
+                     raise PlanningError('Unexpected IK output size.')
+                 q = np.asarray(result)[self.slots]
+                 q[owner.wrap] = seed[owner.wrap] + (q[owner.wrap] - seed[owner.wrap] + np.pi) % (2*np.pi) - np.pi
+@@ -284,6 +290,13 @@
+                  disabled_self_pairs=()):
+         self.config = config or GraspConfig()
+         cfg = self.config
++        torso_settings = np.array([
++            cfg.torso_resolution, cfg.torso_metric_scale,
++            cfg.max_approach_torso_jump, cfg.torso_action_step,
++            cfg.torso_goal_tolerance,
++        ], dtype=float)
++        if not np.isfinite(torso_settings).all() or np.any(torso_settings <= 0):
++            raise ValueError('Torso resolutions, scale and tolerances must be finite and positive.')
+         tolerances = np.array([cfg.measured_torso_limit_tolerance,
+                                cfg.measured_finger_limit_tolerance], dtype=float)
+         if not np.isfinite(tolerances).all() or np.any(tolerances < 0):
+@@ -319,19 +332,32 @@
+         self.action_names = [self.info[j][1].decode() for j in self.action_ids]
+         indices = {name: i for i, name in enumerate(self.action_names)}
+         self.arm_indices = np.array([indices[name] for name in ARM_NAMES])
++        self.torso_index = indices['torso_lift_joint']
++        self.motion_indices = np.array([indices[name] for name in MANIPULATOR_NAMES])
++        self.motion_ids = [self.action_ids[i] for i in self.motion_indices]
++        if self.info[self.motion_ids[0]][2] != p.JOINT_PRISMATIC:
++            raise ValueError('torso_lift_joint must be prismatic.')
++        # Internal motion order is torso first, then the seven arm joints.
++        self.motion_resolution = np.r_[cfg.torso_resolution, np.full(7, cfg.joint_resolution)]
++        self.motion_scale = np.r_[cfg.torso_metric_scale, np.ones(7)]
+         self.finger_indices = np.array([indices[name] for name in FINGER_NAMES])
+         self.arm_ids = [self.action_ids[i] for i in self.arm_indices]
+         self.finger_ids = [self.action_ids[i] for i in self.finger_indices]
+         self.ee = next(j for j, v in self.info.items() if v[12].decode() == 'gripper_link')
+         self.lower = np.asarray(env.joint_lower, float).copy()
+         self.upper = np.asarray(env.joint_upper, float).copy()
+-        self.wrap = np.array([self.info[j][9] - self.info[j][8] > 2*np.pi + 0.01
+-                              or self.info[j][9] < self.info[j][8] for j in self.arm_ids])
++        self.wrap = np.array([self.info[j][2] == p.JOINT_REVOLUTE and (self.info[j][9] - self.info[j][8] > 2*np.pi + 0.01
++                              or self.info[j][9] < self.info[j][8]) for j in self.motion_ids])
+         # Standard continuous URDF joints may have lower=0, upper=-1.
+         for i, j in enumerate(self.action_ids):
+             if self.info[j][2] == p.JOINT_REVOLUTE and self.upper[i] < self.lower[i]:
+                 self.lower[i], self.upper[i] = -np.inf, np.inf
+-        self.moving_links = set(self.arm_ids + self.finger_ids)
++        torso_bounds = [self.lower[self.torso_index], self.upper[self.torso_index]]
++        if not np.isfinite(torso_bounds).all() or torso_bounds[0] >= torso_bounds[1]:
++            raise ValueError('Torso requires finite, increasing joint limits.')
++        # Descendants include the head: it moves in space when the torso rises,
++        # even though its own pan/tilt joints remain fixed.
++        self.moving_links = set(self.motion_ids + self.finger_ids)
+         changed = True
+         while changed:
+             before = len(self.moving_links)
+@@ -531,7 +557,7 @@
+             contacts = p.getClosestPoints(self.robot, body, cfg.collision_margin, physicsClientId=self.client)
+             for contact in contacts:
+                 if contact[3] not in self.moving_links and not (attached is not None and body == self.object):
+-                    continue  # Parked base/floor contact cannot change in arm-only motion.
++                    continue  # Parked base/floor contact cannot change in fixed-base torso/arm motion.
+                 if body == self.object and touch and contact[3] in self.finger_ids:
+                     if contact[8] >= -cfg.contact_penetration:
+                         continue
+@@ -571,7 +597,7 @@
+ 
+     def _full(self, parked, arm, fingers):
+         q = parked.copy()
+-        q[self.arm_indices], q[self.finger_indices] = arm, fingers
++        q[self.motion_indices], q[self.finger_indices] = arm, fingers
+         return q
+ 
+     def _live_pose_ok(self, q, position, quaternion):
+@@ -590,8 +616,6 @@
+         path, previous = [], seed.copy()
+         for position in np.linspace(start_pos, end_pos, n+1)[1:]:
+             q = ik.solve(position, quat, previous, lower, upper, deadline, restarts=1)
+-            # if q is None or np.max(np.abs(q-previous)) > self.config.max_approach_joint_jump:
+-            #     return None
+ 
+             stage = "lift" if attached is not None else "approach"
+ 
+@@ -604,11 +628,14 @@
+                 )
+                 return None
+ 
+-            jump = float(np.max(np.abs(q - previous)))
+-            if jump > self.config.max_approach_joint_jump:
++            jump = float(np.max(np.abs(q[1:] - previous[1:])))
++            torso_jump = float(abs(q[0] - previous[0]))
++            if (jump > self.config.max_approach_joint_jump
++                    or torso_jump > self.config.max_approach_torso_jump):
+                 print(
+                     f"[FAIL {stage}] Joint jump",
+-                    "actual=", round(jump, 4),
++                    "arm_radians=", round(jump, 4),
++                    "torso_metres=", round(torso_jump, 4),
+                     "maximum=", self.config.max_approach_joint_jump,
+                     flush=True,
+                 )
+@@ -616,7 +643,7 @@
+ 
+             if not self._live_pose_ok(self._full(parked, q, fingers), position, quat):
+                 raise PlanningError('IK model and loaded robot disagree; check the URDF path/scaling.')
+-            for mid in edge_samples(previous, q, self.config.joint_resolution):
++            for mid in edge_samples(previous, q, self.motion_resolution):
+                 if not self._valid(self._full(parked, mid, fingers), touch=touch,
+                                    attached=attached, deadline=deadline):
+                     print(f"[FAIL {stage}] Invalid path state:", self._last_invalid, flush=True)
+@@ -651,14 +678,19 @@
+         if not candidates:
+             stats['reason'] = 'no_antipodal_pairs'
+             return None
+-        start = parked[self.arm_indices]
+-        lower, upper = self.lower[self.arm_indices].copy(), self.upper[self.arm_indices].copy()
++        lower = self.lower[self.motion_indices].copy()
++        upper = self.upper[self.motion_indices].copy()
++        start = parked[self.motion_indices].copy()
++        # A measured torso may overshoot its stop slightly. Recover to the
++        # legal boundary during the collision-checked opening segment; never
++        # expand IK/RRT limits or silently clip an IK solution.
++        start[0] = np.clip(start[0], lower[0], upper[0])
+         lower[self.wrap] = np.maximum(lower[self.wrap], start[self.wrap] - np.pi)
+         upper[self.wrap] = np.minimum(upper[self.wrap], start[self.wrap] + np.pi)
+         self.obstacles = [p.getBodyUniqueId(i, physicsClientId=self.client)
+                           for i in range(p.getNumBodies(physicsClientId=self.client))]
+         self.obstacles.remove(self.robot)
+-        ik = _ArmIK(self, parked)
++        ik = _ManipulatorIK(self, parked)
+         try:
+             with self._snapshot():
+                 object_pose = p.getBasePositionAndOrientation(self.object, physicsClientId=self.client)
+@@ -706,10 +738,20 @@
+                         continue
+                     if not self._live_pose_ok(self._full(parked, pre, opened), pre_pos, quat):
+                         raise PlanningError('IK model and loaded robot disagree; check the URDF path/scaling.')
+-                    valid = lambda arm: self._valid(self._full(parked, arm, opened), deadline=deadline)
+-                    rrt = RRTConnect(lower, upper, valid, resolution=cfg.joint_resolution,
+-                                     step_size=cfg.rrt_step, max_iterations=cfg.rrt_iterations, rng=self.rng)
+-                    transit = rrt.plan(start, pre, deadline=min(deadline, time.monotonic()+cfg.rrt_seconds))
++                    # RRT operates in scaled coordinates so metres and radians
++                    # have an explicit relative weight. Collision samples obey
++                    # both the torso and arm resolution limits.
++                    scale = self.motion_scale
++                    valid = lambda scaled: self._valid(
++                        self._full(parked, scaled * scale, opened), deadline=deadline)
++                    resolution = float(np.min(self.motion_resolution / scale))
++                    rrt = RRTConnect(lower / scale, upper / scale, valid,
++                                     resolution=resolution, step_size=cfg.rrt_step,
++                                     max_iterations=cfg.rrt_iterations, rng=self.rng)
++                    transit = rrt.plan(start / scale, pre / scale,
++                                      deadline=min(deadline, time.monotonic()+cfg.rrt_seconds))
++                    if transit is not None:
++                        transit = transit * scale
+                     if transit is None:
+                         stats['transit_fail'] += 1
+                         print(
+@@ -778,7 +820,7 @@
+         self.status, self.error = 'running', None
+         self.hold = None
+         self.pinned = np.array([i for i in range(len(planner.action_ids))
+-                                if i not in set(planner.arm_indices) | set(planner.finger_indices)])
++                                if i not in set(planner.motion_indices) | set(planner.finger_indices)])
+         self.contact_stable = 0
+         self.lost_contact_ticks = 0
+ 
+@@ -819,12 +861,13 @@
+                 "arm_error=", round(float(
+                     np.max(np.abs(target[owner.arm_indices] - q[owner.arm_indices]))
+                 ), 4),
++                "torso_error_m=", round(float(abs(target[owner.torso_index] - q[owner.torso_index])), 5),
+                 "fingers=", np.round(q[owner.finger_indices], 4),
+                 flush=True,
+             )
+ 
+         if np.max(np.abs(q[self.pinned]-self.plan.waypoints[0, self.pinned])) > 0.03:
+-            return self._fail('Base/torso/head moved away from the planned parked state.', q)
++            return self._fail('Base/head joints moved away from the planned parked state.', q)
+         if phase in ('open', 'transit', 'approach'):
+             rotated = (Rotation.from_quat(self.plan.object_orientation).inv()
+                        * Rotation.from_quat(obs['object_xyzw'])).magnitude()
+@@ -833,6 +876,7 @@
+         # Common interpolation factor keeps commanded targets on the checked
+         # joint-space segment; independent component clipping would bend it.
+         limits = np.full(len(q), 0.015)
++        limits[owner.torso_index] = owner.config.torso_action_step
+         limits[owner.finger_indices] = 0.0004 if phase == 'close' else 0.002
+         error = target-q
+         scale = max(1., float(np.max(np.abs(error)/limits)))
+@@ -840,7 +884,8 @@
+         action[self.pinned] = target[self.pinned]
+         if phase == 'lift':
+             action[owner.finger_indices] = target[owner.finger_indices]
+-        reached = np.max(np.abs(error[owner.arm_indices])) < 0.008
++        reached = (np.max(np.abs(error[owner.arm_indices])) < 0.008
++                   and abs(error[owner.torso_index]) < owner.config.torso_goal_tolerance)
+         if phase == 'open':
+             reached &= np.max(np.abs(error[owner.finger_indices])) < 0.001
+         elif phase == 'close':

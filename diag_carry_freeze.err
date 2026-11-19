@@ -1,0 +1,7 @@
+pybullet build time: Oct 22 2026 21:08:27
+Traceback (most recent call last):
+  File "C:\Users\Hejun\Documents\GitLab\CS4278-Project\diag_carry_freeze.py", line 93, in <module>
+    dump(n, q, t, obs)
+  File "C:\Users\Hejun\Documents\GitLab\CS4278-Project\diag_carry_freeze.py", line 60, in dump
+    obj = np.asarray(obs["object_pos"], float)
+TypeError: tuple indices must be integers or slices, not str

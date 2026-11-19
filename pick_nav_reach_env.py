@@ -296,14 +296,19 @@ class PickNavReachEnv:
         print("target: ", target)
 
         # Position control for all controllable joints
-        position_gains = [0.3, 0.3, 0.3,  # base movement: xy trans and z rot 
-                           0.3, # torso lift 
+        # Arm gain 0.3 left a 20-130 mrad servo lag under fingertip contact,
+        # so executed transit poses sagged through the collision-checked
+        # clearance and pushed the object; tighter tracking keeps the arm on
+        # the planned path.
+        position_gains = [0.3, 0.3, 0.3,  # base movement: xy trans and z rot
+                           0.3, # torso lift
                            0.3, 0.3, # head pan & tilt
-                           0.3, 0.3, # shoulder pan & lift
-                           0.3, 0.3, 0.3, 0.3, 0.3, # arm 
-                           0.03, 0.03] # gripper
-        # position_gains = np.array([0.3] * len(self.joint_indices))
-        velocity_gains = np.zeros_like(position_gains) #np.sqrt(np.array(position_gains))
+                           1.0, 1.0, # shoulder pan & lift
+                           1.0, 1.0, 1.0, 1.0, 1.0, # arm
+                           1.0, 1.0] # gripper: gain 0.3 was too soft a
+                                      # clamp; walking accelerations pried
+                                      # the payload out between the pads
+        velocity_gains = np.zeros_like(position_gains)
         p.setJointMotorControlArray(
             bodyUniqueId=self.robot_id,
             jointIndices=self.joint_indices,

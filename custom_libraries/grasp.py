@@ -1,4 +1,4 @@
-"""Antipodal grasps, fixed-base PyBullet IK, and arm RRT-Connect for Fetch.
+"""Antipodal grasps, fixed-base PyBullet IK, and torso/arm RRT-Connect for Fetch.
 
 Dependencies: numpy, scipy, pybullet. Put in custom_libraries/grasp.py.
     planner = GraspPlanner(env, robot_urdf_path='assets/fetch/fetch.urdf')
@@ -8,7 +8,7 @@ Dependencies: numpy, scipy, pybullet. Put in custom_libraries/grasp.py.
 
 plan() is synchronous: do not step the simulation concurrently. It temporarily
 resets joints for collision queries inside saveState/restoreState (also on
-failure). IK runs in a separate DIRECT client with ONLY seven arm DOFs. No
+failure). IK runs in a separate DIRECT client with eight DOFs (torso lift + seven arm joints). No
 simulation step, motor command, or grasp constraint is issued by the planner.
 The environment alone executes the returned absolute joint targets.
 
@@ -39,6 +39,7 @@ ARM_NAMES = (
     'elbow_flex_joint', 'forearm_roll_joint', 'wrist_flex_joint',
     'wrist_roll_joint',
 )
+MANIPULATOR_NAMES = ('torso_lift_joint',) + ARM_NAMES
 FINGER_NAMES = ('r_gripper_finger_joint', 'l_gripper_finger_joint')
 
 
@@ -51,7 +52,9 @@ class GraspConfig:
     pad_height: float = 0.024
     tcp_offset: tuple = (0.025, 0.0, 0.0)  # contact near pad tips, ahead of link origin
     opening_clearance: float = 0.008  # total gap, metres
-    squeeze: float = 0.001  # total gap reduction in motor command after contact
+    squeeze: float = 0.003  # total gap reduction in motor command after
+                            # contact; deeper squeeze exceeds the closure
+                            # collision check's contact_penetration tolerance
     min_width: float = 0.005
     max_cloud_points: int = 800
     max_candidates: int = 60
@@ -59,12 +62,18 @@ class GraspConfig:
     cartesian_step: float = 0.005
     lift_distance: float = 0.08  # set 0 to end after closing
     collision_margin: float = 0.002
+    transit_object_clearance: float = 0.006
     contact_penetration: float = 0.0015
     joint_resolution: float = 0.025  # max joint delta per collision sample, rad
+    torso_resolution: float = 0.005  # metres per collision sample
+    torso_metric_scale: float = 0.20  # metres equivalent to one radian in RRT
+    max_approach_torso_jump: float = 0.02  # metres per Cartesian waypoint
+    torso_action_step: float = 0.002  # metres per follower call; tune to timestep
+    torso_goal_tolerance: float = 0.001  # metres
     rrt_step: float = 0.20
-    rrt_iterations: int = 2500
-    rrt_seconds: float = 1.0  # per candidate, within total budget
-    planning_seconds: float = 30.0
+    rrt_iterations: int = 6000  # 8-DOF space needs more than the 7-DOF budget
+    rrt_seconds: float = 2.0  # per candidate, within total budget
+    planning_seconds: float = 45.0
     ik_restarts: int = 8
     position_tolerance: float = 0.003
     orientation_tolerance: float = 0.04
@@ -93,7 +102,7 @@ class PlanningError(RuntimeError):
 def edge_samples(a, b, resolution):
     """Includes both endpoints, even for a zero-length edge."""
     a, b = np.asarray(a, float), np.asarray(b, float)
-    n = max(1, int(np.ceil(np.max(np.abs(b - a)) / resolution)))
+    n = max(1, int(np.ceil(np.max(np.abs(b - a) / np.asarray(resolution, float)))))
     return np.linspace(a, b, n + 1)
 
 
@@ -176,8 +185,8 @@ class RRTConnect:
         return None
 
 
-class _ArmIK:
-    """Private kinematic URDF with all non-arm joints frozen at measured q."""
+class _ManipulatorIK:
+    """Private kinematic URDF with all non-manipulator joints frozen at measured q."""
     def __init__(self, planner, measured):
         self.owner, self.client = planner, -1
         root = ET.parse(planner.urdf_path).getroot()
@@ -188,7 +197,7 @@ class _ArmIK:
                     link.remove(element)  # IK needs no mesh assets
         for joint in root.findall('joint'):
             name, kind = joint.attrib['name'], joint.attrib['type']
-            if name in ARM_NAMES or kind == 'fixed':
+            if name in MANIPULATOR_NAMES or kind == 'fixed':
                 continue
             if kind not in ('revolute', 'continuous', 'prismatic') or name not in by_name:
                 raise ValueError(f'Unsupported/unmapped joint: {name}')
@@ -227,10 +236,10 @@ class _ArmIK:
             info = [p.getJointInfo(self.robot, j, physicsClientId=self.client)
                     for j in range(p.getNumJoints(self.robot, physicsClientId=self.client))]
             names = {v[1].decode(): v[0] for v in info}
-            self.ids = [names[name] for name in ARM_NAMES]
+            self.ids = [names[name] for name in MANIPULATOR_NAMES]
             dofs = sorted((v for v in info if v[3] >= 0), key=lambda v: v[3])
-            if len(dofs) != 7:
-                raise PlanningError('Private IK model must contain exactly seven arm DOFs.')
+            if len(dofs) != len(MANIPULATOR_NAMES):
+                raise PlanningError('Private IK model must contain exactly eight torso/arm DOFs.')
             slots = {v[0]: i for i, v in enumerate(dofs)}
             self.slots = np.array([slots[j] for j in self.ids])
             self.ee = next(v[0] for v in info if v[12].decode() == 'gripper_link')
@@ -259,9 +268,9 @@ class _ArmIK:
                     self.robot, self.ee, position.tolist(), quaternion.tolist(),
                     lowerLimits=lower[order].tolist(), upperLimits=upper[order].tolist(),
                     jointRanges=(upper - lower)[order].tolist(), restPoses=q[order].tolist(),
-                    jointDamping=[0.03] * 7, maxNumIterations=160,
+                    jointDamping=[0.03] * len(self.ids), maxNumIterations=160,
                     residualThreshold=1e-5, physicsClientId=self.client)
-                if len(result) != 7:
+                if len(result) != len(self.ids):
                     raise PlanningError('Unexpected IK output size.')
                 q = np.asarray(result)[self.slots]
                 q[owner.wrap] = seed[owner.wrap] + (q[owner.wrap] - seed[owner.wrap] + np.pi) % (2*np.pi) - np.pi
@@ -284,6 +293,13 @@ class GraspPlanner:
                  disabled_self_pairs=()):
         self.config = config or GraspConfig()
         cfg = self.config
+        torso_settings = np.array([
+            cfg.torso_resolution, cfg.torso_metric_scale,
+            cfg.max_approach_torso_jump, cfg.torso_action_step,
+            cfg.torso_goal_tolerance,
+        ], dtype=float)
+        if not np.isfinite(torso_settings).all() or np.any(torso_settings <= 0):
+            raise ValueError('Torso resolutions, scale and tolerances must be finite and positive.')
         tolerances = np.array([cfg.measured_torso_limit_tolerance,
                                cfg.measured_finger_limit_tolerance], dtype=float)
         if not np.isfinite(tolerances).all() or np.any(tolerances < 0):
@@ -319,24 +335,43 @@ class GraspPlanner:
         self.action_names = [self.info[j][1].decode() for j in self.action_ids]
         indices = {name: i for i, name in enumerate(self.action_names)}
         self.arm_indices = np.array([indices[name] for name in ARM_NAMES])
+        self.torso_index = indices['torso_lift_joint']
+        self.motion_indices = np.array([indices[name] for name in MANIPULATOR_NAMES])
+        self.motion_ids = [self.action_ids[i] for i in self.motion_indices]
+        if self.info[self.motion_ids[0]][2] != p.JOINT_PRISMATIC:
+            raise ValueError('torso_lift_joint must be prismatic.')
+        # Internal motion order is torso first, then the seven arm joints.
+        self.motion_resolution = np.r_[cfg.torso_resolution, np.full(7, cfg.joint_resolution)]
+        self.motion_scale = np.r_[cfg.torso_metric_scale, np.ones(7)]
         self.finger_indices = np.array([indices[name] for name in FINGER_NAMES])
         self.arm_ids = [self.action_ids[i] for i in self.arm_indices]
         self.finger_ids = [self.action_ids[i] for i in self.finger_indices]
         self.ee = next(j for j, v in self.info.items() if v[12].decode() == 'gripper_link')
         self.lower = np.asarray(env.joint_lower, float).copy()
         self.upper = np.asarray(env.joint_upper, float).copy()
-        self.wrap = np.array([self.info[j][9] - self.info[j][8] > 2*np.pi + 0.01
-                              or self.info[j][9] < self.info[j][8] for j in self.arm_ids])
+        self.wrap = np.array([self.info[j][2] == p.JOINT_REVOLUTE and (self.info[j][9] - self.info[j][8] > 2*np.pi + 0.01
+                              or self.info[j][9] < self.info[j][8]) for j in self.motion_ids])
         # Standard continuous URDF joints may have lower=0, upper=-1.
         for i, j in enumerate(self.action_ids):
             if self.info[j][2] == p.JOINT_REVOLUTE and self.upper[i] < self.lower[i]:
                 self.lower[i], self.upper[i] = -np.inf, np.inf
-        self.moving_links = set(self.arm_ids + self.finger_ids)
+        torso_bounds = [self.lower[self.torso_index], self.upper[self.torso_index]]
+        if not np.isfinite(torso_bounds).all() or torso_bounds[0] >= torso_bounds[1]:
+            raise ValueError('Torso requires finite, increasing joint limits.')
+        # Descendants include the head: it moves in space when the torso rises,
+        # even though its own pan/tilt joints remain fixed.
+        self.moving_links = set(self.motion_ids + self.finger_ids)
         changed = True
         while changed:
             before = len(self.moving_links)
             self.moving_links.update(j for j, v in self.info.items() if v[16] in self.moving_links)
             changed = len(self.moving_links) != before
+        # Decorative covers: modeled rigid on the torso but stretchy on the
+        # real robot, and already resting ~0.1 mm off the tabletop at the
+        # park pose -- counting them would reject every candidate.
+        decorative = {'bellows_link', 'bellows_link2'}
+        self.moving_links -= {
+            j for j, v in self.info.items() if v[12].decode() in decorative}
         link_names = {v[12].decode(): j for j, v in self.info.items()}
         link_names[p.getBodyInfo(self.robot, physicsClientId=self.client)[0].decode()] = -1
         self.disabled_pairs = {frozenset((link_names[a], link_names[b])) for a, b in disabled_self_pairs}
@@ -357,6 +392,22 @@ class GraspPlanner:
                         and pair not in self.disabled_pairs):
                     self.self_pairs.add(pair)
         self._validate_fingers()
+        # (p1, p2) keys of candidates whose execution failed at close/lift.
+        # Every retry re-sampled the identical top-scored pair and re-hit the
+        # same one-sided-contact close timeout forever.
+        self.rejected_grasps = set()
+        if env is not None:
+            # The stock URDF gives no finger material; default PyBullet
+            # friction let a grasped apple slip out at full lift. Contact
+            # friction combines both bodies, so the object gets it too
+            # (base acceleration during carry shed the apple otherwise).
+            # 1.2*1.0 combined mu still let the apple slide out when corner
+            # yaw swings loaded the pads.
+            for finger in self.finger_ids:
+                p.changeDynamics(self.robot, finger, lateralFriction=2.5,
+                                 physicsClientId=self.client)
+            p.changeDynamics(self.object, -1, lateralFriction=2.0,
+                             physicsClientId=self.client)
 
     def _validate_fingers(self):
         """Fail explicitly if the supplied model is not the modified Fetch grip."""
@@ -502,7 +553,8 @@ class GraspPlanner:
         if len(examples) < 3:
             examples.append({'stage': stage, **(self._last_invalid or {})})
 
-    def _valid(self, q, *, touch=False, attached=None, deadline=float('inf')):
+    def _valid(self, q, *, touch=False, attached=None, deadline=float('inf'),
+               object_extra=0.0):
         cfg = self.config
         self._last_invalid = None
         if time.monotonic() >= deadline:
@@ -528,13 +580,18 @@ class GraspPlanner:
             pos, orn = p.multiplyTransforms(ee[4], ee[5], *attached)
             p.resetBasePositionAndOrientation(self.object, pos, orn, physicsClientId=self.client)
         for body in self.obstacles:
-            contacts = p.getClosestPoints(self.robot, body, cfg.collision_margin, physicsClientId=self.client)
+            dist = cfg.collision_margin + (
+                object_extra if body == self.object else 0.0)
+            contacts = p.getClosestPoints(self.robot, body, dist, physicsClientId=self.client)
             for contact in contacts:
                 if contact[3] not in self.moving_links and not (attached is not None and body == self.object):
-                    continue  # Parked base/floor contact cannot change in arm-only motion.
+                    continue  # Parked base/floor contact cannot change in fixed-base torso/arm motion.
                 if body == self.object and touch and contact[3] in self.finger_ids:
                     if contact[8] >= -cfg.contact_penetration:
                         continue
+                if body == self.object and not touch \
+                        and contact[8] >= cfg.collision_margin:
+                    continue  # within the extra transit allowance only
                 self._last_invalid = {
                     'reason': 'obstacle_collision', 'body': body,
                     'robot_link': contact[3], 'obstacle_link': contact[4],
@@ -571,7 +628,7 @@ class GraspPlanner:
 
     def _full(self, parked, arm, fingers):
         q = parked.copy()
-        q[self.arm_indices], q[self.finger_indices] = arm, fingers
+        q[self.motion_indices], q[self.finger_indices] = arm, fingers
         return q
 
     def _live_pose_ok(self, q, position, quaternion):
@@ -590,8 +647,6 @@ class GraspPlanner:
         path, previous = [], seed.copy()
         for position in np.linspace(start_pos, end_pos, n+1)[1:]:
             q = ik.solve(position, quat, previous, lower, upper, deadline, restarts=1)
-            # if q is None or np.max(np.abs(q-previous)) > self.config.max_approach_joint_jump:
-            #     return None
 
             stage = "lift" if attached is not None else "approach"
 
@@ -604,11 +659,14 @@ class GraspPlanner:
                 )
                 return None
 
-            jump = float(np.max(np.abs(q - previous)))
-            if jump > self.config.max_approach_joint_jump:
+            jump = float(np.max(np.abs(q[1:] - previous[1:])))
+            torso_jump = float(abs(q[0] - previous[0]))
+            if (jump > self.config.max_approach_joint_jump
+                    or torso_jump > self.config.max_approach_torso_jump):
                 print(
                     f"[FAIL {stage}] Joint jump",
-                    "actual=", round(jump, 4),
+                    "arm_radians=", round(jump, 4),
+                    "torso_metres=", round(torso_jump, 4),
                     "maximum=", self.config.max_approach_joint_jump,
                     flush=True,
                 )
@@ -616,7 +674,7 @@ class GraspPlanner:
 
             if not self._live_pose_ok(self._full(parked, q, fingers), position, quat):
                 raise PlanningError('IK model and loaded robot disagree; check the URDF path/scaling.')
-            for mid in edge_samples(previous, q, self.config.joint_resolution):
+            for mid in edge_samples(previous, q, self.motion_resolution):
                 if not self._valid(self._full(parked, mid, fingers), touch=touch,
                                    attached=attached, deadline=deadline):
                     print(f"[FAIL {stage}] Invalid path state:", self._last_invalid, flush=True)
@@ -651,14 +709,19 @@ class GraspPlanner:
         if not candidates:
             stats['reason'] = 'no_antipodal_pairs'
             return None
-        start = parked[self.arm_indices]
-        lower, upper = self.lower[self.arm_indices].copy(), self.upper[self.arm_indices].copy()
+        lower = self.lower[self.motion_indices].copy()
+        upper = self.upper[self.motion_indices].copy()
+        start = parked[self.motion_indices].copy()
+        # A measured torso may overshoot its stop slightly. Recover to the
+        # legal boundary during the collision-checked opening segment; never
+        # expand IK/RRT limits or silently clip an IK solution.
+        start[0] = np.clip(start[0], lower[0], upper[0])
         lower[self.wrap] = np.maximum(lower[self.wrap], start[self.wrap] - np.pi)
         upper[self.wrap] = np.minimum(upper[self.wrap], start[self.wrap] + np.pi)
         self.obstacles = [p.getBodyUniqueId(i, physicsClientId=self.client)
                           for i in range(p.getNumBodies(physicsClientId=self.client))]
         self.obstacles.remove(self.robot)
-        ik = _ArmIK(self, parked)
+        ik = _ManipulatorIK(self, parked)
         try:
             with self._snapshot():
                 object_pose = p.getBasePositionAndOrientation(self.object, physicsClientId=self.client)
@@ -679,12 +742,25 @@ class GraspPlanner:
                     print(f"[CANDIDATE {stats['tried']}] Testing", flush=True)
 
                     p1, p2, centre, quat, _ = candidate
+                    if (tuple(np.round(p1, 3)), tuple(np.round(p2, 3)),
+                            tuple(np.round(centre, 3)),
+                            tuple(np.round(quat, 3))) in self.rejected_grasps:
+                        stats['rejected_reuse'] = stats.get('rejected_reuse', 0) + 1
+                        continue
                     width = np.linalg.norm(p2-p1)
                     nominal = np.full(2, (width-cfg.closed_gap)/2)
                     opened = nominal + cfg.opening_clearance/2
                     squeezed = np.maximum(self.lower[self.finger_indices], nominal - cfg.squeeze/2)
                     if np.any(opened > self.upper[self.finger_indices]):
+                        stats['width_reject'] = stats.get('width_reject', 0) + 1
+                        print("[REJECT width]", "width=", round(width, 4),
+                              "opened=", np.round(opened, 4),
+                              "upper=", np.round(self.upper[self.finger_indices], 4), flush=True)
                         continue
+                    if stats['tried'] <= 3:
+                        print("[CAND geom]", "width=", round(width, 4),
+                              "centre=", np.round(centre, 3),
+                              "score=", round(candidate[4], 3), flush=True)
                     opening = self._full(parked, start, opened)
                     if not all(self._valid(q, deadline=deadline) for q in edge_samples(parked, opening, 0.002)):
                         stats['opening_fail'] += 1
@@ -706,10 +782,23 @@ class GraspPlanner:
                         continue
                     if not self._live_pose_ok(self._full(parked, pre, opened), pre_pos, quat):
                         raise PlanningError('IK model and loaded robot disagree; check the URDF path/scaling.')
-                    valid = lambda arm: self._valid(self._full(parked, arm, opened), deadline=deadline)
-                    rrt = RRTConnect(lower, upper, valid, resolution=cfg.joint_resolution,
-                                     step_size=cfg.rrt_step, max_iterations=cfg.rrt_iterations, rng=self.rng)
-                    transit = rrt.plan(start, pre, deadline=min(deadline, time.monotonic()+cfg.rrt_seconds))
+                    # Transit is executed by a lagging servo; give the object
+                    # extra room so sag does not drag fingertips through it.
+                    # RRT operates in scaled coordinates so metres and radians
+                    # have an explicit relative weight. Collision samples obey
+                    # both the torso and arm resolution limits.
+                    scale = self.motion_scale
+                    valid = lambda scaled: self._valid(
+                        self._full(parked, scaled * scale, opened), deadline=deadline,
+                        object_extra=cfg.transit_object_clearance)
+                    resolution = float(np.min(self.motion_resolution / scale))
+                    rrt = RRTConnect(lower / scale, upper / scale, valid,
+                                     resolution=resolution, step_size=cfg.rrt_step,
+                                     max_iterations=cfg.rrt_iterations, rng=self.rng)
+                    transit = rrt.plan(start / scale, pre / scale,
+                                      deadline=min(deadline, time.monotonic()+cfg.rrt_seconds))
+                    if transit is not None:
+                        transit = transit * scale
                     if transit is None:
                         stats['transit_fail'] += 1
                         print(
@@ -778,9 +867,11 @@ class GraspFollower:
         self.status, self.error = 'running', None
         self.hold = None
         self.pinned = np.array([i for i in range(len(planner.action_ids))
-                                if i not in set(planner.arm_indices) | set(planner.finger_indices)])
+                                if i not in set(planner.motion_indices) | set(planner.finger_indices)])
         self.contact_stable = 0
         self.lost_contact_ticks = 0
+        self.obj_anchor = None
+        self.close_anchor = None
 
     def _contacts(self):
         owner = self.planner
@@ -800,7 +891,18 @@ class GraspFollower:
         self.status, self.error = 'failed', message
         self.hold = measured.copy()
         if self.plan.phases[self.index] in ('close', 'lift'):
+            # Geometry failed in execution (not search): blacklist this exact
+            # grasp so plan() skips it on the next attempt.
+            p1, p2, centre, quat, _ = self.plan.candidate
+            self.planner.rejected_grasps.add((
+                tuple(np.round(p1, 3)), tuple(np.round(p2, 3)),
+                tuple(np.round(centre, 3)), tuple(np.round(quat, 3))))
             self.hold[self.planner.finger_indices] = self.plan.commanded_fingers
+            owner = self.planner
+            ct = [(c[3], c[4], round(c[8], 4), round(c[9], 4)) for c in
+                  p.getContactPoints(owner.robot, owner.object,
+                                     physicsClientId=owner.client)]
+            print('  fail contacts:', ct[:12], flush=True)
         return self.hold.copy()
 
     def step(self, obs):
@@ -819,20 +921,64 @@ class GraspFollower:
                 "arm_error=", round(float(
                     np.max(np.abs(target[owner.arm_indices] - q[owner.arm_indices]))
                 ), 4),
+                "worst_joint=", ARM_NAMES[
+                    int(np.argmax(np.abs(target[owner.arm_indices]
+                                          - q[owner.arm_indices])))],
+                "torso_error_m=", round(float(abs(target[owner.torso_index] - q[owner.torso_index])), 5),
                 "fingers=", np.round(q[owner.finger_indices], 4),
                 flush=True,
             )
 
         if np.max(np.abs(q[self.pinned]-self.plan.waypoints[0, self.pinned])) > 0.03:
-            return self._fail('Base/torso/head moved away from the planned parked state.', q)
+            return self._fail('Base/head joints moved away from the planned parked state.', q)
+        if phase == 'close':
+            # One pad can reach the apple while the other swings past it;
+            # the servo then grinds the sphere across the table at 200+ N
+            # for the whole 600-tick timeout (measured: apple ended 3 m
+            # from any free cell, unreachable forever). The grasp must
+            # form in place -- if the centre leaves the close anchor by
+            # 3 cm, the geometry is wrong; fail and re-plan.
+            if self.close_anchor is None:
+                self.close_anchor = np.asarray(obs['object_pos'], float).copy()
+            d = float(np.linalg.norm(
+                np.asarray(obs['object_pos']) - self.close_anchor))
+            if d > 0.03:
+                ct = [(c[3], c[4], round(c[8], 4), round(c[9], 4)) for c in
+                      p.getContactPoints(bodyA=owner.object,
+                                         physicsClientId=owner.client)]
+                print('[CLOSE DRAG] d=', round(d, 4), 'tick=', self.ticks,
+                      'ct=', ct[:12], flush=True)
+                return self._fail('Close is dragging the object.', q)
         if phase in ('open', 'transit', 'approach'):
-            rotated = (Rotation.from_quat(self.plan.object_orientation).inv()
+            # Compare against the pose observed at the first execution tick,
+            # not the plan timestamp: the apple rocks a few degrees / mm
+            # while the plan is still being built, and that settling read as
+            # a knockaway at tick ~2 against the stale planned pose.
+            if self.obj_anchor is None:
+                self.obj_anchor = (np.asarray(obs['object_pos'], float).copy(),
+                                   np.asarray(obs['object_xyzw'], float).copy())
+            a_pos, a_quat = self.obj_anchor
+            rotated = (Rotation.from_quat(a_quat).inv()
                        * Rotation.from_quat(obs['object_xyzw'])).magnitude()
-            if np.linalg.norm(np.asarray(obs['object_pos'])-self.plan.object_position) > 0.012 or rotated > 0.10:
+            # Translation-only, deliberately. The pads graze the apple on
+            # the way in (box colliders vs. the checker's shapes) and spin it
+            # on the table; measured aborts clustered at rot 0.70-0.76 rad
+            # with the centre displaced under 3 cm, so any rotation threshold
+            # low enough to trip rejects good attempts, and one high enough to
+            # pass detects nothing a knockaway would not already show as a
+            # translation. Close only completes on bilateral fingertip contact
+            # and lift watches for contact loss, so a bad grasp fails there.
+            if np.linalg.norm(np.asarray(obs['object_pos'])-a_pos) > 0.06:
+                d = np.linalg.norm(np.asarray(obs['object_pos'])-a_pos)
+                ct = [(c[2], c[4], round(c[8], 4)) for c in
+                      p.getContactPoints(bodyA=owner.object, physicsClientId=owner.client)]
+                print('[MOVED] d=', round(float(d), 4), 'rot=', round(float(rotated), 3),
+                      'tick=', self.ticks, 'ct=', ct[:12], flush=True)
                 return self._fail('Object moved; stop and obtain a fresh plan.', q)
         # Common interpolation factor keeps commanded targets on the checked
         # joint-space segment; independent component clipping would bend it.
         limits = np.full(len(q), 0.015)
+        limits[owner.torso_index] = owner.config.torso_action_step
         limits[owner.finger_indices] = 0.0004 if phase == 'close' else 0.002
         error = target-q
         scale = max(1., float(np.max(np.abs(error)/limits)))
@@ -840,7 +986,13 @@ class GraspFollower:
         action[self.pinned] = target[self.pinned]
         if phase == 'lift':
             action[owner.finger_indices] = target[owner.finger_indices]
-        reached = np.max(np.abs(error[owner.arm_indices])) < 0.008
+        # Waypoints densely interpolate the collision-checked path, so a
+        # transit/approach waypoint may be declared reached while the servo
+        # (gain 0.3) sits in a ~15 mrad equilibrium against light fingertip
+        # contact. The object-displacement guard above still stops a push.
+        arm_tol = 0.008 if phase in ('open', 'close', 'lift') else 0.016
+        reached = (np.max(np.abs(error[owner.arm_indices])) < arm_tol
+                   and abs(error[owner.torso_index]) < owner.config.torso_goal_tolerance)
         if phase == 'open':
             reached &= np.max(np.abs(error[owner.finger_indices])) < 0.001
         elif phase == 'close':
@@ -858,6 +1010,22 @@ class GraspFollower:
                     return self._fail('No bilateral finger contact at completion.', q)
                 if phase == 'lift' and float(obs['object_pos'][2]) < self.plan.object_position[2] + 0.5*owner.config.lift_distance:
                     return self._fail('Arm reached lift pose but the object did not rise.', q)
+                if phase == 'lift':
+                    # A rigidly gripped payload keeps a CONSTANT lateral
+                    # offset from the base for the whole carry. Offsets past
+                    # the pad width mean the pinch caught the apple's edge
+                    # and gravity will shear it out mid-carry (measured
+                    # shed tails: lat -0.16..-0.18 constant from tick 1,
+                    # versus +0.030 for a stable grip). Reject now so the
+                    # grasp is blacklisted and re-planned instead of losing
+                    # six metres of carry to a doomed grip.
+                    base_xy = np.array([q[0] - 2.0, q[1]])
+                    yaw = float(q[2])
+                    d = np.asarray(obs['object_pos'], float)[:2] - base_xy
+                    lat = float(d[0] * -np.sin(yaw) + d[1] * np.cos(yaw))
+                    if abs(lat) > 0.12:
+                        return self._fail(
+                            f'Payload rides {lat:+.3f} m off the pad axis.', q)
                 self.status = 'done'
                 self.hold = target.copy()
             else:

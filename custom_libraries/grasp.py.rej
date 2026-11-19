@@ -1,0 +1,52 @@
+--- custom_libraries/grasp.py
++++ custom_libraries/grasp.py
+@@ -738,10 +770,20 @@
+                         continue
+                     if not self._live_pose_ok(self._full(parked, pre, opened), pre_pos, quat):
+                         raise PlanningError('IK model and loaded robot disagree; check the URDF path/scaling.')
+-                    valid = lambda arm: self._valid(self._full(parked, arm, opened), deadline=deadline)
+-                    rrt = RRTConnect(lower, upper, valid, resolution=cfg.joint_resolution,
+-                                     step_size=cfg.rrt_step, max_iterations=cfg.rrt_iterations, rng=self.rng)
+-                    transit = rrt.plan(start, pre, deadline=min(deadline, time.monotonic()+cfg.rrt_seconds))
++                    # RRT operates in scaled coordinates so metres and radians
++                    # have an explicit relative weight. Collision samples obey
++                    # both the torso and arm resolution limits.
++                    scale = self.motion_scale
++                    valid = lambda scaled: self._valid(
++                        self._full(parked, scaled * scale, opened), deadline=deadline)
++                    resolution = float(np.min(self.motion_resolution / scale))
++                    rrt = RRTConnect(lower / scale, upper / scale, valid,
++                                     resolution=resolution, step_size=cfg.rrt_step,
++                                     max_iterations=cfg.rrt_iterations, rng=self.rng)
++                    transit = rrt.plan(start / scale, pre / scale,
++                                      deadline=min(deadline, time.monotonic()+cfg.rrt_seconds))
++                    if transit is not None:
++                        transit = transit * scale
+                     if transit is None:
+                         stats['transit_fail'] += 1
+                         print(
+@@ -851,12 +893,13 @@
+                 "arm_error=", round(float(
+                     np.max(np.abs(target[owner.arm_indices] - q[owner.arm_indices]))
+                 ), 4),
++                "torso_error_m=", round(float(abs(target[owner.torso_index] - q[owner.torso_index])), 5),
+                 "fingers=", np.round(q[owner.finger_indices], 4),
+                 flush=True,
+             )
+ 
+         if np.max(np.abs(q[self.pinned]-self.plan.waypoints[0, self.pinned])) > 0.03:
+-            return self._fail('Base/torso/head moved away from the planned parked state.', q)
++            return self._fail('Base/head joints moved away from the planned parked state.', q)
+         if phase in ('open', 'transit', 'approach'):
+             rotated = (Rotation.from_quat(self.plan.object_orientation).inv()
+                        * Rotation.from_quat(obs['object_xyzw'])).magnitude()
+@@ -873,7 +917,8 @@
+         action[self.pinned] = target[self.pinned]
+         if phase == 'lift':
+             action[owner.finger_indices] = target[owner.finger_indices]
+-        reached = np.max(np.abs(error[owner.arm_indices])) < 0.008
++        reached = (np.max(np.abs(error[owner.arm_indices])) < 0.008
++                   and abs(error[owner.torso_index]) < owner.config.torso_goal_tolerance)
+         if phase == 'open':
+             reached &= np.max(np.abs(error[owner.finger_indices])) < 0.001
+         elif phase == 'close':

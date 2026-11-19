@@ -49,6 +49,7 @@ class CurvedNavigator:
         self.progress = 0.0
         self.grid_index = 0
         self.status = 'unplanned'
+        self.grid = None
 
     def segment_free(self, a, b, padding=0.0):
         """Check every cell touched by the closed segment (including corners).
@@ -57,7 +58,7 @@ class CurvedNavigator:
         Unlike point sampling, this cannot skip a briefly crossed blocked cell.
         """
         s = self.solver
-        grid = s.inflated_occupancy
+        grid = self.grid if self.grid is not None else s.inflated_occupancy
         rows, cols = grid.shape
         a, b = np.asarray(a, float), np.asarray(b, float)
         a = np.array([(a[0]-s.x_min)/s.cell_size,
@@ -106,8 +107,9 @@ class CurvedNavigator:
         second = self._curve(middle, right, b, depth+1)
         return None if second is None else first[:-1]+second
 
-    def build(self, base, path):
+    def build(self, base, path, grid=None):
         self.reset()
+        self.grid = grid
         self._path = path
         self._grid_world = np.asarray([
             self.solver.convert_to_world(cell) for cell in path
@@ -174,10 +176,10 @@ class CurvedNavigator:
         return np.array([np.interp(distance, self.arc, self.points[:, axis])
                          for axis in range(2)])
 
-    def step(self, base, path):
+    def step(self, base, path, grid=None):
         base = np.asarray(base, float)
         if self._path is not path:
-            self.build(base, path)
+            self.build(base, path, grid)
         if not len(self.points):
             return np.zeros(2)
         total = self.arc[-1]
@@ -206,9 +208,14 @@ class CurvedNavigator:
                 and np.linalg.norm(base-self.points[-1]) <= self.goal_tolerance):
             self.status = 'reached'
             return np.zeros(2)
-        # Prefer long straight targets; shorten where a chord cuts a curve.
-        span = min(self.max_lookahead, total-self.progress)
-        for _ in range(12):
+        # Aim at least min_forward of arc ahead: a target at the feet makes
+        # the +/-clip position command flip-flop every step (a ~0.05 m limit
+        # cycle) that shakes a carried payload out of the grip. Shortening is
+        # still allowed below that when no such chord is collision free.
+        min_forward = 0.15
+        span = max(min(self.max_lookahead, total-self.progress),
+                   min(min_forward, total-self.progress))
+        for _ in range(14):
             end_s = min(total, self.progress+span)
             target = self.point_at(end_s)
             interior = self.points[(self.arc > self.progress) & (self.arc < end_s)]
