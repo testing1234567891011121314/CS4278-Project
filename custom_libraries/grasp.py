@@ -85,6 +85,14 @@ class GraspConfig:
     preferred_opening_clearance: float = 0.016
     palm_box: tuple = (-0.154, -0.032, 0.063, 0.040)
     palm_margin: float = 0.006
+    # When fewer than min_clean_candidates pass the pre-check, sample again
+    # with this larger cap (same sampler and scores) and insert the new clean
+    # candidates after the first pass's clean ones, before its flagged ones.
+    # The mustard bottle had 4 clean candidates of 500 at both depths, all one
+    # top-down grasp; at 2000 the shallow depth gives 52 with varied approach
+    # tilts. Objects with enough clean candidates never pay for the retry.
+    min_clean_candidates: int = 8
+    retry_num_samples: int = 2000
     # Total gap reduction the close phase commands past the point-cloud width.
     # Grip force is linear in it (6.6 N per mm per finger): 0.012 gave ~50 N,
     # which let heavy objects (sugar box, hammer) slide 10-28 mm in the
@@ -938,6 +946,20 @@ class GraspPlanner:
             stats['reason'] = 'no_antipodal_pairs'
             return None
         candidates = self._order_by_precheck(candidates, obs['object_pc'])
+        clean = len(candidates) - stats['precheck_flagged']['total']
+        if clean < cfg.min_clean_candidates and cfg.retry_num_samples > len(candidates):
+            more = self.sample_antipodal_grasps(points=obs['object_pc'], normals=obs['object_normals'],
+                                                com=obs['object_pos'], num_samples=cfg.retry_num_samples)
+            flagged_first = stats['precheck_flagged']
+            more = self._order_by_precheck(more, obs['object_pc'])
+            more_clean = more[:len(more) - stats['precheck_flagged']['total']]
+            stats['precheck_flagged'] = flagged_first
+            key = lambda c: tuple(np.round(np.r_[c[2] / 0.002, c[3] / 0.02]).astype(int))
+            known = {key(c) for c in candidates[:clean]}
+            added = [c for c in more_clean if key(c) not in known]
+            candidates = candidates[:clean] + added + candidates[clean:]
+            stats['candidates'] = len(candidates)
+            stats['precheck_retry'] = dict(clean_before=clean, sampled=len(more), clean_added=len(added))
         lower = self.lower[self.motion_indices].copy()
         upper = self.upper[self.motion_indices].copy()
         start = parked[self.motion_indices].copy()
