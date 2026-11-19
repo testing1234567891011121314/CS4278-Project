@@ -55,6 +55,7 @@ class Solver:
         self.tuck_rate = 0.012            # rad per tick when moving the arm into the carry pose with the object
         self.reach_rate = 0.012           # rad per tick for the final arm move to the goal
         self.reach_backoff_cells = 7      # cells to back off along the path before reaching to the goal
+        self.stop_short_of_goal = True    # end the carry that many cells short instead of driving in and backing off
 
         # Travel targets retained; navigation rebuilds the map after preparation.
         # Pose used while driving to the table: arm forward, ready to plan a
@@ -419,13 +420,20 @@ class Solver:
             return self.reach_goal(obs)
 
         if self.state == 67:
-            goal = self.convert_to_grid(obs["goal_pos"][:2])
+            carrying = getattr(self, "_finger_hold", None) is not None
+            goal = getattr(self, "_carry_stop", None) if carrying else None
+            if goal is None:
+                goal = self.convert_to_grid(obs["goal_pos"][:2])
             action = self.navigate(env, goal)
-            if (getattr(self, "_finger_hold", None) is not None
-                    and self.curved_nav.status == "reached" and self.path):
-                # Arrived at the goal cell with the object: back off along our
-                # own path, then place the object on the goal with the arm.
-                back = self.path[max(0, len(self.path) - 1 - self.reach_backoff_cells)]
+            if carrying and self.stop_short_of_goal and self.path and getattr(self, "_carry_stop", None) is None:
+                # Route to the goal found: stop reach_backoff_cells short of
+                # it, where the arm has room to place the object, instead of
+                # driving onto the goal cell and backing off again.
+                self._carry_stop = tuple(self.path[max(0, len(self.path) - 1 - self.reach_backoff_cells)])
+            if carrying and self.curved_nav.status == "reached" and self.path:
+                # Arrived with the object: back off along our own path (a
+                # no-op when we stopped short), then place it with the arm.
+                back = self.path[max(0, len(self.path) - 1 - (0 if self.stop_short_of_goal else self.reach_backoff_cells))]
                 self._reach_base_goal = self.convert_to_world(back) + np.array([2.0, 0.0])
                 self._reach_phase = "backoff"
                 self.state = 68
