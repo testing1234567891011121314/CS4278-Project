@@ -41,6 +41,27 @@ for t in range(1, steps + 1):
         a = s.get_action(env)
         obs, info = env.step(a)
     q = np.asarray(obs["qpos"])
+    if s.state in (5, 67, 68) and ref is None:
+        # Once, at the start of the retreat: where the fingers touch the object
+        # (gripper frame, mm; x toward the fingertips) and the direction of the
+        # force each finger puts on the object (unit, gripper frame).
+        st = p.getLinkState(env.robot_id, pl.ee, computeForwardKinematics=True, physicsClientId=cid)
+        g_rot = Rotation.from_quat(st[5]).inv()
+        for fid in pl.finger_ids:
+            cs = [c for c in p.getContactPoints(env.robot_id, env.object_id, physicsClientId=cid) if c[3] == fid]
+            if not cs:
+                continue
+            force = sum(c[9] * -np.asarray(c[7]) for c in cs)   # normal on B (object) points to A: force on object is -n*f
+            pos = np.mean([g_rot.apply(np.asarray(c[5]) - np.asarray(st[4])) for c in cs], axis=0)
+            if fid == pl.finger_ids[0]:
+                allc = p.getContactPoints(env.robot_id, env.object_id, physicsClientId=cid)
+                tot = sum(-c[9] * np.asarray(c[7]) + c[10] * np.asarray(c[11]) + c[12] * np.asarray(c[13]) for c in allc)
+                tot2 = sum(-c[9] * np.asarray(c[7]) - c[10] * np.asarray(c[11]) - c[12] * np.asarray(c[13]) for c in allc)
+                print(f"GRASP weight check: contact force sum {np.round(tot, 2).tolist()} / flipped friction "
+                      f"{np.round(tot2, 2).tolist()}; m*g {9.81 * p.getDynamicsInfo(env.object_id, -1, physicsClientId=cid)[0]:.2f} N")
+            print(f"GRASP finger {fid}: contact at {np.round(1000 * pos, 1).tolist()} mm, force dir "
+                  f"{np.round(g_rot.apply(force / max(np.linalg.norm(force), 1e-9)), 3).tolist()}, {np.linalg.norm(force):.0f} N",
+                  flush=True)
     if s.state in (5, 67, 68):
         per = {}
         for c in p.getContactPoints(env.robot_id, env.object_id, physicsClientId=cid):

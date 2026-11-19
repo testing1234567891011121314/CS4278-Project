@@ -172,6 +172,8 @@ r.update(
     err=getattr(solver, "grasp_error", None),
     reach_phase=getattr(solver, "_reach_phase", None),
     nav=getattr(solver.curved_nav, "status", None),
+    carry="yaw" if getattr(solver, "_yaw", None) else ("fixed" if solver.state in (67, 68) or r["success_step"] else None),
+    gentle=getattr(solver, "carry_gentle", None),
     states=states,
     exec_steps=exec_steps,
     exec_waypoints=({ph: solver.grasp_plan.phases.count(ph) for ph in dict.fromkeys(solver.grasp_plan.phases)}
