@@ -466,8 +466,11 @@ Traced with `tools/trace_carry.py`, `SOLVER_SET="carry_speed=0.036,carry_accel=0
   1,500 must come from the hold (60 steps), the arm swing before driving
   (state 67 starts about 290 steps before the base moves fast) and the reach
   (drive onto the goal cell, back off 7 cells, then reach).
-- **Result pending:** a ten-trial reference batch at this speed is running;
-  its result is not yet known.
+- **Result (kept):** ten-trial reference batch at `carry_speed` 0.036,
+  `carry_accel` 0.002: 8 of 10 delivered, mean 36.8/40, the same score as
+  at 18 mm per tick, in 1,712-1,970 steps instead of 2,712-3,028. Lost:
+  banana seed 7 (state 67, step 1,271) and tomato soup can seed 7 (state
+  67, step 1,016), both mid-maze. Both foam brick trials were delivered.
 
 ### Paper reviews
 `paper_review/` (`FInal_extraction.md`, `FInal_synthesis.md`). Takeaways used:

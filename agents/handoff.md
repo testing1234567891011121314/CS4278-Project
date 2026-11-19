@@ -79,8 +79,11 @@ staff and the user:
 - Step breakdown: lift done at about 350-410, state 67 starts at about
   395-460, navigation ends (state 68) at about 1,490-1,680, reach about
   280-310 steps.
-- **Result pending:** a ten-trial reference batch at this speed is running;
-  its result is not known yet. Fill it in here.
+- **Result (kept):** ten-trial reference batch at `carry_speed` 0.036,
+  `carry_accel` 0.002: 8 of 10 delivered, mean 36.8/40, the same score as
+  at 18 mm per tick, in 1,712-1,970 steps instead of 2,712-3,028. Lost:
+  banana seed 7 (state 67, step 1,271) and tomato soup can seed 7 (state
+  67, step 1,016), both mid-maze. Both foam brick trials were delivered.
 
 **Next, toward 1,500.** The full-force grip holds at twice the speed on
 straights and corners for three of four objects. The remaining 300-500 steps
