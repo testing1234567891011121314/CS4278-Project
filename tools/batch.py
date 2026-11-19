@@ -103,8 +103,8 @@ for r in rows:
 for f in crashed:
     print(f"| CRASH {f} | | | | | | | | | 0 |")
 n = len(rows) + len(crashed)
+keys = list(rows[0]["points"]) if rows else []
 if n:
-    keys = list(rows[0]["points"]) if rows else []
     print(f"\ntrials: {n}   delivered: {sum(r['success_step'] is not None for r in rows)}/{n}"
           f"   mean points: {sum(r['total'] for r in rows) / n:.1f}/40")
     print("   ".join(f"{k}: {sum(r['points'][k] > 0 for r in rows)}/{n}" for k in keys))
@@ -113,15 +113,16 @@ if n:
 cols = ["object", "name", "seed", "repeat", "lift_step", "lift_cm", "hold_min_cm", "hold_50", "grasp_pos_err",
         "grasp_ang_err", "success_step", "drop_step", "drop_state", "stopped", "final_state", "steps", "total",
         "carry", "err", "wall_s"]
-with open(os.path.join(out, "results.csv"), "w", newline="") as f:
-    w = csv.writer(f)
-    w.writerow(cols + [f"pts_{k}" for k in keys])
-    for r in rows:
-        d = dict(r, name=NAMES[r["object"]], drop_step=(r["drop"] or {}).get("step"),
-                 drop_state=(r["drop"] or {}).get("state"))
-        w.writerow([d.get(c) for c in cols] + [r["points"][k] for k in keys])
-    for name in crashed:
-        w.writerow([name, "CRASH"])
+if rows or crashed:      # never overwrite an existing results.csv when there are no logs to read
+    with open(os.path.join(out, "results.csv"), "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(cols + [f"pts_{k}" for k in keys])
+        for r in rows:
+            d = dict(r, name=NAMES[r["object"]], drop_step=(r["drop"] or {}).get("step"),
+                     drop_state=(r["drop"] or {}).get("state"))
+            w.writerow([d.get(c) for c in cols] + [r["points"][k] for k in keys])
+        for name in crashed:
+            w.writerow([name, "CRASH"])
 
 if rows:
     seeds = sorted({r["seed"] for r in rows})
