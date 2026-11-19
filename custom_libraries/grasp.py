@@ -93,6 +93,19 @@ class GraspConfig:
     # tilts. Objects with enough clean candidates never pay for the retry.
     min_clean_candidates: int = 8
     retry_num_samples: int = 2000
+    # Rim grasps, generated only when the antipodal sampler finds nothing
+    # (bowl, plate: thin shells whose cloud has no antipodal pairs). Around
+    # the object's vertical axis, each azimuth sector the pad height wide
+    # gives the outermost (rim edge) point; the wall direction there is the
+    # principal direction of the sector points within rim_span of it, in the
+    # radial-vertical plane. The approach runs along the wall into the object,
+    # the closing axis is the wall normal, and the width is the extent of the
+    # cloud along the closing axis inside the pad footprint (so a bowl's
+    # outer finger clears the lip and the inner one meets the inner wall).
+    rim_fallback: bool = True
+    rim_azimuths: int = 24
+    rim_span: float = 0.025
+    rim_depths: tuple = (0.006, 0.012)  # contact centre beyond the rim edge, along the wall
     # Total gap reduction the close phase commands past the point-cloud width.
     # Grip force is linear in it (6.6 N per mm per finger): 0.012 gave ~50 N,
     # which let heavy objects (sugar box, hammer) slide 10-28 mm in the
@@ -577,7 +590,7 @@ class GraspPlanner:
         self.sample_stats = {'valid_points': len(pts), 'antipodal_pairs': 0, 'candidates': 0}
         if len(pts) < 2 or num_samples <= 0:
             return []
-        cloud = pts.copy()
+        cloud, cloud_normals = pts.copy(), ns.copy()
         if len(pts) > cfg.max_cloud_points:
             ix = self.rng.choice(len(pts), cfg.max_cloud_points, replace=False)
             pts, ns = pts[ix], ns[ix]
@@ -632,9 +645,73 @@ class GraspPlanner:
                     candidates.append((pts[i[k]].copy(), pts[j[k]].copy(), centre.copy(), quat, score))
             if len(candidates) >= num_samples:
                 break
+        if not candidates and cfg.rim_fallback:
+            candidates = self.sample_rim_grasps(cloud, cloud_normals)
+            self.sample_stats['rim_candidates'] = len(candidates)
         candidates.sort(key=lambda v: v[4], reverse=True)
         self.sample_stats['candidates'] = min(len(candidates), num_samples)
         return candidates[:num_samples]
+
+    def sample_rim_grasps(self, points, normals):
+        """Rim candidates (see GraspConfig.rim_fallback), as sampler tuples."""
+        cfg = self.config
+        pts, ns = np.asarray(points, float), np.asarray(normals, float)
+        if len(pts) < 20:
+            return []
+        tcp = float(cfg.tcp_offset[0])
+        threshold = 1.0 / np.sqrt(1.0 + cfg.friction_coefficient**2)
+        axis = pts[:, :2].mean(axis=0)
+        rel = pts[:, :2] - axis
+        up = np.array([0., 0., 1.])
+        candidates = []
+        for theta in np.linspace(0., 2*np.pi, cfg.rim_azimuths, endpoint=False):
+            u = np.array([np.cos(theta), np.sin(theta), 0.])
+            t = np.array([-np.sin(theta), np.cos(theta), 0.])
+            rad, tang = rel @ u[:2], rel @ t[:2]
+            sector = (np.abs(tang) <= cfg.pad_height/2) & (rad > 0)
+            if sector.sum() < 10:
+                continue
+            q = np.column_stack((rad[sector], pts[sector, 2]))
+            edge = q[np.argmax(q[:, 0])]
+            near = np.linalg.norm(q - edge, axis=1) <= cfg.rim_span
+            if near.sum() < 5:
+                continue
+            centred = q[near] - q[near].mean(axis=0)
+            s2 = np.linalg.svd(centred, full_matrices=False)[2][0]
+            if np.dot(q[near].mean(axis=0) - edge, s2) < 0:
+                s2 = -s2
+            w2 = np.array([-s2[1], s2[0]])
+            approach = s2[0]*u + s2[1]*up
+            closing = w2[0]*u + w2[1]*up
+            for depth in cfg.rim_depths:
+                c2 = edge + depth*s2
+                along = (q - c2) @ s2
+                foot = (along >= -cfg.pad_length/2 - tcp) & (along <= cfg.pad_length/2 - tcp)
+                if foot.sum() < 3:
+                    continue
+                across = (q[foot] - c2) @ w2
+                lo, hi = across.min(), across.max()
+                width = hi - lo
+                if width < cfg.min_width or width + cfg.min_opening_clearance > cfg.closed_gap + 2*cfg.finger_travel:
+                    continue
+                idx = np.flatnonzero(sector)[foot]
+                n_lo = ns[idx[across <= lo + 0.0015]] @ -closing
+                n_hi = ns[idx[across >= hi - 0.0015]] @ closing
+                quality = min(n_lo.max(), n_hi.max())
+                if quality < threshold:
+                    continue
+                mid = c2 + w2*(lo + hi)/2
+                centre = axis[0]*np.array([1., 0., 0.]) + axis[1]*np.array([0., 1., 0.]) + mid[0]*u + mid[1]*up
+                p1, p2 = centre - closing*width/2, centre + closing*width/2
+                for roll in (0., np.pi/6, -np.pi/6):
+                    a = Rotation.from_rotvec(closing*roll).apply(approach)
+                    for flip in (1., -1.):
+                        y = flip*closing
+                        rotation = np.column_stack((a, y, np.cross(a, y)))
+                        quat = Rotation.from_matrix(rotation).as_quat()
+                        score = float(quality + 0.10*(-a[2]))
+                        candidates.append((p1.copy(), p2.copy(), centre.copy(), quat, score))
+        return candidates
 
     def _precheck_flags(self, candidate, cloud):
         """Reasons (tight / palm / support) a candidate is likely to fail,
