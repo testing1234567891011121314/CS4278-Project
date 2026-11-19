@@ -89,10 +89,11 @@ class Solver:
         # Limit on how fast the object itself turns about the vertical while
         # driving (rad per tick), whether by base yaw or wrist roll; on a
         # 0.5 m corner at 30 mm per tick it would turn 0.06 rad per tick.
-        # Banana + apple: off 9/20 (c24b00b); with the two rolls and 0.025
-        # 17/20, full reference set 20/25. Costs about 90 steps (deliveries
-        # 1,228-1,467).
-        self.object_turn_rate = 0.025
+        # Off (1e9). 0.025 was tested on 450 trials per side (15 objects x 10
+        # seeds x 3): 160 delivered without it, 159 with it, median delivery
+        # 1,304 against 1,402 steps. No gain and no model that predicts one,
+        # so it stays an option for ablation: SOLVER_SET="object_turn_rate=0.025".
+        self.object_turn_rate = 1e9
         self.yaw_fillet_radius = 0.5      # largest corner radius of the object's path (m)
         # Slow the drive once the object slides toward the fingertips. Off:
         # on the reference batch it made no measurable difference (50/60
