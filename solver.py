@@ -562,7 +562,7 @@ class Solver:
         """
         from custom_libraries.yaw_carry import (ClearanceField, route_cells, shortcut, fillet,
                                                 CarryTrajectory, spin_clear, outline, wrap)
-        from custom_libraries.wall_projection import robot_xy_polygons, convex_hull
+        from custom_libraries.wall_projection import robot_xy_polygons
         from custom_libraries.grasp import planning_clock
         env, planner = self.env, self.grasp_planner
         cid = planner.client
@@ -580,8 +580,15 @@ class Solver:
         c, s = np.cos(yaw), np.sin(yaw)
         to_base = np.array([[c, -s], [s, c]])          # row vector @ to_base: world -> base frame
         polygons = [np.asarray(poly) @ to_base for poly in robot_xy_polygons(env)]
+        # The wrist turns the fingers and the object about the (vertical)
+        # gripper axis while carrying, so they are represented by the disc
+        # they sweep: centred on the gripper, out to the farthest object
+        # point (at least 7 cm, which covers the fingers).
         cloud = (np.asarray(obs["object_pc"])[:, :2] - base) @ to_base
-        footprint = outline(polygons + [convex_hull(cloud)])
+        axis = (np.asarray(st[4])[:2] - base) @ to_base
+        reach = max(0.07, float(np.max(np.linalg.norm(cloud - axis, axis=1))))
+        ring = np.linspace(0.0, 2 * np.pi, int(np.ceil(2 * np.pi * reach / 0.01)), endpoint=False)
+        footprint = np.vstack([outline(polygons), axis + reach * np.c_[np.cos(ring), np.sin(ring)]])
         offset = (np.asarray(obs["object_pos"])[:2] - base) @ to_base
         goal = np.asarray(obs["goal_pos"], dtype=float)[:2]
         margin = self.yaw_carry_margin
