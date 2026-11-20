@@ -186,3 +186,123 @@ outcome of a chaotic event, not a fix: another cloud draw, maze or code change
 that alters the approach can put the marker back under the table. From the
 table's edges the arm reaches about 0.25 m under it; a rake from the nearest
 edge did not reach the marker 0.35 m in (change 19).
+
+## 6. Carry and reach (segment 3, in progress)
+
+Written on 2026-11-20 after reading the old notes for known problems
+(`old/agents/fixes.md` 9, 10, 14, 15, 19-24, 31-35); no old code was used.
+
+**How it works.** After the back-off the arm keeps its post-lift pose. The
+torso rises toward the goal's height. The base turns on the spot until the arm
+points down the route, then the object is led along the route with the base
+trailing an arm's length behind on the same route, heading toward the object,
+so the arm stays inside every corner. Where the hand points straight down, the
+wrist's roll keeps the pads' closing line along the object's direction of
+travel. The whole carry, object in hand, is checked for collisions in the
+planning copy before it starts. At the end a short straight reach puts the
+object, not the hand, on the goal.
+
+**Result.** One run of all 15 to delivery, maze seed 42, cloud seed 300
+(`runs/deliver_04/results.csv`), on the uncommitted working tree: **6 of 15
+delivered**, at ticks 2,375-2,680.
+
+| Object | Outcome | Cause |
+|---|---|---|
+| tomato soup can, mustard bottle, potted meat can, banana, foam brick | delivered first carry, ticks 2,375-2,446 | |
+| strawberry | delivered at 2,680 | lost once in the carry, picked up again |
+| apple | not delivered | lost in the carry; it was delivered in two earlier runs (change 23 below) |
+| mug | 27 cm from the goal at tick 3,000 | lost twice in the carry and picked up again; ran out of ticks in the reach. Delivered at 2,466 in a two-object run before change 23 |
+| master chef can | lost in the first 20 ticks of the turn on the spot | the only grasp reachable from the parking pose is tilted 30 degrees, 12 mm from the pad middle |
+| sugar box | lost in every carry | not yet traced; the old notes report it turning about the pads' line because its collision faces are not parallel |
+| bleach cleanser | lost in the carry | 1.13 kg: at the 9-11 mm per tick the budget requires, the base's jolt is about as large as the grip |
+| hammer | lost in every carry | turns in the hand (5 to 27 degrees over 3 m) about the line between the pads, gripped on the handle |
+| bowl, plate | no clear route | the robot comes within 1-7 mm of a wall (bowl) or 2-4 mm into it (plate) at one place on every route tried: with these rim grasps the arm sticks out sideways |
+| large marker | not delivered | chaotic landing again: this run it is lifted at tick 780 and lost later |
+
+**Changes made for the carry, and their effect on grasps**
+
+| # | Change | Fixed | Broke or left failing |
+|---|---|---|---|
+| 21 | First carry: object led at up to 30 mm per tick. | soup can, mustard, apple, foam brick delivered (ticks 1,238-1,582) | potted meat can slides down out of the fingers once the speed passes about 14 mm per tick; banana slips in the corners; nine lost in all |
+| 22 | The object is led only 1.25 times faster than the ticks left require (about 9-11 mm per tick). | potted meat can, banana, strawberry delivered | deliveries now take about 2,400 ticks; nothing is left for a second carry |
+| 23 | Grasp score and tiers use the centre of mass: the closing line should pass beside it by as little as possible (the object turns freely about that line), a centre of mass above the line counts against the grasp, and grasps the weight would swing rank last. Tight fits keep their score order. | no object newly delivered | apple lost in the carry (delivered before); marker's first lift moved from tick 410 to 780 |
+| 24 | Arm solver leaves out a joint stuck on its limit. | mug: the final reach, 0.58 m straight up from a fully stretched arm with the torso at its limit, used to stop at "out of reach" | |
+| 25 | Squeeze 30 to 20 mm (tested, not kept). | | sugar box, bleach, hammer, can still lost |
+
+Changes 21-25 are in the working tree only. The committed solver (`947a0e8`)
+still passes the 15-of-15 pick of section 4 and holds its pose after the
+back-off.
+
+## 7. Changes since section 6 (the side hold)
+
+Written on 2026-11-20. Sections 1-6 are left as they were written; where
+this section contradicts them, this section is the later finding. The carry
+itself, attempt by attempt, is in `NAVIGATE.md`.
+
+**What was wrong in section 6.** Change 23 and the "swings" tier treated an
+object turning about the pads' line as a fault of the grasp. Single-object
+tests showed the opposite for the carry:
+
+- The pads' line is a loose hinge (no spinning friction). Turning the hand 90
+  degrees about it moved the hammer 31 degrees; it settled with its centre of
+  mass below the line. A hold that fights the hinge loses; a hold in which
+  the object already hangs below the line has nothing to lose.
+- The hammer in section 6 was gripped 14 mm from its centre of mass and was
+  still lost. Its fault was not swinging but yaw: held level, the long handle
+  lagged the base's turn on the spot by 15-19 degrees and worked loose.
+- An object whose jolt exceeds the pads' friction creeps down through the
+  pads (hammer: 1 mm per 40 ticks). Only something resting on the fingers
+  stops that.
+
+**New factors** (add to section 1.2, "which proposals survive"):
+
+| Factor | Setting | Effect |
+|---|---|---|
+| Hanging grasp for a long object lying down | `Config.hang_long` (on), `long_length` 0.25 m, `long_ratio` 2.0, `hang_grip` 0.035 m | Grasps that close across the length, between the centre of mass and the nearer end, are put first and form their own tier in place of "swings". Applies to the hammer only among the 15. |
+| Mass ranking on or off | `Config.rank_by_mass` (on) | Off restores the ranking of section 4 (nearness to the middle of the bounding box, no "swings" tier). |
+
+**Change log, continued**
+
+| # | Change | Fixed | Broke or left failing |
+|---|---|---|---|
+| 26 | `rank_by_mass` switch for change 23. | Nothing by itself; allows comparison. | On cloud 300 the hammer's first grasp is the same either way. |
+| 27a | Hammer gripped at least 6 cm from its centre of mass, either side (first version of the hanging grasp). | Lifted at tick 162 as before; hangs on the z axis in the side hold; carried 9.3 m instead of 2.1 m. | Gripped on the handle side, nothing stops it creeping down: it spun onto the handle's narrow side (grip 115 to 89 N) and slid out. |
+| 27b | Hammer gripped between the centre of mass and the head, at least 3.5 cm from the centre of mass. | **Hammer delivered** (ticks 2,392, 2,361 alone; 2,354 in the full run): the head is above the fingers and comes to rest on them. Lift still at tick 162. | |
+| 28-31 | The hold for the carry (roll level, lay level, fold the arm). No change to which grasp is chosen. | See `NAVIGATE.md`. | |
+
+**Pick results with these changes** (lift ticks from `runs/deliver_05`, same
+maze and cloud as section 4): all 15 lifted and held 50 ticks. Lift ticks are
+within 5 of `runs/deliver_04` for every object, hammer included. The marker's
+first lift is still at tick 780 (change 23, which is still on); in section 4,
+before change 23, it was 410.
+
+**Still open on the grasp side**
+
+- Change 23 has not delivered anything and cost the apple and the marker's
+  lift time. Whether to switch it off (`rank_by_mass=False`) is undecided;
+  the hammer no longer depends on it.
+- The plate's rim grasp gives 13 N per finger. Hung on edge it is lost after
+  6 m; it may be better carried flat with a finger under it.
+- Master chef can: still only the 30-degree tilted grasp is within reach.
+
+**Correction (later the same day).** A full run with `rank_by_mass=False`
+(`runs/deliver_07`, `NAVIGATE.md` attempt 7) did not bring back the apple or
+the marker's lift time: the apple is still lost in the carry and the marker
+is first lifted at tick 757. The statements above and in section 6 that
+change 23 cost those two are therefore not supported by that switch alone.
+The switch does trade two objects: the sugar box is delivered with it off
+(tick 2,431) and the mug with it on (tick 2,505).
+
+**Later the same day: what else was tried on the grasp side** (details in
+`NAVIGATE.md`, attempts 8-10). None of these is on by default.
+
+| Tried | Result |
+|---|---|
+| Fingers fully closed for the carry (`carry_squeeze`) | 9 of 15: apple, mug and sugar box squeezed out |
+| Half the squeeze (15 mm) on the hanging sugar box | lost sooner |
+| The hanging-grasp rule widened to the sugar box (`long_length` 0.17, `long_ratio` 1.7, `long_mass` 0.3) | sugar box hangs and is carried 18.7 m of 21.4, then creeps out of the pads; in the full run the mustard bottle needed four re-picks |
+| Surfaces under the pads checked for being parallel (`PlanningSim.wedge`, recorded as `wedge_deg`) | sugar box 2 degrees, soup can 1: the sugar box is not squeezed out as a wedge |
+
+The pick itself is unchanged by all of the above: in `runs/deliver_11` every
+object is lifted at the tick it was in `runs/deliver_09`.
+

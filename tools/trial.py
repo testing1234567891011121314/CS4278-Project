@@ -27,12 +27,44 @@ def quiet():
         yield
 
 
-def make_env(object_idx: int, maze_seed: int, cloud_seed=None, gui: bool = False):
+def object_names(library: str = None) -> list[str]:
+    """The objects in the order of the env's index: the course's 15, or the
+    folders of `library` (a path under the project, e.g. assets/ycb_extra)."""
+    if library is None:
+        return list(OBJECT_NAMES)
+    return [d.name for d in sorted((ROOT / library).glob("*")) if d.is_dir()]
+
+
+def make_env(object_idx: int, maze_seed: int, cloud_seed=None, gui: bool = False, library: str = None):
     """A reset env. `cloud_seed` fixes the point-cloud sample; None leaves it
-    unseeded, as in the graded runs."""
+    unseeded, as in the graded runs. `library` reads the object from another
+    folder of objects in the course's format (see tools/ycb_library.py)."""
     import trimesh
     os.chdir(ROOT)                      # the env loads its assets by relative path
     from pick_nav_reach_env_multi import PickNavReachEnv
+    if library is not None:
+        folders = [d for d in sorted((ROOT / library).glob("*")) if d.is_dir()]
+
+        class LibraryEnv(PickNavReachEnv):
+            """The course env with its object read from another folder. This
+            is the env's own `_load_object_table` with only the folder changed."""
+
+            def _load_object_table(self):
+                import numpy as np
+                import pybullet as p
+                import pybullet_data
+                p.setAdditionalSearchPath(pybullet_data.getDataPath())
+                p.loadURDF("table/table.urdf", baseOrientation=p.getQuaternionFromEuler([0, 0, np.pi / 2]),
+                           useFixedBase=1)
+                folder = folders[self.object_idx]
+                self.object_id = p.loadURDF(str(folder / "coacd_decomposed_object_one_link.urdf"),
+                                            basePosition=[0, 0, 1.0], useFixedBase=0)
+                self.object_canonical_mesh = trimesh.load(str(folder / "textured.obj"), force="mesh")
+                points, faces = trimesh.sample.sample_surface(self.object_canonical_mesh, 1024)
+                self.object_canonical_pc = points.astype(np.float32)
+                self.object_canonical_normals = self.object_canonical_mesh.face_normals[faces].astype(np.float32)
+
+        PickNavReachEnv = LibraryEnv
 
     folder = ROOT / "runs" / "tmp"
     folder.mkdir(parents=True, exist_ok=True)

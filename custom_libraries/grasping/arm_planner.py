@@ -24,6 +24,7 @@ class PlannerSettings:
     close_margin: float = 0.002         # least gap to the scene during the approach and the lift
     object_margin: float = 0.0015       # least gap between the open hand and the object at the grasp
     tight_margin: float = -0.0015       # the same for a tight fit: the pads may press into the object this far
+    tight_slack: float = 0.0005         # tight fits pressing in this much more than the best one are dropped
     transit_object_margin: float = 0.02  # least gap between the robot and the object in transit
     wedged: float = 0.003               # an object this deep inside a fixed body counts as wedged into it
     rim_offsets: tuple = (0.0, 0.004, -0.004, 0.008, -0.008)   # depths tried round a thin-wall grasp, metres
@@ -128,7 +129,7 @@ def hands_that_fit(candidates: list[GraspCandidate], obj: ObjectState, sim: Plan
     run on every candidate before any is tested for reach."""
     sim.set_object(obj.position, obj.orientation)
     collision.focus(obj.centre[:2])
-    roomy, tight = [], []
+    kept, overlap = [], []
     near = collision.near
 
     def gaps(candidate: GraspCandidate) -> Optional[float]:
@@ -157,11 +158,15 @@ def hands_that_fit(candidates: list[GraspCandidate], obj: ObjectState, sim: Plan
                 if gap is not None:
                     break
         if gap is not None:
-            (tight if candidate.kind == "tight" else roomy).append((gap, candidate))
+            kept.append((gap, candidate))
+            if candidate.kind == "tight":
+                overlap.append(gap)
     # A tight fit goes on most easily where the real shape is narrowest: the
-    # cloud cannot tell, the planning copy can.
-    tight.sort(key=lambda pair: -pair[0])
-    return [c for _, c in roomy] + [c for _, c in tight]
+    # cloud cannot tell, the planning copy can. Tight fits that press into the
+    # object clearly more than the best one are dropped; the order of the rest
+    # is left as it came.
+    least = max(overlap, default=0.0) - settings.tight_slack
+    return [c for gap, c in kept if c.kind != "tight" or gap >= least]
 
 
 def grasp_pose(candidate: GraspCandidate, opened, sim: PlanningSim, collision: CollisionChecker,
@@ -187,7 +192,7 @@ def grasp_pose(candidate: GraspCandidate, opened, sim: PlanningSim, collision: C
 def straight_line(q_start, direction, distance: float, sim: PlanningSim, collision: CollisionChecker,
                   rng: np.random.Generator, deadline: Deadline, settings: PlannerSettings,
                   object_margin: Optional[float] = None, load_after: Optional[float] = None,
-                  least: Optional[float] = None) -> Optional[np.ndarray]:
+                  least: Optional[float] = None, why: Optional[dict] = None) -> Optional[np.ndarray]:
     """A (K, 15) joint path that moves the gripper `distance` metres along
     `direction` in a straight line with its orientation fixed, starting at
     `q_start`. Each waypoint continues from the one before, so the arm does
@@ -208,6 +213,11 @@ def straight_line(q_start, direction, distance: float, sim: PlanningSim, collisi
             collision.is_free(q, settings.close_margin, object_margin=object_margin, load_margin=loaded)
         if not ok:
             reached = (k - 1) * settings.line_step
+            if why is not None:
+                why["stopped"] = (f"after {reached:.2f} of {distance:.2f} m: " +
+                                  ("out of reach" if q is None else
+                                   "joint jump" if np.abs(q[joints] - path[-1][joints]).max() > settings.max_joint_jump
+                                   else f"blocked {collision.clearances(q, with_object=False)}"))
             return np.array(path) if least is not None and reached >= least else None
         path.append(q)
     return np.array(path)

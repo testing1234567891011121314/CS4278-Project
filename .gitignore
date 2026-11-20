@@ -1,3 +1,5 @@
 __pycache__/
 *.pyc
 runs/
+# generated from the assets/ycb_urdfs submodule by tools/ycb_library.py
+assets/ycb_extra/

@@ -1,0 +1,16 @@
+object,name,rest_z,lift_tick,max_lift_cm,hold_50,held_at_end,backed_off_m,state,attempts,failure,grasp_error_mm,errors,ticks,wall_s,delivered_tick,goal_cm,navigate_tick
+0,master_chef_can,0.697,158,15.6,True,False,0.32,stopped,8,object lost during the carry; object moved during the drive; object moved during the drive; no grasp plan; no parking pose; no parking pose; no parking pose; no parking pose,,0,1515,174.7,,1745.2,425
+1,sugar_box,0.65,209,23.6,True,False,15.12,stopped,2,object lost during the carry; object lost during the carry,9.9,0,2766,41.3,,268.3,401
+2,tomato_soup_can,0.677,164,22.5,True,True,17.57,done,1,,0.6,0,2432,34.3,2401,1.0,292
+3,mustard_bottle,0.66,350,22.3,True,True,17.79,done,5,object moved during the drive; object lost during the back-off; object moved during the drive; no grasp plan,9.1,0,2671,79.4,2643,1.6,1257
+4,potted_meat_can,0.668,156,23.1,True,True,17.57,done,1,,2.7,0,2399,32.7,2367,0.7,299
+5,banana,0.645,165,25.9,True,True,17.56,done,1,,4.8,0,2432,32.6,2401,0.3,281
+6,strawberry,0.646,231,26.0,True,True,17.6,navigate,5,object lost during the carry; object lost during the carry; object lost during the lift; object moved before the close,25.1,0,3000,64.2,,51.4,332
+7,apple,0.662,216,23.7,True,True,17.57,done,1,,0.6,0,2442,36.5,2411,1.5,332
+8,bleach_cleanser,0.652,498,15.6,True,False,0.95,stopped,8,object moved during the drive; no grasp plan; object lost during the carry; no grasp plan; object lost during the carry; no grasp plan; object lost during the carry; object moved during the drive,,0,2664,178.5,,1663.7,751
+9,bowl,0.654,190,24.4,True,True,17.58,done,1,,4.6,0,2366,52.2,2321,0.2,319
+10,mug,0.045,271,85.5,True,True,19.04,done,3,object moved during the drive; object lost during the carry,4.4,0,2531,72.2,2501,0.0,373
+11,plate,0.641,291,15.4,True,False,4.68,stopped,8,dragged to the edge; object lost during the carry; no grasp plan; object lost during the lift; no grasp plan; no parking pose; no parking pose; no parking pose,,0,1476,213.5,,1409.6,505
+12,large_marker,0.011,780,88.6,True,True,17.86,done,4,object moved before the close; object lost during the lift; object moved before the close,6.7,0,2706,95.3,2676,0.3,882
+13,hammer,0.644,162,25.5,True,False,6.0,stopped,5,object lost during the carry; object lost during the carry; object lost during the carry; object lost during the carry; object lost during the carry,5.7,0,3000,198.6,,1212.4,315
+14,foam_brick,0.652,165,24.5,True,True,17.56,done,1,,0.7,0,2432,102.3,2401,0.4,275

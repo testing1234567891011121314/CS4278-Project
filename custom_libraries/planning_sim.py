@@ -303,6 +303,27 @@ class PlanningSim:
             p.resetBasePositionAndOrientation(body, [0, 0, -50.0], [0, 0, 0, 1], physicsClientId=self.client)
         return to_object, to_others
 
+    def wedge(self, position, turn: np.ndarray, opening: float, look: float = 0.03) -> float:
+        """How far from parallel the two surfaces are that the pads would
+        close on, in radians, with the hand placed as for `hand_clearance`:
+        the angle between the object's surface normal nearest one finger and
+        the reversed normal nearest the other. The pads squeeze a wedge out
+        of the hand once half this angle passes the friction angle."""
+        from custom_libraries.collision import _quaternion
+        orientation = _quaternion(turn).tolist()
+        value = self.gripper.finger_joint(opening)
+        normals = []
+        for body, closed, slide in zip(self._hand["fingers"], self._hand["closed"], self._hand["slide"]):
+            p.resetBasePositionAndOrientation(body, (np.asarray(position) + turn @ (closed + slide * value)).tolist(),
+                                              orientation, physicsClientId=self.client)
+            points = p.getClosestPoints(body, self.object_id, look, physicsClientId=self.client)
+            p.resetBasePositionAndOrientation(body, [0, 0, -50.0], [0, 0, 0, 1], physicsClientId=self.client)
+            if not points:
+                return 0.0
+            normals.append(np.array(min(points, key=lambda c: c[8])[7]))
+        cos = float(np.clip(normals[0] @ -normals[1], -1.0, 1.0))
+        return float(np.arccos(cos))
+
     # ------------------------------------------------------------------- state
 
     def set_robot(self, qpos) -> None:

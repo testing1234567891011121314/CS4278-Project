@@ -15,7 +15,8 @@ the segments after it. Requirement ids refer to `docs/requirements.md`.
 **Status (2026-11-20).** Segments 1 and 2 and the back-off of segment 3 are
 written and run for all 15 objects on one maze by `tools/pick_all.py`; the
 per-object results and every grasp change are in `GRASP.md`. `NAVIGATE` and
-`REACH` are not written: after the back-off the solver holds its pose. Of
+`REACH` are written but not finished: 11 of 15 objects are delivered in one
+run (`runs/deliver_11`; `NAVIGATE.md` compares every attempt). Of
 segment 0, only the headless env with a seeded cloud (`tools/trial.py`) and
 the pick measurement (`tools/pick_all.py`) exist; `tools/score.py` and
 `tools/batch.py` are still the old solver's and do not run against this one.

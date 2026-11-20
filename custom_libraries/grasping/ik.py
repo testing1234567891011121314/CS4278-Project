@@ -31,6 +31,13 @@ def rotation_vector(matrix: np.ndarray) -> np.ndarray:
     return axis / (2.0 * np.sin(angle)) * angle
 
 
+def axis_rotation(axis, angle: float) -> np.ndarray:
+    """The 3x3 rotation by `angle` radians about the unit vector `axis`."""
+    x, y, z = np.asarray(axis, dtype=float)
+    k = np.array([[0.0, -z, y], [z, 0.0, -x], [-y, x, 0.0]])
+    return np.eye(3) + np.sin(angle) * k + (1.0 - np.cos(angle)) * (k @ k)
+
+
 def jacobian(sim: PlanningSim, qpos) -> np.ndarray:
     """(6, 8) Jacobian of the gripper frame (linear on top of angular) with
     respect to the torso and arm joints, at `qpos`."""
@@ -81,5 +88,12 @@ def solve(sim: PlanningSim, position, turn: np.ndarray, seed_qpos, rng: np.rando
             error[3:] *= min(1.0, 0.50 / max(np.linalg.norm(error[3:]), 1e-12))
             j = jacobian(sim, q)
             step = j.T @ np.linalg.solve(j @ j.T + damping ** 2 * np.eye(6), error)
+            # A joint already on a limit that the step would push past it
+            # cannot help: leave it out and let the others make the move.
+            stuck = limited & (((q[joints] >= upper - 1e-9) & (step > 0)) | ((q[joints] <= lower + 1e-9) & (step < 0)))
+            if stuck.any():
+                free = j[:, ~stuck]
+                step = np.zeros(len(joints))
+                step[~stuck] = free.T @ np.linalg.solve(free @ free.T + damping ** 2 * np.eye(6), error)
             q[joints] = np.where(limited, np.clip(q[joints] + step, lower, upper), q[joints] + step)
     return None

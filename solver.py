@@ -23,14 +23,16 @@ from custom_libraries.collision import CollisionChecker
 from custom_libraries.common import Deadline, Status
 from custom_libraries.grasping import arm_planner, ik
 from custom_libraries.grasping.arm_planner import GraspPlan
-from custom_libraries.grasping.candidates import GraspCandidate, antipodal_candidates, rake_candidates
-from custom_libraries.grasping.executor import GraspExecutor, PathStepper, grasp_error, is_held
+from custom_libraries.grasping.candidates import CandidateSettings, GraspCandidate, antipodal_candidates, \
+    rake_candidates
+from custom_libraries.grasping.executor import ExecutorSettings, GraspExecutor, PathStepper, grasp_error, is_held
+from custom_libraries.navigation import carry
 from custom_libraries.navigation.base_follower import BaseFollower
 from custom_libraries.navigation.grid import OccupancyGrid
 from custom_libraries.navigation.parking import (ParkingPose, ParkingSettings, choose_parking, make_follower,
                                                   travel_order)
 from custom_libraries.planning_sim import PlanningSim, rotation
-from custom_libraries.robot import RobotModel
+from custom_libraries.robot import RobotModel, wrap_angle
 from custom_libraries.world import ObjectState, RestDetector, World
 
 
@@ -67,7 +69,7 @@ class Config:
     grasp_ticks: int = 260
     drag_ticks: int = 260
     back_off_ticks: int = 260
-    navigate_ticks: int = 2000
+    navigate_ticks: int = 2900       # the carry is paced to the ticks left in the episode, which bound it
     reach_ticks: int = 200
     settle_wait_ticks: int = 120     # an object still moving after this is approached as it is
     min_retry_ticks: int = 300       # no new attempt is started with fewer ticks left
@@ -93,6 +95,9 @@ class Config:
     finger_stiffness: float = 6000.0  # newtons per metre the finger target lies inside the object (measured:
                                      # 12.5 N at 1.9 mm, 180 N at 30 mm)
     squeeze: float = 0.030           # how far inside the object the finger targets are put, metres
+    pad_grip_radius: float = 0.006   # radius at which a pad's friction acts against the object turning on it
+    rank_by_mass: bool = True        # grasps are ranked by where the centre of mass lies from the pads' line
+                                     # (False: by nearness to the middle of the object, and swinging is ignored)
     grip_safety: float = 2.0         # the grip's friction must hold this many times the object's weight
     moment_safety: float = 2.0       # the pads must resist this many times the weight's turning moment, or
                                      # the object is first dragged to the edge of what it lies on
@@ -101,6 +106,41 @@ class Config:
                                      # kept sliding when the hand stopped and fell off the table
     drag_slack: float = 0.08         # a dragged object may trail the base by this much, metres
     rake_clear: float = 0.35         # an object raked out from under something ends this far beyond its edge
+    carry_clearances: tuple = (0.42, 0.38, 0.34)   # distances the carry's route keeps from walls, in order tried
+    carry_margin: float = 0.012      # least gap between the robot with its load and the scene during the carry
+    aligned_share: float = 0.2       # share of the base's jolt that still acts across the pads when the wrist
+                                     # keeps their closing line along the direction of travel
+    reach_seconds: float = 6.0       # CPU-time budget for planning the final reach
+    # The hold for the carry. The object turns almost freely about the line
+    # between the pads, so it is carried hanging below that line.
+    carry_hold: bool = True          # re-pose the hand before the carry (False: carry in the post-lift pose)
+    level_pads: float = 30.0         # a pads' line tilted more than this from level is rolled level, degrees
+    hang_lever: float = 0.04         # a centre of mass this far from the pads' line hangs from it, metres
+    askew: float = 20.0              # and this far from straight below it, the hand is laid level, degrees
+    hold_reach: float = 0.70         # the hand is pulled in until the object is this far from the base's centre
+    swing_lever: float = 1.0         # a centre of mass this far below the pads along the fingers: the wrist
+                                     # keeps the pads' line across the travel instead of along it, metres.
+                                     # 1.0 = never; 0.06 was used with the hanging sugar box (attempt 10)
+    stand_up: float = 2.0            # a hand pointing down at least this steeply (z of its axis) is stood
+                                     # upright so the wrist's roll can steer; 2.0 = never. Tested at 0.5 and not
+                                     # kept: the object tilts with the hand, its weight then turns it about the
+                                     # pads' line, and the can, sugar box and mug were lost sooner
+    carry_squeeze: bool = False      # the fingers are commanded fully closed for the carry. Tested and not kept:
+                                     # 9 of 15 delivered against 11 without (apple, mug and sugar box squeezed out)
+    hold_settle: int = 20            # ticks waited after the re-pose for the object to stop swinging
+    hold_rate: float = 0.03          # fastest any arm joint moves while the hold is taken, rad per tick
+    hang_long: bool = True           # a long object lying down is gripped between its centre of mass and its
+                                     # nearer end, so it hangs on end from the pads with that end (a hammer's
+                                     # head) above the fingers: it does not lag the base's turns, and if it
+                                     # creeps down through the pads the head comes to rest on them
+    long_length: float = 0.25        # "long": at least this many metres
+    long_ratio: float = 2.0          # and this many times as long as wide
+    long_mass: float = 0.0           # and at least this heavy, kg. With 0.17 m, 1.7 and 0.3 kg the rule also
+                                     # takes the sugar box, which then hangs and is carried 18.7 m of 21.4
+                                     # before it creeps out of the pads; not kept (NAVIGATE.md, attempt 10)
+    hang_grip: float = 0.035         # least distance along a long object from the grip to the centre of mass
+    carry_reserve: int = 300         # ticks kept back from the carry for its setup (raise, turn, rolls) and the reach
+    carry_haste: float = 1.25        # the object is led this many times faster than the ticks left require
     max_found: int = 1600            # grasp candidates taken from the cloud
     max_candidates: int = 60         # of those the hand fits, the best this many go on
 
@@ -128,7 +168,8 @@ class Scene:
     sim: PlanningSim
     collision: CollisionChecker
     world: World
-    grid: OccupancyGrid
+    grid: OccupancyGrid                 # for the drive to the object: the base may reach under a table
+    carry_grids: list[OccupancyGrid]    # for the carry: tables are obstacles; one grid per distance kept from walls
 
 
 @dataclass
@@ -149,6 +190,12 @@ class Attempt:
     grasp_plan: Optional[GraspPlan] = None
     executor: Optional[GraspExecutor] = None
     retreat: Optional[BaseFollower] = None
+    carry: Optional[carry.CarryFollower] = None
+    carry_failures: int = 0                         # carries or reaches that failed with the object still held
+    hold: Optional[PathStepper] = None              # the move into the hold for the carry
+    hold_wait: int = 0
+    reach: Optional[PathStepper] = None
+    reach_wait: int = 0
     drag_from: Optional[tuple] = None               # where the base and the object were when a drag began
     lost: int = 0                                   # ticks in a row without the hold, after the grasp
     search: Optional[dict] = None                   # what the candidate and parking searches found
@@ -281,7 +328,10 @@ class Solver:
             grid = OccupancyGrid.from_world(world, self.config.grid_resolution,
                                             sim.base_radius + self.config.wall_margin,
                                             obstacle_radius=self.config.table_keepout)
-            self.scene = Scene(robot=sim.robot, sim=sim, collision=CollisionChecker(sim), world=world, grid=grid)
+            carry_grids = [OccupancyGrid.from_world(world, self.config.grid_resolution, keep, obstacle_radius=keep)
+                           for keep in self.config.carry_clearances]
+            self.scene = Scene(robot=sim.robot, sim=sim, collision=CollisionChecker(sim), world=world, grid=grid,
+                               carry_grids=carry_grids)
         return self.scene
 
     def _ready_pose(self, scene: Scene, q: np.ndarray) -> Optional[np.ndarray]:
@@ -354,11 +404,30 @@ class Solver:
             top = float(obj.cloud[:, 2].max())
             found = antipodal_candidates(obj, scene.sim.gripper,
                                          lambda xy: scene.world.support_under(np.array([xy[0], xy[1], top])),
-                                         limit=config.max_found)
+                                         limit=config.max_found,
+                                         settings=CandidateSettings(central="mass" if config.rank_by_mass
+                                                                    else "centre"))
             strong = [c for c in found if self._can_carry(c)]
-            candidates = arm_planner.hands_that_fit(strong, obj, scene.sim, scene.collision)[:config.max_candidates]
+            fit = arm_planner.hands_that_fit(strong, obj, scene.sim, scene.collision)
+            # A long object lying down lags every turn of the base if it is
+            # held level. Gripped across its length, between the centre of
+            # mass and the nearer end, it hangs on end from the pads with
+            # that end up: those grasps go first.
+            axis = obj.long_axis(config.long_length, config.long_ratio) if config.hang_long else None
+            if axis is not None and (abs(axis[2]) > 0.5 or self._grip(found[0])[2] < config.long_mass if found
+                                     else True):
+                axis = None                                         # standing on end already, or light
+            if axis is not None:
+                ends = (obj.cloud - obj.position) @ axis
+                if ends.max() > -ends.min():
+                    axis = -axis                                    # `axis` points from the centre of mass to the nearer end
+                fit = [c for c in fit if self._hangs(c, obj, axis)] + [c for c in fit if not self._hangs(c, obj, axis)]
+            candidates = fit[:config.max_candidates]
             # Tiers, tried in this order whatever the scores: grasps that can
             # resist the weight's turning moment before those that cannot;
+            # grasps the weight will not swing about the pads' line before
+            # those it will (for a long object lying down, grasps it hangs
+            # from before the rest);
             # where the object hangs over an edge, grasps on the overhanging
             # part (the fingers have room below it) before the rest; grasps
             # with at least half the pad on the object before pinches with
@@ -372,11 +441,12 @@ class Solver:
                 tried = any(np.linalg.norm(local - t) < 0.015 for t in self._tried_grasps)
                 shallow = c.offset > (scene.sim.gripper.pad_tip + scene.sim.gripper.pad_back) / 2.0 + \
                     (scene.sim.gripper.pad_tip - scene.sim.gripper.pad_back) / 4.0
-                tiers.append(8 * tried + 4 * self._cannot_lift(c, obj) +
+                tiers.append(16 * tried + 8 * self._cannot_lift(c, obj) + 4 * ((not self._hangs(c, obj, axis)) if axis is not None else
+                                  (config.rank_by_mass and self._swings(c, obj))) +
                              2 * (height > min(under) + 0.05) + 1 * shallow)
             # If nothing can lift the object as it lies on a table, rake it
             # to the table's edge first: there the hand can reach round it.
-            rake = attempt.pick_mode == "table" and not self._dragged and all(t & 4 for t in tiers)
+            rake = attempt.pick_mode == "table" and not self._dragged and all(t & 8 for t in tiers)
             toward = scene.robot.base_pose(self._hold)[:2] - obj.centre[:2]
             if rake:
                 candidates = rake_candidates(obj, scene.sim.gripper, support, toward)
@@ -444,10 +514,13 @@ class Solver:
                 return self._failed("no grasp plan")
             attempt.grasp_plan = plan
             c = plan.candidate
+            scene.sim.set_object(obj.position, obj.orientation)
+            stats["wedge_deg"] = round(float(np.degrees(scene.sim.wedge(*c.gripper_pose(), c.opening))), 1)
             stats["grasp"] = dict(kind=c.kind, width_mm=round(1000 * c.width, 1), opening_mm=round(1000 * c.opening, 1),
                                   offset_mm=round(1000 * c.offset, 1), approach=np.round(c.approach_axis, 2).tolist(),
                                   closing=np.round(c.closing_axis, 2).tolist(), lift_m=round(plan.lift_height, 3))
-            attempt.executor = GraspExecutor(plan, self.env, scene.sim, config.lift_height, config.hold_ticks)
+            attempt.executor = GraspExecutor(plan, self.env, scene.sim, config.lift_height, config.hold_ticks,
+                                             ExecutorSettings(squeeze=config.squeeze))
         action, status = attempt.executor.step(obs)
         if attempt.executor.phase == "hold" and attempt.lifted_tick is None:
             attempt.lifted_tick = self.tick
@@ -604,23 +677,48 @@ class Solver:
         contact, far from the centre (a plate held by its rim), cannot."""
         grip, _, mass = self._grip(candidate)
         gripper = self.scene.sim.gripper
-        arm = obj.centre - candidate.centre
+        arm = obj.position - candidate.centre
         moment = np.cross(arm, [0.0, 0.0, -9.8 * mass])
         moment = moment - (moment @ candidate.closing_axis) * candidate.closing_axis   # turning about the pads' line is free
         contact = min(gripper.pad_tip - gripper.pad_back, 2.0 * (gripper.pad_tip - candidate.offset))
         return bool(np.linalg.norm(arm[:2]) >= 0.03 and
                     grip * contact / 2.0 < self.config.moment_safety * np.linalg.norm(moment))
 
+    def _swings(self, candidate: GraspCandidate, obj: ObjectState) -> bool:
+        """Whether the object's weight would turn it in this grasp. Nothing
+        but the pads' friction on a small patch resists turning about the
+        line between them, so a centre of mass to one side of that line swings
+        the object round until it hangs below it."""
+        grip, friction, mass = self._grip(candidate)
+        off = obj.position - candidate.centre
+        off = off - (off @ candidate.closing_axis) * candidate.closing_axis     # from the line to the centre of mass
+        level = np.cross(candidate.closing_axis, [0.0, 0.0, 1.0])               # horizontal, across the line
+        length = np.linalg.norm(level)
+        sideways = abs(float(off @ level)) / length if length > 1e-6 else 0.0
+        return bool(9.8 * mass * sideways > 2.0 * friction * grip * self.config.pad_grip_radius)
+
+    def _hangs(self, candidate: GraspCandidate, obj: ObjectState, axis: np.ndarray) -> bool:
+        """Whether a long object would hang on end from this grasp, its
+        nearer end up. `axis` points along its length from the centre of mass
+        to that end: the pads close across the length, on that side of the
+        centre of mass."""
+        along = float((candidate.centre - obj.position) @ axis)
+        return bool(abs(float(candidate.closing_axis @ axis)) < 0.35 and along >= self.config.hang_grip)
+
     def _carry_step(self, direction) -> float:
+        """Base speed for the back-off, metres per tick."""
+        return float(np.clip(self._friction_step(), self.config.min_carry_step, self.config.carry_step))
+
+    def _friction_step(self) -> float:
         """Base speed in metres per tick at which the held object does not
-        slide across the pads when the base moves along `direction`.
+        slide across the pads.
 
         The env drives the base by position control: within each tick it
         covers most of the gap to its target in the first physics step and
         little in the last, so its speed jumps at every tick. The object
         follows that jump only by friction. (A grasp closing along the travel
-        line does not help: at 13.6 mm per tick the 1 kg can swung 25 degrees
-        and slid out; at 3 mm per tick it stayed.)"""
+        line does not help by itself: at 13.6 mm per tick the 1 kg can swung
+        25 degrees and slid out; at 3 mm per tick it stayed.)"""
         import pybullet as p
         env, config, robot = self.env, self.config, self.scene.robot
         client = env.pb_physics_client
@@ -634,26 +732,366 @@ class Solver:
         # Speed jump at a tick boundary, per metre of step, as an acceleration over one physics step.
         lag = 1.0 / (1.0 - (1.0 - gain) ** steps)
         jolt = gain * lag * (1.0 - (1.0 - gain) ** (steps - 1)) / dt ** 2
-        limit = config.carry_safety * friction * grip / (max(mass, 1e-6) * jolt)
-        return float(np.clip(limit, config.min_carry_step, config.carry_step))
+        return float(config.carry_safety * friction * grip / (max(mass, 1e-6) * jolt))
 
     def _navigate(self, obs) -> tuple[np.ndarray, Optional[State]]:
-        """Segment 3, not written yet: the solver holds its pose with the
-        object in the hand."""
-        return self._hold, None
+        """Segment 3. Carry the object through the maze: the object is led
+        along the route, the base trailing an arm's length behind (see
+        navigation/carry.py). Exit: REACH. Failures: no clear route, object
+        lost, base blocked."""
+        scene, attempt, config = self._scene(obs), self.attempt, self.config
+        robot = scene.robot
+        if config.carry_hold and attempt.carry is None and attempt.hold_wait < config.hold_settle:
+            # First the hold for the carry: the hand is re-posed, slowly.
+            if attempt.hold is None:
+                limit = np.full(len(self._hold), config.hold_rate)
+                limit[robot.torso] = 0.002
+                path = self._plan_hold(obs)
+                if config.carry_squeeze:
+                    fingers = list(robot.fingers)
+                    path[:, fingers] = robot.lower[fingers]
+                    if len(path) < 2:
+                        path = np.array([self._hold, path[0]])       # only the fingers change
+                attempt.hold = PathStepper(path, limit)
+                if len(attempt.hold.path) < 2:
+                    attempt.hold_wait = config.hold_settle           # nothing to change: no wait
+            attempt.lost = 0 if is_held(self.env, robot) else attempt.lost + 1
+            if attempt.lost >= 4:
+                return self._failed("object lost while taking the hold for the carry")
+            if not attempt.hold.finished:
+                return attempt.hold.step(), None
+            attempt.hold_wait += 1
+            return self._hold, None
+        if attempt.carry is None:
+            attempt.carry = self._plan_carry(obs)
+            if attempt.carry is None:
+                return self._failed("no clear route to the goal")
+        attempt.lost = 0 if is_held(self.env, robot) else attempt.lost + 1
+        if attempt.lost >= 4:
+            return self._failed("object lost during the carry")
+        action, status = attempt.carry.step(robot.base_pose(obs["qpos"]))
+        if status is Status.FAILED:
+            return self._failed(attempt.carry.failure)
+        return action, (State.REACH if status is Status.DONE else None)
+
+    def _grip_point(self) -> Optional[np.ndarray]:
+        """Where the pads hold the object: the middle of the fingers' contacts, weighted by force."""
+        import pybullet as p
+        env, robot = self.env, self.scene.robot
+        points = [(np.array(c[6]), c[9]) for c in
+                  p.getContactPoints(env.robot_id, env.object_id, physicsClientId=env.pb_physics_client)
+                  if c[3] in robot.finger_links and c[9] > 0]
+        weight = sum(force for _, force in points)
+        return sum(point * force for point, force in points) / weight if weight > 0 else None
+
+    def _plan_hold(self, obs) -> np.ndarray:
+        """The (K, 15) move from the post-lift pose into the hold for the
+        carry (see `_hold_path`). If the hand cannot be laid level, the arm
+        is still folded with the hand as it is."""
+        path = self._hold_path(obs, lay=True)
+        stats = self.attempt.plan_stats["hold"]
+        if len(path) < 2 and "laid_deg" in stats:
+            path = self._hold_path(obs, lay=False)
+            self.attempt.plan_stats["hold"] = dict(self.attempt.plan_stats["hold"], not_laid=stats.get("blocked", "no pose"))
+        return path
+
+    def _hold_path(self, obs, lay: bool) -> np.ndarray:
+        """The (K, 15) move from the post-lift pose into the hold for the carry.
+
+        The object turns almost freely about the line between the pads, and
+        the arm as it lifted the object sticks out a third of a metre to one
+        side of the base. In the hold:
+        1. A pads' line that is not level (a plate held flat by its rim) is
+           rolled level, the centre of mass below it: the object hangs from
+           the pads instead of sticking out from them.
+        2. Where the object hangs askew from a level line with the hand
+           pointing down (a hammer gripped along its handle), the hand is laid
+           level, pointing away from the side the weight hangs toward, so the
+           part above the pads passes between the fingers instead of into the
+           palm and the object hangs on end.
+        3. The hand comes in to the base's centre line, the arm folded in the
+           vertical plane through it: the robot is then as narrow as its base.
+        If no such pose is within reach and clear, the post-lift pose is kept."""
+        scene, config = self.scene, self.config
+        robot, sim = scene.robot, scene.sim
+        q0 = self._hold.copy()
+        position, turn = sim.gripper_pose(q0)
+        approach, closing = turn[:, 0], turn[:, 1]
+        centre = np.asarray(obs["object_pos"], dtype=float)
+        grip = self._grip_point()
+        if grip is None:
+            grip = position + approach * (sim.gripper.pad_back + sim.gripper.pad_tip) / 2.0
+        lever = centre - grip
+        base = robot.base_pose(q0)
+        forward = np.array([np.cos(base[2]), np.sin(base[2]), 0.0])
+        left = np.array([-forward[1], forward[0], 0.0])
+        up = np.array([0.0, 0.0, 1.0])
+        stats, rigid, spin = {}, True, np.eye(3)
+
+        def heading(v) -> float:
+            return float(np.arctan2(v[1], v[0]))
+
+        # 1. Level the pads' line: of the two rolls that do, the one that leaves the centre of mass lower.
+        if abs(closing[2]) > np.sin(np.radians(config.level_pads)):
+            tilt = np.arctan2(closing[2], turn[2, 2])
+            rolls = [float(wrap_angle(-tilt + k * np.pi)) for k in (0, 1)]
+            roll = min(rolls, key=lambda a: (ik.axis_rotation(approach, a) @ lever)[2])
+            spin = ik.axis_rotation(approach, roll)
+            stats["rolled_deg"] = round(float(np.degrees(roll)))
+        pointing, line, weight = spin @ approach, spin @ closing, spin @ lever
+        hangs = weight - (weight @ line) * line                     # from the pads' line to the centre of mass
+        askew = np.degrees(np.arccos(np.clip(-hangs[2] / max(np.linalg.norm(hangs), 1e-9), -1.0, 1.0)))
+        if lay and np.linalg.norm(hangs) > config.hang_lever and abs(pointing[2]) > 0.7 and askew > config.askew:
+            # 2. Turn about the vertical until the weight hangs toward the
+            # base, then lay the hand level about the pads' line, pointing forward.
+            yaw = ik.axis_rotation(up, heading(-forward) - heading(hangs))
+            line, pointing = yaw @ line, yaw @ pointing
+            across = np.cross(line, pointing)
+            pitch = np.arctan2(-pointing[2], across[2])
+            pitch = min((float(wrap_angle(pitch + k * np.pi)) for k in (0, 1)),
+                        key=lambda a: -float((ik.axis_rotation(line, a) @ pointing) @ forward))
+            spin = ik.axis_rotation(line, pitch) @ yaw @ spin
+            rigid = False                                           # the object hangs: it does not pitch with the hand
+            carried = np.array([0.0, 0.0, -np.linalg.norm(hangs)])
+            stats["laid_deg"] = round(float(np.degrees(pitch)))
+        else:
+            tilt = np.cross(pointing, -up)
+            if pointing[2] < -config.stand_up and np.linalg.norm(tilt) > 1e-6:
+                # 3a. A hand that points mostly down is stood straight up,
+                # the object tilting with it: only then can the wrist's roll
+                # keep the pads' line along the travel.
+                lean = float(np.arcsin(min(1.0, np.linalg.norm(tilt))))
+                spin = ik.axis_rotation(tilt / np.linalg.norm(tilt), lean) @ spin
+                stats["stood_up_deg"] = round(float(np.degrees(lean)))
+            elif np.linalg.norm(pointing[:2]) > 0.3:
+                # 3b. Any other hand is turned to point forward.
+                spin = ik.axis_rotation(up, heading(forward) - heading(pointing)) @ spin
+            carried = spin @ lever
+        reach = min(float(np.linalg.norm(centre[:2] - base[:2])), config.hold_reach)
+        grip_to = np.array([base[0], base[1], grip[2]]) + reach * forward - [carried[0], carried[1], 0.0]
+        turn_to = spin @ turn
+        position_to = grip_to + spin @ (position - grip)
+
+        scene.collision.focus(base[:2])
+        scene.collision.hold(q0, centre, obs["object_xyzw"])
+        try:
+            def clear(q) -> bool:
+                # The env does not collide the robot with itself, so the arm
+                # may pass close to the body; the object may not.
+                gaps = scene.collision.clearances(q, with_object=rigid)
+                return gaps["scene"] >= 0.01 and gaps["own"] >= 0.0 and \
+                    (not rigid or (gaps["load"] >= 0.005 and gaps["object"] >= 0.005))
+
+            def spread(q) -> float:
+                """How far the arm sticks out to the side of the base's centre line, metres."""
+                sim.set_robot(q)
+                return max(abs(float((sim.link_pose(robot.joint_indices[k])[0] - [base[0], base[1], 0.0]) @ left))
+                           for k in robot.arm)
+
+            # The end pose, from seeds with the arm in the plane of the centre line.
+            deadline, found = Deadline(config.reach_seconds), []
+            pan, lift, upper_roll, elbow, fore_roll, flex, _ = robot.arm
+            for seed_lift in (-0.8, -0.2, 0.4):
+                for seed_elbow in (0.8, 1.6):
+                    for seed_flex in (-0.8, 0.4, 1.4):
+                        seed = q0.copy()
+                        seed[[pan, upper_roll, fore_roll]] = 0.0
+                        seed[[lift, elbow, flex]] = seed_lift, seed_elbow, seed_flex
+                        q = ik.solve(sim, position_to, turn_to, seed, self.rng, deadline, restarts=0)
+                        if q is not None and clear(q):
+                            found.append(q)
+            if not found:
+                stats["kept"] = "no folded pose within reach and clear"
+                return np.array([q0])
+            joints = list(robot.plan_joints)
+            vector = ik.rotation_vector(spin)
+            angle = float(np.linalg.norm(vector))
+            axis = vector / angle if angle > 1e-9 else up
+
+            def leg(start, end, turned: tuple, moved: tuple, name: str) -> Optional[list]:
+                """Joint values from `start` to `end` along which the hand
+                turns from `turned[0]` to `turned[1]` of the whole turn and
+                moves from `moved[0]` to `moved[1]` of the whole way, the
+                arm's fold following the joint values in between. None if
+                the arm cannot follow or the way is blocked."""
+                swing = angle * abs(turned[1] - turned[0])
+                count = max(2, int(np.ceil(max(np.abs(end[joints] - start[joints]).max() / 0.05, swing / 0.05))))
+                out, last = [], np.array(start, dtype=float)
+                for k in range(1, count + 1):
+                    t = k / count
+                    part = ik.axis_rotation(axis, (turned[0] + t * (turned[1] - turned[0])) * angle)
+                    shift = (moved[0] + t * (moved[1] - moved[0])) * (grip_to - grip)
+                    # Each step continues from the one before, nudged toward
+                    # the end's fold, so the arm never jumps between solutions.
+                    q = ik.solve(sim, grip + shift + part @ (position - grip), part @ turn,
+                                 last + (end - start) / count, self.rng, deadline, restarts=0)
+                    if q is None or np.abs(q[joints] - last[joints]).max() > 0.3:
+                        stats["blocked"] = f"{name}, step {k} of {count}: " + \
+                            ("out of reach" if q is None else "the arm would jump")
+                        return None
+                    last = q
+                    if not clear(q):
+                        gaps = scene.collision.clearances(q, with_object=rigid)
+                        stats["blocked"] = f"{name}, step {k} of {count}: " + \
+                            ", ".join(f"{part} {1000 * gap:.0f} mm" for part, gap in gaps.items() if gap < 0.011)
+                        return None
+                    out.append(q)
+                return out
+
+            def way(q1) -> Optional[list]:
+                """The way to the end pose `q1`: the turn and the move at
+                once; failing that, the turn where the hand is, then the move."""
+                both = leg(q0, q1, (0.0, 1.0), (0.0, 1.0), "turning while folding")
+                if both is not None:
+                    return [q0] + both
+                turned = leg(q0, q0, (0.0, 1.0), (0.0, 0.0), "turning in place")
+                if turned is None:
+                    return None
+                folded = leg(turned[-1], q1, (1.0, 1.0), (0.0, 1.0), "folding after the turn")
+                return None if folded is None else [q0] + turned + folded
+
+            # The narrowest end pose whose way in is clear.
+            for q1 in sorted(found, key=spread)[:6]:
+                q1 = q1.copy()
+                q1[joints] = np.where(robot.wraps[joints], q0[joints] + wrap_angle(q1[joints] - q0[joints]),
+                                      q1[joints])
+                path = way(q1)
+                if path is not None:
+                    stats.update(spread_cm=[round(100 * spread(q0)), round(100 * spread(q1))],
+                                 reach_m=round(reach, 2))
+                    return np.array(path)
+            stats["kept"] = "the way into every folded pose is blocked"
+            return np.array([q0])
+        finally:
+            scene.collision.release()
+            self.attempt.plan_stats = dict(self.attempt.plan_stats or {}, hold=stats)
+
+    def _plan_carry(self, obs) -> Optional[carry.CarryFollower]:
+        """Choose a route and check the whole carry along it, the object in
+        the hand, against the scene in the planning copy."""
+        import pybullet as p
+        scene, config, env = self.scene, self.config, self.env
+        robot, world = scene.robot, scene.world
+        settings = carry.CarrySettings()
+        base = robot.base_pose(self._hold)
+        position = np.asarray(obs["object_pos"], dtype=float)
+        state = p.getLinkState(env.robot_id, robot.gripper_link, computeForwardKinematics=True,
+                               physicsClientId=env.pb_physics_client)
+        hand = rotation(state[5])
+        upright = abs(hand[2, 0]) >= settings.upright         # the hand's axis is close to vertical
+        closing = float(np.arctan2(hand[1, 1], hand[0, 1])) if upright else None
+        # Which line the wrist keeps along the travel. An object held at its
+        # centre of mass is pushed by a pad if the pads' line is along the
+        # travel. One whose weight hangs well below the pads (a tall bottle
+        # held by its top) is rocked out of the grip by that push; with the
+        # pads' line across the travel it swings about the line instead.
+        grip = self._grip_point()
+        below = float((position - grip) @ hand[:, 0]) if grip is not None else 0.0
+        swings = upright and below > config.swing_lever
+        if swings:
+            closing += np.pi / 2.0
+        share = config.aligned_share if upright else 1.0
+        safe = self._friction_step() / share
+        ticks_left = config.episode_ticks - self.tick - config.carry_reserve
+        # The torso takes the object toward the goal's height; the reach does the rest.
+        room = (robot.lower[robot.torso] + 0.005 - self._hold[robot.torso],
+                robot.upper[robot.torso] - 0.005 - self._hold[robot.torso])
+        rise = float(np.clip(world.goal[2] - position[2], min(room[0], 0.0), max(room[1], 0.0)))
+        raised = self._hold.copy()
+        raised[robot.torso] += rise
+        roll_joint = robot.arm[-1]
+        scene.collision.hold(self._hold, position, obs["object_xyzw"])
+        blocked = []
+        try:
+            for route in carry.plan_route(scene.carry_grids, base[:2], world.goal[:2], settings):
+                # Slower is safer for the hold, so the object is led only a
+                # little faster than the ticks that are left require.
+                arm = float(np.linalg.norm(position[:2] - base[:2]))
+                length = float(np.linalg.norm(np.diff(route, axis=0), axis=1).sum())
+                needed = (length - arm) / max(ticks_left, 1)
+                step = float(np.clip(config.carry_haste * needed, settings.min_step, settings.max_step))
+                plan = carry.make_plan(route, base, position[:2], closing, self._hold[roll_joint],
+                                       int(np.sign(hand[2, 0])), step)
+                if plan.length <= plan.arm:
+                    continue
+                other = plan.turn - np.sign(plan.turn) * 2.0 * np.pi if abs(plan.turn) > 1e-6 else plan.turn
+                for turn in dict.fromkeys([plan.turn, other]):          # the short way round, then the long way
+                    clear = True
+                    for index, (pose, roll) in enumerate(carry.poses_to_check(plan, turn)):
+                        q = robot.with_base(raised, pose)
+                        q[roll_joint] = roll
+                        scene.collision.focus(pose[:2])
+                        if not scene.collision.is_free(q, config.carry_margin, load_margin=config.carry_margin):
+                            gaps = scene.collision.clearances(q, with_object=False)
+                            blocked.append(dict(pose=index, turn_deg=round(float(np.degrees(turn))),
+                                                base=[round(float(v), 2) for v in pose],
+                                                nearest=scene.collision.nearest(q)[1],
+                                                gaps_mm={k: round(1000 * v) for k, v in gaps.items()}))
+                            clear = False
+                            break
+                    if clear:
+                        self.attempt.plan_stats = dict(self.attempt.plan_stats or {},
+                                                       carry=dict(route_m=round(plan.length, 2),
+                                                                  step_mm=round(1000 * step, 1),
+                                                                  safe_mm=round(1000 * safe, 1), steered=bool(upright),
+                                                                  across=bool(swings), below_mm=round(1000 * below),
+                                                                  rise_m=round(rise, 3),
+                                                                  turn_deg=round(float(np.degrees(turn)))))
+                        return carry.CarryFollower(plan, robot, self._hold, rise, turn, settings)
+            self.attempt.plan_stats = dict(self.attempt.plan_stats or {}, carry_blocked=blocked[:4])
+            return None
+        finally:
+            scene.collision.release()
 
     def _reach(self, obs) -> tuple[np.ndarray, Optional[State]]:
-        """Segment 3. Move the arm so the object is at the goal.
-        Exit: DONE. Failures: object lost, goal out of reach."""
-        raise NotImplementedError("segment 3: reach")
+        """Segment 3. Move the hand so the object, not the hand, is at the
+        goal. Exit: DONE. Failures: object lost, goal out of reach."""
+        scene, attempt, config = self._scene(obs), self.attempt, self.config
+        robot = scene.robot
+        gap = scene.world.goal - np.asarray(obs["object_pos"], dtype=float)
+        distance = float(np.linalg.norm(gap))
+        attempt.lost = 0 if is_held(self.env, robot) else attempt.lost + 1
+        if attempt.lost >= 4:
+            return self._failed("object lost during the reach")
+        if attempt.reach is None:
+            if distance < 0.5 * config.goal_tolerance:
+                self.report.delivered_tick = self.tick
+                return self._hold, State.DONE
+            scene.collision.hold(self._hold, obs["object_pos"], obs["object_xyzw"])
+            scene.collision.focus(robot.base_pose(self._hold)[:2])
+            why = {}
+            path = arm_planner.straight_line(self._hold, gap / distance, distance, scene.sim, scene.collision,
+                                             self.rng, Deadline(config.reach_seconds), arm_planner.PlannerSettings(),
+                                             load_after=0.0, least=max(0.01, distance - 0.5 * config.goal_tolerance),
+                                             why=why)
+            scene.collision.release()
+            if path is None or len(path) < 2:
+                return self._failed(f"goal out of reach ({why.get('stopped')})")
+            limit = np.full(len(self._hold), 0.02)
+            limit[robot.torso] = 0.004
+            attempt.reach = PathStepper(path, limit)
+        if not attempt.reach.finished:
+            return attempt.reach.step(), None
+        attempt.reach_wait += 1
+        if distance < config.goal_tolerance * 0.8 or (attempt.reach_wait > 20 and distance < config.goal_tolerance):
+            self.report.delivered_tick = self.tick
+            return self._hold, State.DONE
+        if attempt.reach_wait > 40:
+            return self._failed(f"object stopped {distance:.3f} m from the goal")
+        return self._hold, None
 
     def _retry(self, obs) -> tuple[np.ndarray, Optional[State]]:
-        """Segment 4. With the object still in the hand, go on carrying it.
+        """Segment 4. With the object still in the hand, go on carrying it
+        (the carry and the reach are planned afresh).
         Otherwise start a fresh attempt from where the object now is, if
         enough ticks remain. Exit: NAVIGATE, SETTLE or STOPPED."""
         scene = self._scene(obs)
         if self.attempt.lifted_tick is not None and is_held(self.env, scene.robot):
-            return self._hold, State.NAVIGATE
+            # Carry on from here with a fresh plan, unless that has already failed twice.
+            attempt = self.attempt
+            attempt.carry, attempt.reach, attempt.reach_wait, attempt.lost = None, None, 0, 0
+            attempt.carry_failures += 1
+            return self._hold, (State.NAVIGATE if attempt.carry_failures <= 2 else State.STOPPED)
         if self.config.episode_ticks - self.tick < self.config.min_retry_ticks or \
                 self.attempt.index + 1 >= self.config.max_attempts:
             return self._hold, State.STOPPED

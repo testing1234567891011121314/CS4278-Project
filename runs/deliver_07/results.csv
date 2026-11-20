@@ -1,0 +1,16 @@
+object,name,rest_z,lift_tick,max_lift_cm,hold_50,held_at_end,backed_off_m,state,attempts,failure,grasp_error_mm,errors,ticks,wall_s,delivered_tick,goal_cm,navigate_tick
+0,master_chef_can,0.697,158,15.6,True,False,0.91,stopped,8,object lost during the carry; no grasp plan; no grasp plan; no grasp plan; no grasp plan; no grasp plan; no grasp plan; object moved before the close,,0,1545,128.0,,1812.9,425
+1,sugar_box,0.65,189,24.8,True,True,17.73,done,1,,2.2,0,2462,25.0,2431,1.7,380
+2,tomato_soup_can,0.677,164,22.3,True,True,17.57,done,1,,0.6,0,2450,26.9,2419,0.1,292
+3,mustard_bottle,0.66,348,23.8,True,True,17.8,done,2,object moved during the drive,3.4,0,2489,27.6,2457,1.1,527
+4,potted_meat_can,0.668,156,23.2,True,True,17.57,done,1,,2.7,0,2419,30.0,2388,1.3,299
+5,banana,0.645,166,27.7,True,True,17.57,done,1,,22.2,0,2453,25.8,2421,2.4,286
+6,strawberry,0.646,228,26.1,True,True,17.6,done,3,object lost during the carry; object lost while taking the hold for the carry,3.7,0,2730,42.2,2699,0.1,329
+7,apple,0.662,216,23.8,True,False,6.47,stopped,8,object lost during the carry; object moved during the drive; object moved during the drive; object moved during the drive; object moved before the close; object moved before the close; object moved before the close; object moved before the close,,0,2348,64.3,,1171.7,332
+8,bleach_cleanser,0.652,498,16.6,True,False,0.84,stopped,8,object moved during the drive; no grasp plan; object lost during the carry; no grasp plan; object lost during the carry; object moved during the drive; object lost during the carry; no grasp candidates,,0,2756,121.5,,1540.7,751
+9,bowl,0.654,193,24.4,True,True,17.56,done,1,,3.7,0,2378,33.2,2346,0.2,321
+10,mug,0.045,282,32.9,True,True,19.04,stopped,2,object moved during the drive; no clear route to the goal,4.1,0,2423,43.4,,53.3,384
+11,plate,0.641,291,15.4,True,False,5.41,stopped,8,dragged to the edge; object lost during the carry; no grasp candidates; no grasp candidates; no grasp candidates; no grasp candidates; no grasp candidates; no grasp candidates,,0,1364,45.5,,1272.1,505
+12,large_marker,0.011,757,89.1,True,True,17.87,done,4,object moved before the close; object lost during the lift; object moved before the close,11.6,0,2786,44.0,2755,0.2,860
+13,hammer,0.644,162,25.7,True,True,17.57,done,1,,11.2,0,2381,26.3,2354,4.0,320
+14,foam_brick,0.652,177,25.0,True,True,17.56,done,1,,1.0,0,2463,26.6,2432,0.9,287

@@ -108,13 +108,24 @@ class AntipodalCandidates(unittest.TestCase):
 
     def test_object_as_wide_as_the_open_hand_gets_tight_candidates(self):
         """R13: a 102.5 mm cylinder, 140 mm tall, fits the 102.85 mm opening
-        with no room to spare: the fingers open fully and go round it from above."""
+        with no room to spare: the fingers open fully and go round it, from
+        above or from the side, never from below."""
         found = antipodal_candidates(cylinder(0.05125, 0.14, count=2048), GRIPPER, SUPPORT)
         self.assertGreater(len(found), 5)
         for c in found:
             self.assertEqual(c.kind, "tight")
             self.assertEqual(c.opening, GRIPPER.max_opening)
-            self.assertLess(c.approach_axis[2], -0.5)
+            self.assertLess(c.approach_axis[2], 0.1)
+        self.assertTrue(any(c.approach_axis[2] < -0.9 for c in found))
+
+    def test_closing_line_through_the_centre_of_mass_ranks_first(self):
+        """The object turns freely about the line between the pads, so the
+        best grasps on a long box pass through its centre."""
+        obj = box([0.04, 0.20, 0.04], count=2048)
+        found = antipodal_candidates(obj, GRIPPER, SUPPORT)
+        from_above = [c for c in found if c.approach_axis[2] < -0.95]
+        self.assertLess(abs(from_above[0].centre[1] - obj.position[1]), 0.03)
+        self.assertGreater(max(abs(c.centre[1] - obj.position[1]) for c in from_above), 0.03)
 
     def test_tight_candidates_rank_below_roomy_ones(self):
         found = antipodal_candidates(box([0.06, 0.10, 0.08], count=2048), GRIPPER, SUPPORT, limit=2000)

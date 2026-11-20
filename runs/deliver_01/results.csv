@@ -1,0 +1,16 @@
+object,name,rest_z,lift_tick,max_lift_cm,hold_50,held_at_end,backed_off_m,state,attempts,failure,grasp_error_mm,errors,ticks,wall_s,delivered_tick,goal_cm,navigate_tick
+0,master_chef_can,0.697,159,20.4,True,True,5.38,stopped,3,object lost during the carry; object moved during the drive; no clear route to the goal,8.5,0,2983,112.7,,1322.8,426
+1,sugar_box,0.65,188,24.7,True,True,6.34,navigate,3,object lost during the carry; object lost during the carry,10.9,0,3000,84.6,,1198.5,379
+2,tomato_soup_can,0.677,165,22.3,True,True,17.57,done,1,,0.8,0,1271,21.6,1242,2.1,293
+3,mustard_bottle,0.66,350,25.0,True,True,17.8,done,2,object moved during the drive,5.5,0,1611,23.3,1582,1.4,535
+4,potted_meat_can,0.668,157,23.2,True,True,17.67,stopped,2,object lost during the carry; no clear route to the goal,0.4,0,1762,35.0,,54.0,298
+5,banana,0.645,170,26.0,True,True,17.67,stopped,2,object lost during the carry; no clear route to the goal,2.2,0,1682,32.5,,55.9,289
+6,strawberry,0.646,226,26.0,True,False,6.6,stopped,8,object lost during the carry; object lost during the carry; no parking pose; no parking pose; no parking pose; no parking pose; no parking pose; no parking pose,,0,1794,45.1,,2476.0,326
+7,apple,0.662,218,23.8,True,True,17.56,done,1,,2.4,0,1304,25.8,1274,1.0,333
+8,bleach_cleanser,0.652,494,24.8,True,False,4.37,stopped,8,object moved during the drive; no grasp plan; object lost during the carry; object moved during the drive; no grasp plan; no parking pose; no parking pose; object lost during the carry,33.9,0,2349,162.1,,1225.7,748
+9,bowl,0.654,193,15.4,True,True,0.6,stopped,1,no clear route to the goal,3.1,0,349,27.3,,1814.5,324
+10,mug,0.045,298,36.9,True,True,1.22,stopped,8,object moved during the drive; object lost during the carry; object lost during the hold; object lost during the back-off; object lost during the back-off; object lost during the carry; object lost during the carry; no clear route to the goal,2.2,0,2122,137.6,,1967.5,401
+11,plate,0.641,296,15.8,True,True,0.6,stopped,2,dragged to the edge; no clear route to the goal,3.9,0,510,33.1,,1859.7,485
+12,large_marker,0.011,410,35.1,True,False,16.91,stopped,8,object moved before the close; object lost during the carry; object moved during the drive; object moved before the close; object lost during the carry; object moved during the drive; no grasp candidates; no grasp candidates,,0,2521,62.3,,137.9,516
+13,hammer,0.644,165,26.0,True,False,13.95,stopped,8,object lost during the carry; object lost during the carry; object lost during the carry; object lost during the carry; no parking pose; no parking pose; no parking pose; no parking pose,,0,2633,74.9,,403.3,316
+14,foam_brick,0.652,175,24.9,True,True,17.56,done,1,,1.2,0,1268,18.7,1238,0.8,285
