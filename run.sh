@@ -13,6 +13,6 @@ trap 'popd > /dev/null' EXIT
     --maze-seed 42 \
     --seed 42 \
     --workers 15 \
-    --max-steps 1000 \
+    --max-steps 3000 \
     --gpus 0 1 \
     "$@"

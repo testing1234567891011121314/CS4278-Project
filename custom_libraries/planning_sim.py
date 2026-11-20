@@ -6,6 +6,7 @@ docs/adr/0001-plan-in-a-second-simulator.md.
 """
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -50,6 +51,12 @@ class PlanningSim:
         found by reading the env's client. Nothing is written there."""
         self.robot = RobotModel.from_env(env)
         live = self.robot.client_id
+        # Folders a relative mesh path may be relative to: where we are now,
+        # where the env's code is, and the project this file belongs to.
+        module = sys.modules.get(type(env).__module__)
+        self._roots = [Path.cwd(), Path(__file__).resolve().parents[1]]
+        if getattr(module, "__file__", None):
+            self._roots.insert(1, Path(module.__file__).resolve().parent)
         self.client = p.connect(p.DIRECT)
         if self.client < 0:
             raise RuntimeError("could not open the planning simulator")
@@ -94,8 +101,8 @@ class PlanningSim:
         meshes += [s[4].decode() for s in p.getCollisionShapeData(body, -1, physicsClientId=live) if s[4]]
         position, orientation = p.getBasePositionAndOrientation(body, physicsClientId=live)
         tried = set()
-        for mesh in meshes:
-            folder = Path(mesh).resolve().parent
+        for mesh in self._existing(meshes):
+            folder = mesh.parent
             for _ in range(4):
                 for path in sorted(folder.glob("*.urdf")):
                     if path in tried:
@@ -110,6 +117,19 @@ class PlanningSim:
                     p.removeBody(copy, physicsClientId=self.client)
                 folder = folder.parent
         raise RuntimeError(f"no description file found for body {body} near {meshes[:1]}")
+
+    def _existing(self, meshes: list[str]) -> list[Path]:
+        """The mesh files as absolute paths. The simulator reports them as
+        they were given when the scene was loaded, often relative to the
+        folder the process was in then, which may no longer be the current one."""
+        found = []
+        for mesh in meshes:
+            for root in self._roots:
+                path = (root / mesh).resolve()
+                if path.is_file():
+                    found.append(path)
+                    break
+        return found
 
     def _same_shapes(self, live: int, body: int, copy: int) -> bool:
         a = p.getCollisionShapeData(body, -1, physicsClientId=live)
