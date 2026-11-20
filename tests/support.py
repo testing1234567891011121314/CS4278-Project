@@ -39,19 +39,20 @@ class FakeEnv:
         return self._get_obs(), dict(dist_to_goal=1.0, success=False)
 
 
-def make_env(object_idx: int, maze_seed: int, cloud_seed: int):
+def make_env(object_idx: int, maze_seed: int = 42, cloud_seed: int = 300):
     """A headless simulator env for one trial, with the point cloud seeded
     from outside the env so the course files stay untouched (R2, R28)."""
-    raise NotImplementedError("segment 0")
+    from tools.trial import make_env as build
+    return build(object_idx, maze_seed, cloud_seed)
 
 
-def place_in_gripper(env, object_pose_in_gripper):
-    """Test fixture: put the object between the pads and close them, so the
-    segments after the grasp can be tested without it."""
-    raise NotImplementedError("segment 0")
-
-
-def park_at(env, x: float, y: float, yaw: float):
-    """Test fixture: put the base at a world pose, so the grasp can be tested
-    without the drive to the object."""
-    raise NotImplementedError("segment 0")
+def live_state(env) -> tuple:
+    """Everything a planning call could disturb in the env's simulator."""
+    import pybullet as p
+    client = env.pb_physics_client
+    joints = p.getJointStates(env.robot_id, list(range(p.getNumJoints(env.robot_id, physicsClientId=client))),
+                              physicsClientId=client)
+    return (tuple((j[0], j[1]) for j in joints),
+            p.getBasePositionAndOrientation(env.object_id, physicsClientId=client),
+            p.getBaseVelocity(env.object_id, physicsClientId=client),
+            tuple(c[:9] for c in p.getContactPoints(physicsClientId=client)))

@@ -8,9 +8,17 @@ the segments after it. Requirement ids refer to `docs/requirements.md`.
 |---|---|---|
 | 0. Test bench | none | `tools/`, `tests/support.py` |
 | 1. Go to object | `SETTLE`, `GO_TO_OBJECT` | `robot`, `world`, `grasping/candidates`, `navigation/grid`, `navigation/a_star`, `navigation/parking`, `navigation/base_follower` |
-| 2. Attempt grasp | `GRASP` | `planning_sim`, `collision`, `grasping/ik`, `grasping/arm_planner`, `grasping/executor` |
-| 3. Navigate to exit | `NAVIGATE`, `REACH` | `navigation/carry`, `navigation/reach`, plus the grid, path search and base follower from segment 1 |
+| 2. Attempt grasp | `GRASP`, `DRAG` | `planning_sim`, `collision`, `grasping/ik`, `grasping/arm_planner`, `grasping/executor` |
+| 3. Navigate to exit | `BACK_OFF`, `NAVIGATE`, `REACH` | `navigation/carry`, `navigation/reach`, plus the grid, path search and base follower from segment 1 |
 | 4. Retry | `RETRY`, `STOPPED` | the state machine in `solver.py` |
+
+**Status (2026-11-20).** Segments 1 and 2 and the back-off of segment 3 are
+written and run for all 15 objects on one maze by `tools/pick_all.py`; the
+per-object results and every grasp change are in `GRASP.md`. `NAVIGATE` and
+`REACH` are not written: after the back-off the solver holds its pose. Of
+segment 0, only the headless env with a seeded cloud (`tools/trial.py`) and
+the pick measurement (`tools/pick_all.py`) exist; `tools/score.py` and
+`tools/batch.py` are still the old solver's and do not run against this one.
 
 A segment is done when its fast tests pass, its simulator test passes, and the
 paired benchmark against the reference loses no points on the objects the
@@ -83,17 +91,11 @@ Simulator test (`test_attempt_grasp.py`): starting from a known parking pose,
 the foam brick is lifted by tick 600, at least 10 cm, held 50 ticks, with the
 pose error reported.
 
-**Objects with no antipodal hold (R13).** These need experiments before the
-candidate interface is fixed, because they decide what a candidate can be.
-
-| Object | Why a pinch fails | To try, in order |
-|---|---|---|
-| master chef can | 103.0 mm against a 102.85 mm gap; upright; 1.054 kg | (a) press the open gripper over it and measure whether the 0.15 mm overlap holds it; (b) slide it to overhang the table edge and lift it resting on the fingers and palm; (c) tip it and repeat (b) lying down |
-| plate | 7 mm flange, 10 to 16 N of grip | flange hold with the lower finger under the rim (worked in the old code once the base stopped jamming on the table corner) |
-| large marker | wedged in the tabletop; thrown out when the arm comes near | pick it where it lands after being thrown out; approach so that it is thrown toward open floor |
-
-Each experiment is a throwaway script that reports lifted or not, hold force,
-and whether the object survives 200 ticks of base motion.
+**Objects with no antipodal hold (R13).** What was found for each is in
+`GRASP.md`. In short: the master chef can is held by a tight fit (the fully
+open hand pushed over it); the bowl by a pinch of its rim; the plate is raked
+to the table's edge and gripped where it overhangs; the marker is thrown out
+of the table by the simulator and picked from the floor where it lands.
 
 ## Segment 3: navigate to exit
 

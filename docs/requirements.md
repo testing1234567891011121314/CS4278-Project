@@ -104,8 +104,8 @@ Proposed in the design session, not yet confirmed by the user.
 
 1. **Primary measure.** Proposed: mean rubric points per trial over all 15
    objects, deliveries second. Not confirmed.
-2. **How the can is held.** No pinch fits. The method is to be chosen by
-   experiment (see `docs/plan.md`, segment 2).
+2. **How the can is held.** Settled by experiment: a tight fit, the fully
+   open hand pushed over it (see `GRASP.md`).
 3. **The object in the planning simulator.** A copy of the live object's
    collision shape, or a shape built from the cloud.
 4. **Rehearsal.** Whether the planning simulator is only queried for

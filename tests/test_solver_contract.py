@@ -80,12 +80,12 @@ class ExceptionGuard(unittest.TestCase):
     def test_strict_lets_the_exception_out(self):
         env = FakeEnv()
         solver = Solver(env, Config(strict=True))
-        with self.assertRaises(NotImplementedError):
+        with self.assertRaises(Exception):       # the fake env has no simulator behind it
             solver.get_action()
 
-    def test_stub_solver_stops_cleanly(self):
-        """With every state unimplemented the solver still returns actions and
-        ends STOPPED, holding the pose it started in."""
+    def test_solver_on_a_broken_env_stops_cleanly(self):
+        """On an env it cannot read a scene from, the solver still returns
+        actions and ends STOPPED, holding the pose it started in."""
         env = FakeEnv()
         env.qpos = np.linspace(0.0, 1.4, 15)
         solver = Solver(env)
@@ -120,7 +120,7 @@ class Budgets(unittest.TestCase):
     def test_every_working_state_has_a_budget_below_the_episode(self):
         """R19"""
         config = Config()
-        for state in (State.SETTLE, State.GO_TO_OBJECT, State.GRASP, State.NAVIGATE, State.REACH):
+        for state in (State.SETTLE, State.GO_TO_OBJECT, State.GRASP, State.BACK_OFF, State.NAVIGATE, State.REACH):
             self.assertLess(config.budget(state), config.episode_ticks, state)
 
     def test_first_attempt_can_lift_by_the_deadline(self):
@@ -161,7 +161,8 @@ class Attempts(unittest.TestCase):
         self.assertIsNone(second.pick_mode)
         self.assertIsNone(second.failure)
         self.assertEqual(solver.report.attempts,
-                         [dict(index=0, started_tick=0, pick_mode="floor", lifted_tick=None, failure="no plan")])
+                         [dict(index=0, started_tick=0, pick_mode="floor", lifted_tick=None, failure="no plan",
+                               search=None, plan_stats=None, grasp_error=None)])
 
     def test_config_cannot_be_changed(self):
         """R25"""

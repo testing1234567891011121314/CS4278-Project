@@ -1,0 +1,16 @@
+object,name,rest_z,lift_tick,max_lift_cm,hold_50,held_at_end,backed_off_m,state,attempts,failure,grasp_error_mm,errors,ticks,wall_s
+0,master_chef_can,0.696,189,15.5,True,True,0.6,navigate,1,,16.6,0,475,15.7
+1,sugar_box,0.65,176,15.6,True,True,0.6,navigate,1,,0.8,0,387,10.8
+2,tomato_soup_can,0.677,182,15.4,True,True,0.6,navigate,1,,2.0,0,328,11.6
+3,mustard_bottle,0.66,334,15.1,True,True,0.6,navigate,2,object moved during the drive,3.6,0,535,13.1
+4,potted_meat_can,0.668,157,15.3,True,True,0.6,navigate,1,,1.1,0,314,11.0
+5,banana,0.645,177,15.1,True,True,0.6,navigate,1,,2.2,0,311,9.8
+6,strawberry,0.646,211,15.1,True,True,0.6,navigate,1,,4.1,0,330,10.3
+7,apple,0.662,228,15.2,True,True,0.6,navigate,1,,1.1,0,362,11.8
+8,bleach_cleanser,0.652,533,15.4,True,True,0.6,navigate,3,object moved during the drive; hold not verified after the close,5.5,0,805,26.3
+9,bowl,0.654,175,15.1,True,True,0.6,navigate,1,,0.4,0,311,13.9
+10,mug,0.045,301,16.1,True,True,0.6,navigate,2,object moved during the drive,7.5,0,423,29.4
+11,plate,0.641,322,15.6,True,True,0.6,navigate,2,dragged to the edge,10.4,0,582,22.9
+12,large_marker,0.011,560,15.2,True,True,0.6,navigate,3,object moved before the close; object moved during the drive,16.8,0,680,24.3
+13,hammer,0.644,153,15.3,True,True,0.6,navigate,1,,16.8,0,324,10.0
+14,foam_brick,0.652,160,15.5,True,True,0.6,navigate,1,,5.4,0,292,10.3
