@@ -10,7 +10,7 @@ from typing import Optional
 import numpy as np
 import pybullet as p
 
-from custom_libraries.common import Deadline
+from custom_libraries.common import Budget
 from custom_libraries.planning_sim import PlanningSim, rotation
 from custom_libraries.robot import wrap_angle
 
@@ -51,12 +51,12 @@ def jacobian(sim: PlanningSim, qpos) -> np.ndarray:
 
 
 def solve(sim: PlanningSim, position, turn: np.ndarray, seed_qpos, rng: np.random.Generator,
-          deadline: Deadline, restarts: int = 6, position_tolerance: float = 0.001,
+          budget: Budget, restarts: int = 6, position_tolerance: float = 0.001,
           angle_tolerance: float = 0.005, iterations: int = 80, damping: float = 0.05) -> Optional[np.ndarray]:
     """Joint values, within limits, that put the gripper frame at the world
     `position` with the 3x3 rotation `turn`. The search starts from
-    `seed_qpos` and restarts from random arm configurations until the deadline
-    or `restarts` is spent. Only the torso and arm move. None if not found."""
+    `seed_qpos` and restarts from random arm configurations until `restarts`
+    or the work `budget` is spent (one step per iteration). Only the torso and arm move. None if not found."""
     robot = sim.robot
     joints = list(robot.plan_joints)
     limited = ~robot.wraps[joints]
@@ -69,8 +69,9 @@ def solve(sim: PlanningSim, position, turn: np.ndarray, seed_qpos, rng: np.rando
             q = seed.copy()
             q[joints] = robot.sample(rng, joints)
         for _ in range(iterations):
-            if deadline.expired():
+            if budget.expired():
                 return None
+            budget.spend()
             here, facing = sim.gripper_pose(q)
             error = np.concatenate([target - here, rotation_vector(turn @ facing.T)])
             if np.linalg.norm(error[:3]) < position_tolerance and np.linalg.norm(error[3:]) < angle_tolerance:

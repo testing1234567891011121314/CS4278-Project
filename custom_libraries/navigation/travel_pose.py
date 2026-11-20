@@ -13,7 +13,7 @@ from typing import Optional
 
 import numpy as np
 
-from custom_libraries.common import Deadline
+from custom_libraries.common import Budget
 from custom_libraries.grasping import ik
 from custom_libraries.robot import wrap_angle
 
@@ -98,7 +98,7 @@ def hand_rotation(pose: TravelPose, turn: np.ndarray, forward: np.ndarray) -> np
 
 
 def fold_path(scene, rng: np.random.Generator, q0: np.ndarray, grip: np.ndarray, centre: np.ndarray,
-              orientation, spin: np.ndarray, reach: float, seconds: float = 6.0,
+              orientation, spin: np.ndarray, reach: float, work: int = 12000,
               rigid: bool = True) -> tuple[np.ndarray, dict]:
     """A (K, 15) joint path from `q0` that turns the hand by `spin` about the
     point `grip` (where the pads hold the object) while bringing that point
@@ -141,7 +141,7 @@ def fold_path(scene, rng: np.random.Generator, q0: np.ndarray, grip: np.ndarray,
                        for k in robot.arm)
 
         # The end pose, from seeds with the arm in the plane of the centre line.
-        deadline, found = Deadline(seconds), []
+        budget, found = Budget(work), []
         pan, lift, upper_roll, elbow, fore_roll, flex, _ = robot.arm
         for seed_lift in (-0.8, -0.2, 0.4):
             for seed_elbow in (0.8, 1.6):
@@ -149,7 +149,7 @@ def fold_path(scene, rng: np.random.Generator, q0: np.ndarray, grip: np.ndarray,
                     seed = q0.copy()
                     seed[[pan, upper_roll, fore_roll]] = 0.0
                     seed[[lift, elbow, flex]] = seed_lift, seed_elbow, seed_flex
-                    q = ik.solve(sim, position_to, turn_to, seed, rng, deadline, restarts=0)
+                    q = ik.solve(sim, position_to, turn_to, seed, rng, budget, restarts=0)
                     if q is not None and clear(q):
                         found.append(q)
         if not found:
@@ -172,7 +172,7 @@ def fold_path(scene, rng: np.random.Generator, q0: np.ndarray, grip: np.ndarray,
                 part = axis_rotation(axis, (turned[0] + t * (turned[1] - turned[0])) * angle)
                 shift = (moved[0] + t * (moved[1] - moved[0])) * (grip_to - grip)
                 q = ik.solve(sim, grip + shift + part @ (position - grip), part @ turn,
-                             last + (end - start) / count, rng, deadline, restarts=0)
+                             last + (end - start) / count, rng, budget, restarts=0)
                 if q is None or np.abs(q[joints] - last[joints]).max() > 0.3:
                     stats["blocked"] = f"{name}, step {k} of {count}: " + \
                         ("out of reach" if q is None else "the arm would jump")

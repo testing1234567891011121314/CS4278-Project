@@ -12,7 +12,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from trial import close_env, make_env, quiet
 
-from custom_libraries.common import Deadline
+from custom_libraries.common import Budget
 from custom_libraries.grasping import ik
 from solver import Config, Solver, State
 
@@ -44,7 +44,7 @@ if found:
     print("commanded minus measured:", np.round((q - measured)[joints], 4))
     for label, restarts, iterations in (("no restart, 80 iterations", 0, 80), ("no restart, 400", 0, 400), ("6 restarts", 6, 80)):
         out = ik.solve(scene.sim, position + 0.01 * gap / np.linalg.norm(gap), turn, q, np.random.default_rng(0),
-                       Deadline(5.0), restarts=restarts, iterations=iterations)
+                       Budget(100000), restarts=restarts, iterations=iterations)
         print(f"1 cm toward the goal, {label}:", None if out is None else np.round(out[joints] - q[joints], 3))
     j = ik.jacobian(scene.sim, q)
     print("singular values of the hand's Jacobian:", np.round(np.linalg.svd(j, compute_uv=False), 4))

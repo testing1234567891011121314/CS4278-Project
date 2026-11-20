@@ -3,7 +3,7 @@ import unittest
 
 import numpy as np
 
-from custom_libraries.common import Deadline
+from custom_libraries.common import Budget
 from custom_libraries.grasping import ik
 from tests.support import make_env, sim_test
 from tools.trial import close_env
@@ -63,7 +63,7 @@ class InverseKinematics(unittest.TestCase):
         found = 0
         for _ in range(30):
             _, (position, turn) = self.random_pose(rng)
-            q = ik.solve(self.sim, position, turn, self.home, rng, Deadline(2.0))
+            q = ik.solve(self.sim, position, turn, self.home, rng, Budget(2000))
             if q is None:
                 continue
             found += 1
@@ -76,7 +76,7 @@ class InverseKinematics(unittest.TestCase):
         """R8"""
         rng = np.random.default_rng(3)
         _, (position, turn) = self.random_pose(rng)
-        q = ik.solve(self.sim, position, turn, self.home, rng, Deadline(2.0))
+        q = ik.solve(self.sim, position, turn, self.home, rng, Budget(2000))
         self.assertIsNotNone(q)
         self.assertTrue(np.all(q >= self.robot.lower - 1e-9) and np.all(q <= self.robot.upper + 1e-9))
         others = [k for k in range(15) if k not in self.robot.plan_joints]
@@ -88,18 +88,18 @@ class InverseKinematics(unittest.TestCase):
         """R8: a pose 3 m above the base."""
         rng = np.random.default_rng(4)
         position = np.array([self.robot.base_origin[0], 0.0, 3.0])
-        self.assertIsNone(ik.solve(self.sim, position, np.eye(3), self.home, rng, Deadline(2.0)))
+        self.assertIsNone(ik.solve(self.sim, position, np.eye(3), self.home, rng, Budget(2000)))
 
-    def test_deadline_is_respected(self):
+    def test_work_budget_is_respected(self):
         """R26"""
         rng = np.random.default_rng(5)
-        self.assertIsNone(ik.solve(self.sim, [0, 0, 3.0], np.eye(3), self.home, rng, Deadline(0.0)))
+        self.assertIsNone(ik.solve(self.sim, [0, 0, 3.0], np.eye(3), self.home, rng, Budget(0)))
 
     def test_same_seed_gives_the_same_solution(self):
         """R24"""
         _, (position, turn) = self.random_pose(np.random.default_rng(6))
-        a = ik.solve(self.sim, position, turn, self.home, np.random.default_rng(7), Deadline(2.0))
-        b = ik.solve(self.sim, position, turn, self.home, np.random.default_rng(7), Deadline(2.0))
+        a = ik.solve(self.sim, position, turn, self.home, np.random.default_rng(7), Budget(2000))
+        b = ik.solve(self.sim, position, turn, self.home, np.random.default_rng(7), Budget(2000))
         np.testing.assert_array_equal(a, b)
 
 

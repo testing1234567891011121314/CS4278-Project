@@ -20,7 +20,7 @@ from typing import Optional
 import numpy as np
 
 from custom_libraries.collision import CollisionChecker
-from custom_libraries.common import Deadline, Status
+from custom_libraries.common import Budget, Status
 from custom_libraries.grasping import arm_planner, ik
 from custom_libraries.grasping.arm_planner import GraspPlan
 from custom_libraries.grasping.candidates import GraspCandidate, antipodal_candidates, rake_candidates
@@ -61,7 +61,7 @@ class Config:
     hold_ticks: int = 50             # R11
     goal_tolerance: float = 0.10     # R15, metres
 
-    # Tick budget of each state (R19). The first three add up to the lift deadline.
+    # Tick budget of each state (R19). The first three add up to the lift budget.
     settle_ticks: int = 150
     go_to_object_ticks: int = 190
     grasp_ticks: int = 260
@@ -73,10 +73,11 @@ class Config:
     min_retry_ticks: int = 300       # no new attempt is started with fewer ticks left
     max_attempts: int = 8            # nor after this many attempts
 
-    # CPU-time budgets of the planning calls (R26), seconds.
-    ready_seconds: float = 3.0
-    parking_seconds: float = 20.0
-    planning_seconds: float = 20.0
+    # Work allowed to each planning call (R26), in cycles of work done (common.Budget), never in seconds:
+    # a time limit made the same seed pick the plate in one run and not in the next.
+    ready_work: int = 6000           # the move to the ready pose
+    parking_work: int = 40000        # choosing where the base parks
+    planning_work: int = 40000       # the arm motion of one grasp
 
     # Geometry of the drive.
     grid_resolution: float = 0.10    # metres per cell of the floor map
@@ -298,9 +299,9 @@ class Solver:
         opened[list(robot.fingers)] = robot.upper[list(robot.fingers)]
         scene.collision.release()
         scene.collision.focus([x, y])
-        deadline = Deadline(config.ready_seconds)
+        budget = Budget(config.ready_work)
         for _ in range(4):
-            ready = ik.solve(scene.sim, position, turn, opened, self.rng, deadline)
+            ready = ik.solve(scene.sim, position, turn, opened, self.rng, budget)
             if ready is None:
                 return None
             if scene.collision.is_free(ready, 0.02):
@@ -323,7 +324,7 @@ class Solver:
             if ready is not None:
                 scene.sim.set_object(obs["object_pos"], obs["object_xyzw"])
                 path = arm_planner.plan_transit(start, ready, scene.sim, scene.collision, self.rng,
-                                                Deadline(self.config.ready_seconds),
+                                                Budget(self.config.ready_work),
                                                 avoid_object=attempt.unwind is None)
             if path is None:                         # stay as we are, with the hand open
                 path = np.array([start, start])
@@ -388,7 +389,7 @@ class Solver:
             attempt.object_at_plan = obj.position.copy()
             attempt.parking, stats = choose_parking(attempt.candidates, obj, scene.grid, scene.sim,
                                                     scene.collision, self._hold, self.rng,
-                                                    Deadline(config.parking_seconds),
+                                                    Budget(config.parking_work),
                                                     exclude=tuple(self._tried_parking),
                                                     facing=toward if rake else None, tiers=tiers)
             if attempt.parking is None and not rake and not self._dragged and attempt.pick_mode == "floor":
@@ -401,7 +402,7 @@ class Solver:
                     attempt.candidates, attempt.tiers = candidates, [0] * len(candidates)
                     attempt.parking, stats = choose_parking(candidates, obj, scene.grid, scene.sim,
                                                             scene.collision, self._hold, self.rng,
-                                                            Deadline(config.parking_seconds), facing=toward)
+                                                            Budget(config.parking_work), facing=toward)
             attempt.search = dict(found=len(found), candidates=len(candidates),
                                   kinds=sorted({c.kind for c in candidates}),
                                   object=np.round(obj.position, 3).tolist(), parking=stats)
@@ -435,7 +436,7 @@ class Solver:
             order = [k for k in ranked if k in known] + [k for k in ranked if k not in known]
             plan, stats = arm_planner.plan_grasp([attempt.candidates[k] for k in order], self._hold, obj,
                                                  scene.sim, scene.collision, self.rng,
-                                                 Deadline(config.planning_seconds),
+                                                 Budget(config.planning_work),
                                                  drag_for=lambda c: c.kind == "rake")
             attempt.plan_stats = stats
             if plan is None:

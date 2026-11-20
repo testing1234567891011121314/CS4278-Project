@@ -8,7 +8,7 @@ from typing import Optional
 import numpy as np
 
 from custom_libraries.collision import CollisionChecker
-from custom_libraries.common import Deadline
+from custom_libraries.common import Budget
 from custom_libraries.grasping.arm_planner import PlannerSettings, grasp_pose
 from custom_libraries.grasping.candidates import GraspCandidate
 from custom_libraries.navigation import a_star
@@ -24,6 +24,7 @@ class ParkingSettings:
     directions: int = 16                # places tried around the object at each distance
     margin: float = 0.02                # least gap between the robot and the scene while driving, metres
     max_poses: int = 14                 # parking poses examined in full before giving up
+    pose_cost: int = 20                 # steps of work one place is counted as, before any arm solve there
     max_candidates: int = 12            # grasp candidates tested for reach at each pose
     back_off: float = 0.6               # farthest the drive's last, straight stretch starts from the pose
     exclude_radius: float = 0.15        # a pose this close to one already tried counts as the same
@@ -55,7 +56,7 @@ def make_follower(path: np.ndarray, start_yaw: float, final_yaw: float, settings
 
 
 def choose_parking(candidates: list[GraspCandidate], obj: ObjectState, grid: OccupancyGrid, sim: PlanningSim,
-                   collision: CollisionChecker, qpos, rng: np.random.Generator, deadline: Deadline,
+                   collision: CollisionChecker, qpos, rng: np.random.Generator, budget: Budget,
                    exclude: tuple = (), settings: ParkingSettings = ParkingSettings(),
                    planner: PlannerSettings = PlannerSettings(), facing=None, tiers=None) -> tuple[Optional[ParkingPose], dict]:
     """A pose for the base, facing the object, such that: the robot (with the
@@ -84,9 +85,10 @@ def choose_parking(candidates: list[GraspCandidate], obj: ObjectState, grid: Occ
         planner, ik_restarts=settings.reach_restarts if facing is None else settings.line_restarts)
     for offset in offsets:
         for distance in settings.distances:
-            if deadline.expired() or stats["examined"] >= settings.max_poses:
-                stats["out_of_time"] = deadline.expired()
+            if budget.expired() or stats["examined"] >= settings.max_poses:
+                stats["out_of_time"] = budget.expired()         # out of work, as the report's name has it
                 return None, stats
+            budget.spend(settings.pose_cost)
             angle = facing_angle + offset
             outward = np.array([np.cos(angle), np.sin(angle)])
             spot = target + distance * outward
@@ -113,7 +115,7 @@ def choose_parking(candidates: list[GraspCandidate], obj: ObjectState, grid: Occ
                 candidate = candidates[index]
                 opened = parked.copy()
                 opened[list(robot.fingers)] = sim.gripper.finger_joint(candidate.opening)
-                if grasp_pose(candidate, opened, sim, collision, rng, deadline, planner) is not None:
+                if grasp_pose(candidate, opened, sim, collision, rng, budget, planner) is not None:
                     reachable.append(index)
                     if len(reachable) >= 3:
                         break

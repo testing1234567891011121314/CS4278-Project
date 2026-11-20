@@ -11,7 +11,7 @@ from typing import Optional
 import numpy as np
 
 from custom_libraries.collision import CollisionChecker
-from custom_libraries.common import Deadline
+from custom_libraries.common import Budget
 from custom_libraries.grasping import ik
 from custom_libraries.grasping.candidates import GraspCandidate
 from custom_libraries.planning_sim import PlanningSim
@@ -35,12 +35,11 @@ class PlannerSettings:
     least_lift: float = 0.12            # shortest lift accepted when the full one does not plan
     line_step: float = 0.01             # metres between waypoints of a straight move
     max_joint_jump: float = 0.30        # most a joint may change between such waypoints, rad
-    ik_seconds: float = 2.0             # CPU-time guard for one grasp-pose solve. The solve is bounded by its
-                                        # iteration counts; the guard only stops a runaway, so that results do
-                                        # not depend on how busy the machine is (R24)
     ik_restarts: int = 4                # random restarts of a grasp-pose solve
     tree_step: float = 0.30             # how far one extension of a search tree goes, rad
-    tree_seconds: float = 4.0           # CPU time for one transit search
+    tree_work: int = 12000              # work allowed to one transit search, in steps (common.Budget): each
+                                        # extension of a tree costs `extend_cost`
+    extend_cost: int = 4                # steps one tree extension is counted as (it checks several configurations)
     shortcuts: int = 40                 # attempts to straighten a found transit
 
 
@@ -58,7 +57,7 @@ class GraspPlan:
 
 
 def plan_grasp(candidates: list[GraspCandidate], qpos, obj: ObjectState, sim: PlanningSim,
-               collision: CollisionChecker, rng: np.random.Generator, deadline: Deadline,
+               collision: CollisionChecker, rng: np.random.Generator, budget: Budget,
                settings: PlannerSettings = PlannerSettings(),
                drag_for=None) -> tuple[Optional[GraspPlan], dict]:
     """The first candidate, in order, for which the whole motion plans: grasp
@@ -73,16 +72,16 @@ def plan_grasp(candidates: list[GraspCandidate], qpos, obj: ObjectState, sim: Pl
     collision.release()
     collision.focus(robot.base_pose(start)[:2])
     for index, candidate in enumerate(candidates):
-        if deadline.expired():
+        if budget.expired():
             break
         stats["tried"] += 1
         opened = start.copy()
         opened[list(robot.fingers)] = sim.gripper.finger_joint(candidate.opening)
-        grasp = grasp_pose(candidate, opened, sim, collision, rng, deadline, settings, stats)
+        grasp = grasp_pose(candidate, opened, sim, collision, rng, budget, settings, stats)
         if grasp is None:
             continue
         position, turn = candidate.gripper_pose()
-        approach = straight_line(grasp, -candidate.approach_axis, settings.pregrasp, sim, collision, rng, deadline,
+        approach = straight_line(grasp, -candidate.approach_axis, settings.pregrasp, sim, collision, rng, budget,
                                  settings, object_margin=hand_margin(candidate, settings))
         if approach is None or len(approach) < 2:
             stats["no_approach"] += 1
@@ -93,7 +92,7 @@ def plan_grasp(candidates: list[GraspCandidate], qpos, obj: ObjectState, sim: Pl
         # An object wedged into the scene cannot be checked against it on the way out.
         wedged = collision.clearances(grasp, with_object=False)["load"] < -settings.wedged
         lift = np.array([grasp]) if drag else \
-            straight_line(grasp, np.array([0.0, 0.0, 1.0]), settings.lift, sim, collision, rng, deadline,
+            straight_line(grasp, np.array([0.0, 0.0, 1.0]), settings.lift, sim, collision, rng, budget,
                           settings, object_margin=0.0, load_after=None if wedged else 0.01,
                           least=settings.least_lift)
         collision.release()
@@ -101,8 +100,7 @@ def plan_grasp(candidates: list[GraspCandidate], qpos, obj: ObjectState, sim: Pl
         if lift is None:
             stats["no_lift"] += 1
             continue
-        transit = plan_transit(opened, approach[0], sim, collision, rng,
-                               Deadline(min(settings.tree_seconds, deadline.remaining())), settings)
+        transit = plan_transit(opened, approach[0], sim, collision, rng, budget.part(settings.tree_work), settings)
         if transit is None:
             stats["no_transit"] += 1
             continue
@@ -165,14 +163,13 @@ def hands_that_fit(candidates: list[GraspCandidate], obj: ObjectState, sim: Plan
 
 
 def grasp_pose(candidate: GraspCandidate, opened, sim: PlanningSim, collision: CollisionChecker,
-               rng: np.random.Generator, deadline: Deadline, settings: PlannerSettings,
+               rng: np.random.Generator, budget: Budget, settings: PlannerSettings,
                stats: Optional[dict] = None) -> Optional[np.ndarray]:
     """Joint values that put the open hand on the candidate without touching
     anything, or None. The hand is symmetric, so both ways round are tried."""
     position, turn = candidate.gripper_pose()
     blocked = False
     for flip in (np.eye(3), np.diag([1.0, -1.0, -1.0])):
-        budget = Deadline(min(settings.ik_seconds, deadline.remaining()))
         q = ik.solve(sim, position, turn @ flip, opened, rng, budget, restarts=settings.ik_restarts)
         if q is None:
             continue
@@ -185,7 +182,7 @@ def grasp_pose(candidate: GraspCandidate, opened, sim: PlanningSim, collision: C
 
 
 def straight_line(q_start, direction, distance: float, sim: PlanningSim, collision: CollisionChecker,
-                  rng: np.random.Generator, deadline: Deadline, settings: PlannerSettings,
+                  rng: np.random.Generator, budget: Budget, settings: PlannerSettings,
                   object_margin: Optional[float] = None, load_after: Optional[float] = None,
                   least: Optional[float] = None) -> Optional[np.ndarray]:
     """A (K, 15) joint path that moves the gripper `distance` metres along
@@ -202,7 +199,7 @@ def straight_line(q_start, direction, distance: float, sim: PlanningSim, collisi
     steps = int(round(distance / settings.line_step))
     for k in range(1, steps + 1):
         travelled = k * settings.line_step
-        q = ik.solve(sim, origin + direction * travelled, turn, path[-1], rng, deadline, restarts=0)
+        q = ik.solve(sim, origin + direction * travelled, turn, path[-1], rng, budget, restarts=0)
         loaded = None if load_after is None or travelled <= load_after else 0.0
         ok = q is not None and np.abs(q[joints] - path[-1][joints]).max() <= settings.max_joint_jump and \
             collision.is_free(q, settings.close_margin, object_margin=object_margin, load_margin=loaded)
@@ -214,12 +211,12 @@ def straight_line(q_start, direction, distance: float, sim: PlanningSim, collisi
 
 
 def plan_transit(q_start, q_goal, sim: PlanningSim, collision: CollisionChecker, rng: np.random.Generator,
-                 deadline: Deadline, settings: PlannerSettings = PlannerSettings(),
+                 budget: Budget, settings: PlannerSettings = PlannerSettings(),
                  avoid_object: bool = True) -> Optional[np.ndarray]:
     """A collision-free (K, 15) joint path from `q_start` to `q_goal` that
     moves only the torso and arm. The straight joint-space move is tried
     first; otherwise two random trees are grown toward each other from both
-    ends and the path found is straightened. None if none is found in time.
+    ends and the path found is straightened. None if none is found within the work budget.
     With `avoid_object` off the object is not treated as an obstacle (used to
     get the arm away after a failed grasp, when the object may lie against it)."""
     near = settings.transit_object_margin if avoid_object else None
@@ -268,7 +265,8 @@ def plan_transit(q_start, q_goal, sim: PlanningSim, collision: CollisionChecker,
         return out
 
     grow = 0
-    while not deadline.expired():
+    while not budget.expired():
+        budget.spend(settings.extend_cost)
         sample = a.copy()
         sample[joints] = rng.uniform(lower, upper)
         new = extend(trees[grow], sample)
@@ -276,6 +274,7 @@ def plan_transit(q_start, q_goal, sim: PlanningSim, collision: CollisionChecker,
             target = trees[grow][new][0]
             other = trees[1 - grow]
             while True:                                  # pull the other tree toward the new node
+                budget.spend(settings.extend_cost)
                 reached = extend(other, target)
                 if reached is None:
                     break
