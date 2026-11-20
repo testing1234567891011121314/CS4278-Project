@@ -1,0 +1,16 @@
+object,name,rest_z,lift_tick,max_lift_cm,hold_50,held_at_end,backed_off_m,state,attempts,failure,grasp_error_mm,errors,ticks,wall_s,delivered_tick,goal_cm,navigate_tick
+0,master_chef_can,0.696,207,15.2,True,True,0.6,navigate,2,no parking pose,21.0,0,492,19.5,,1826.7,473
+1,sugar_box,0.65,212,16.1,True,True,0.6,navigate,1,,13.7,0,417,12.2,,1844.7,398
+2,tomato_soup_can,0.677,225,15.4,True,True,0.6,navigate,2,no parking pose,1.0,0,372,14.4,,1827.4,353
+3,mustard_bottle,0.66,335,14.7,True,True,0.6,navigate,2,object moved during the drive,0.7,0,538,14.3,,1852.7,519
+4,potted_meat_can,0.668,170,16.4,True,True,0.6,navigate,1,,2.1,0,320,13.0,,1826.1,301
+5,banana,0.645,192,15.0,True,True,0.6,navigate,1,,3.2,0,324,10.6,,1827.3,305
+6,strawberry,0.646,223,15.8,True,True,0.6,navigate,1,,8.2,0,336,11.0,,1830.3,317
+7,apple,0.662,249,15.7,True,True,0.6,navigate,1,,1.1,0,382,12.9,,1827.3,363
+8,bleach_cleanser,0.652,514,15.5,True,True,0.6,navigate,3,object moved during the drive; no grasp plan,3.3,0,786,39.5,,1727.3,767
+9,bowl,0.654,193,15.7,True,True,0.6,navigate,1,,1.9,0,338,14.3,,1827.3,319
+10,mug,0.045,302,15.1,True,True,0.6,navigate,2,object moved during the drive,3.3,0,423,28.5,,1954.5,404
+11,plate,0.641,387,15.2,True,True,0.6,navigate,2,dragged to the edge,2.2,0,654,21.8,,1870.6,635
+12,large_marker,0.011,811,15.6,True,True,0.38,back_off,5,object moved before the close; object moved during the drive; object moved during the drive; no grasp plan,4.7,0,900,37.5,,1617.1,
+13,hammer,0.644,159,15.7,True,True,0.6,navigate,1,,22.1,0,324,11.1,,1826.9,305
+14,foam_brick,0.652,173,15.3,True,True,0.6,navigate,1,,1.4,0,295,11.0,,1827.2,276
