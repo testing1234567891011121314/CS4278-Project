@@ -24,7 +24,7 @@ Proposed in the design session, not yet confirmed by the user.
 | Id | Requirement | Source |
 |---|---|---|
 | R1 | `Solver(env)` replaces the course's `KeyBoardController`: `get_action()` returns one `numpy.ndarray` of shape (15,) of absolute joint targets per tick. | spec |
-| R2 | The course files are not edited: `pick_nav_reach_env.py`, `maze_utils.py`, `utils.py`, `keyboard_control.py`, `assets/`. No object, contact or dynamics parameter is changed. | brief 1 |
+| R2 | The course files are not edited: `maze_utils.py`, `utils.py`, `keyboard_control.py`, `assets/`. In `pick_nav_reach_env.py` only the controller is swapped, as the readme instructs: the import and the two lines of its main block that used `KeyBoardController` now use `Solver`. No object, contact or dynamics parameter is changed. | brief 1, user |
 | R3 | Grasp generation, inverse kinematics, motion planning and navigation are our own code. No planning library. | spec, brief 1 |
 | R4 | The solver works on a variant of the scene. Frames, sizes and positions (robot spawn, table, wall size, goal height) are read from the observation or the simulator, never written as constants. No rule is keyed on the object's id. | user, brief 1 and 10 |
 | R5 | The layout is: `solver.py` with an enum of states; `custom_libraries/` for grasping and navigation; `tools/` for benchmarking; `tests/` for regressions. | user |

@@ -7,7 +7,7 @@ import trimesh
 from pathlib import Path
 from maze_utils import generate_maze_map, add_left_room_to_maze, create_maze_urdf
 from copy import deepcopy
-from keyboard_control import KeyBoardController
+from solver import Solver
 from utils import closest_joint_values
 
 class PickNavReachEnv:
@@ -375,13 +375,13 @@ if __name__ == "__main__":
     env.reset()
     print(f"Action size: {env.action_size}, Obs size: {env.obs_size}")
     
-    keyboard_controller = KeyBoardController(env)
+    solver = Solver(env)
     
     # for i in range (10000):
     import time
     while True:
         # random_action = np.random.uniform(-1.0, 1.0, size=(env.action_size,))
-        action = keyboard_controller.get_action()
+        action = solver.get_action()
         obs, info = env.step(action)
         for k, v in info.items():
             print(f"{k}: {v}")
