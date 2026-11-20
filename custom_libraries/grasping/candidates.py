@@ -32,8 +32,9 @@ class CandidateSettings:
     max_wall: float = 0.012             # thickest wall treated as thin
     wall_quality: float = 0.5           # a thin wall's place among the pairs' alignment scores (0 to 1)
     tight_quality: float = 0.3          # a tight fit's alignment score is scaled by this
-    central: str = "mass"               # what a grasp should be near: "mass", the closing line passes the centre
-                                        # of mass; "centre", the grasp is near the middle of the bounding box
+    central: str = "centre"             # what a grasp should be near: "centre", the middle of the bounding box
+                                        # (as the pick was verified); "mass", the closing line passes the centre
+                                        # of mass (tried for the carry's sake and withdrawn, GRASP.md section 8)
     rake_gap: float = 0.006             # a raking hand starts this far beyond the object's far edge, metres
     rake_height: float = 0.006          # ... with its fingertips this far above the support
     rake_leans: tuple = (0.0, np.radians(20.0), np.radians(40.0), np.radians(60.0))   # how far the raking

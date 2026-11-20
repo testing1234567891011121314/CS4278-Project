@@ -1,0 +1,17 @@
+master_chef_can  lift@167 max 15.2 cm  hold50=True  held_end=False  back-off 1.0 m  state=settle  attempts=7  89.8 s  object lost during the back-off; object moved during the drive; object moved during the drive; object moved during the drive; object moved during the drive; obj
+sugar_box        lift@198 max 15.2 cm  hold50=True  held_end=True  back-off 0.6 m  state=navigate  attempts=1  13.1 s  
+tomato_soup_can  lift@156 max 15.3 cm  hold50=True  held_end=True  back-off 0.6 m  state=navigate  attempts=1  20.1 s  
+mustard_bottle   lift@342 max 15.1 cm  hold50=True  held_end=True  back-off 0.6 m  state=navigate  attempts=2  25.9 s  object moved during the drive
+potted_meat_can  lift@196 max 16.6 cm  hold50=True  held_end=True  back-off 0.6 m  state=navigate  attempts=1  18.0 s  
+banana           lift@161 max 15.4 cm  hold50=True  held_end=True  back-off 0.6 m  state=navigate  attempts=1  19.0 s  
+strawberry       lift@228 max 15.7 cm  hold50=True  held_end=True  back-off 0.6 m  state=navigate  attempts=1  21.4 s  
+apple            lift@221 max 15.4 cm  hold50=True  held_end=True  back-off 0.6 m  state=navigate  attempts=1  19.3 s  
+bleach_cleanser  lift@509 max 15.7 cm  hold50=True  held_end=True  back-off 0.6 m  state=navigate  attempts=3  84.8 s  object moved during the drive; no grasp plan
+bowl             lift@187 max 16.9 cm  hold50=True  held_end=True  back-off 0.6 m  state=navigate  attempts=1  21.6 s  
+mug              lift@302 max 15.3 cm  hold50=True  held_end=True  back-off 0.6 m  state=navigate  attempts=2  81.6 s  object moved during the drive
+plate            lift@None max None cm  hold50=False  held_end=False  back-off None m  state=grasp  attempts=6  71.0 s  dragged to the edge; arm did not reach the end of the approach; arm did not reach the end of the transit; arm did not reach the end of the transit; arm did not 
+large_marker     lift@None max None cm  hold50=False  held_end=False  back-off None m  state=stopped  attempts=8  349.5 s  object moved before the close; no parking pose; no parking pose; no parking pose; no parking pose; no parking pose; no parking pose; no parking pose
+hammer           lift@170 max 15.4 cm  hold50=False  held_end=True  back-off 0.59 m  state=navigate  attempts=2  16.6 s  object lost during the hold
+foam_brick       lift@164 max 15.2 cm  hold50=True  held_end=True  back-off 0.6 m  state=navigate  attempts=1  13.3 s  
+
+lifted, held 50 ticks and backed off with the object: 11/15   (maze seed 42, cloud seed 1)   results: /home/shared/GitHub/CS4278-Project/runs/pick_work/seed1_a/results.csv

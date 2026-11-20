@@ -1,0 +1,124 @@
+library_01: 63 objects
+  reached GRASP                     59
+  lifted 10 cm with both pads on    53
+  held 50 ticks                     48
+  reached NAVIGATE                  53
+  reached REACH                     26
+  delivered                         24
+
+WHAT ENDED EACH ATTEMPT (all attempts of all objects)
+    63  object lost during the carry
+    48  no parking pose
+    35  no grasp candidates
+    21  object lost during the lift
+    16  object moved during the drive
+    11  object moved before the close
+     9  no clear route to the goal
+     8  object lost during the back-off
+     8  no grasp plan
+     8  hold not verified after the close
+     7  arm did not reach the end of the transit
+     3  dragged to the edge
+     2  object left behind during the drag
+     2  object lost during the hold
+     2  fingers closed on nothing
+     2  object lost while taking the hold for the carry
+     1  arm did not reach the end of the approach
+
+CARRIES: 89 planned, 24 delivered, 63 lost
+
+TICKS FROM ENTERING NAVIGATE TO THE LOSS
+  (the hold, the torso's rise, the wrist rolls and the turn on the spot take about the first 200-350)
+      0-99      2  ##
+    100-199     6  ######
+    200-299    16  ################
+    300-399    14  ##############
+    400-599     4  ####
+    600-999    13  #############
+   1000-1499    6  ######
+   1500-3000    2  ##
+
+BY THE CARRY'S SPEED
+                                 carries delivered  lost  median ticks to the loss
+  10-12                               37        13    24                       643
+  12-16                               19         5    13                       566
+  16-22                               16         4    11                       303
+  over 22                             17         2    15                       293
+
+BY WHEN THE CARRY STARTED
+                                 carries delivered  lost  median ticks to the loss
+  before tick 600                     45        14    31                       466
+  tick 600-1,500                      21         6    14                       362
+  after tick 1,500                    23         4    18                       294
+
+BY MASS
+                                 carries delivered  lost  median ticks to the loss
+  under 0.05 kg                       30         6    23                       466
+  0.05-0.2 kg                         42        16    25                       369
+  0.2-0.6 kg                           7         2     5                       295
+  over 0.6 kg                         10         0    10                       268
+
+BY THE GRASP'S WIDTH
+                                 carries delivered  lost  median ticks to the loss
+  under 20 mm                          6         2     4                       615
+  20-50 mm                            27         7    19                       566
+  50-85 mm                            41        13    27                       352
+  over 85 mm (hand nearly full)       15         2    13                       272
+
+BY DEPTH IN THE HAND (where on the pads the contact is)
+                                 carries delivered  lost  median ticks to the loss
+  0-8 mm from the pads' back          45        17    27                       356
+  12-24 mm                            44         7    36                       358
+
+BY THE HAND'S DIRECTION AT THE GRASP
+                                 carries delivered  lost  median ticks to the loss
+  straight down                       70        18    52                       369
+  tilted                              17         6     9                       272
+  level or pointing up                 2         0     2                       252
+
+BY WRIST STEERING
+                                 carries delivered  lost  median ticks to the loss
+  steered                             72        18    54                       362
+  not steered                         17         6     9                       278
+
+BY THE HOLD TAKEN
+                                 carries delivered  lost  median ticks to the loss
+  folded                              85        24    59                       369
+  kept as lifted                       1         0     1                        15
+  laid level                           2         0     2                       427
+  rolled level                         1         0     1                       226
+
+BY THE TURN ON THE SPOT THAT STARTS THE CARRY
+                                 carries delivered  lost  median ticks to the loss
+  under 45 degrees                    44        11    31                       348
+  45-90                               45        13    32                       369
+
+FROM THE TABLE, OR AFTER A RE-PICK FROM THE FLOOR
+                                 carries delivered  lost  median ticks to the loss
+  from the table                      41        13    28                       542
+  picked up from the floor            48        11    35                       339
+
+WHAT THE NEXT ATTEMPT DID AFTER A DROP IN THE CARRY
+    21  object lost during the carry
+    13  picked up again, and delivered or still being carried at the end
+     6  object lost during the lift
+     5  no grasp plan
+     4  object lost during the back-off
+     3  object moved during the drive
+     2  no grasp candidates
+     2  no clear route to the goal
+     2  no parking pose
+     2  object moved before the close
+     1  object lost while taking the hold for the carry
+
+NEVER LIFTED
+  019_pitcher_base             2.575 kg   first: no parking pose   most often: no parking pose
+  030_fork                     0.021 kg   first: object left behind during the drag   most often: no grasp candidates
+  031_spoon                    0.027 kg   first: object moved before the close   most often: no grasp candidates
+  032_knife                    0.024 kg   first: object left behind during the drag   most often: no grasp candidates
+  053_mini_soccer_ball         0.934 kg   first: no parking pose   most often: no parking pose
+  059_chain                    0.188 kg   first: no parking pose   most often: no parking pose
+  062_dice                     0.004 kg   first: object lost during the lift   most often: hold not verified after the close
+  070-a_colored_wood_blocks    2.44 kg   first: no parking pose   most often: no parking pose
+  071_nine_hole_peg_test       0.622 kg   first: dragged to the edge   most often: no grasp candidates
+  077_rubiks_cube              0.181 kg   first: arm did not reach the end of the approach   most often: arm did not reach the end of the transit

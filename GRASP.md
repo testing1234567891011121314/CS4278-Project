@@ -306,3 +306,51 @@ The switch does trade two objects: the sugar box is delivered with it off
 The pick itself is unchanged by all of the above: in `runs/deliver_11` every
 object is lifted at the tick it was in `runs/deliver_09`.
 
+## 8. The grasp-side changes of sections 6 and 7 are withdrawn
+
+Written 2026-11-20. Sections 1-7 are left as written.
+
+**Rule (from the user).** A grasp is chosen to get the object off the table.
+A loss during the carry is fixed after the lift, by how the hand and arm are
+posed and how the robot drives, not by choosing a different grasp. An optimal
+grasp is not an optimal travel pose (`docs/plan.md`, "Segment 3 from here").
+
+**Withdrawn**, each left in the code as a setting that is off:
+
+| Change | Setting, now |
+|---|---|
+| 23: grasps scored by where the centre of mass lies from the pads' line; "swings" tier; lift rule's lever from the centre of mass | `Config.rank_by_mass` False; `CandidateSettings.central` "centre" |
+| 23: tight fits kept in score order | removed; `hands_that_fit` is as in `b701e73` |
+| 24: arm solver leaves out a joint stuck on its limit | `ik.solve(unstick=...)`, False for every arm motion of the pick, True for the hold and the final reach |
+| 27: long objects gripped between the centre of mass and the nearer end | `Config.hang_long` False |
+
+**Why.** Under `run.sh` (unseeded cloud, the maze `run_batch.py` builds) the
+user saw the plate no longer grasped after these changes, and the hammer not
+gripped the way change 27 intended. My evidence for them had been one fixed
+cloud seed in the env's own maze.
+
+**Correction to section 4.** "15 of 15" there is two runs: cloud seeds 300
+and 301, the env's own maze. It is not a rate. On cloud seed 1 in `run.sh`'s
+maze the same code (`b701e73`) lifts and holds 13 of 15 in one run (not the
+marker; the hammer is lifted but not held 50 ticks).
+
+**Planning limits count work, not time** (user's instruction). `Budget` in
+`custom_libraries/common.py` replaces the CPU-time `Deadline` everywhere: one
+step is one iteration of the arm solver; tree and parking searches spend a
+few steps per configuration checked. Reason: with time limits the same code
+on the same seed gave two different results for the plate.
+
+**Check of the restore** (cloud seed 1, `run.sh`'s maze, pick only;
+`runs/pick_eq_old_1.log` is `b701e73`'s code, `runs/pick_work_seed1_a.log`
+the restored code with work limits):
+
+| Objects | Result |
+|---|---|
+| master chef can, sugar box, soup can, mustard, potted meat can, banana, strawberry, apple, bleach cleanser, bowl, large marker, hammer, foam brick (13) | identical lift tick, hold result and number of attempts |
+| mug | lifted one attempt sooner (tick 302 instead of 323): at tick 198 the old code's 20-second limit abandoned a grasp plan that the work limit lets finish |
+| plate | not lifted, where that old run lifted it at tick 349. The old code itself, run again on the same seed, also fails to lift it, tick for tick as the restored code does. The two old runs part at tick 251 against 255, after the rake, when the arm returns to its ready pose: in the run that went on to succeed, that move was cut short. The cause was not traced further; the likeliest is the 3-second limit on solving for the ready pose. The work limit never cuts it short, so on this seed the plate now fails every time. |
+
+So with planning made repeatable, this seed gives 12 of 15 lifted and held
+(not the plate, the marker or the hammer). Whether each object reaches the
+bar of 4 trials in 5 is being measured on cloud seeds 1-5 (`runs/pick_work/`).
+

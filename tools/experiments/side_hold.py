@@ -30,7 +30,7 @@ import pybullet as p
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from trial import close_env, make_env, quiet
 
-from custom_libraries.common import Deadline
+from custom_libraries.common import Budget
 from custom_libraries.grasping import ik
 from custom_libraries.grasping.executor import PathStepper, is_held
 from custom_libraries.planning_sim import rotation
@@ -120,7 +120,7 @@ if way != "none":
     for k in range(1, int(abs(wanted) / 2.0) + 2):
         part = np.radians(np.sign(wanted) * min(abs(wanted), 2.0 * k))
         spin = about(closing, part)
-        nxt = ik.solve(scene.sim, grip + spin @ (position - grip), spin @ turn, q, solver.rng, Deadline(5.0),
+        nxt = ik.solve(scene.sim, grip + spin @ (position - grip), spin @ turn, q, solver.rng, Budget(5000),
                        restarts=0)
         if nxt is None:
             stopped = "out of reach"

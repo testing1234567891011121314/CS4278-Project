@@ -20,7 +20,7 @@ from typing import Optional
 import numpy as np
 
 from custom_libraries.collision import CollisionChecker
-from custom_libraries.common import Deadline, Status
+from custom_libraries.common import Budget, Status
 from custom_libraries.grasping import arm_planner, ik
 from custom_libraries.grasping.arm_planner import GraspPlan
 from custom_libraries.grasping.candidates import CandidateSettings, GraspCandidate, antipodal_candidates, \
@@ -63,7 +63,7 @@ class Config:
     hold_ticks: int = 50             # R11
     goal_tolerance: float = 0.10     # R15, metres
 
-    # Tick budget of each state (R19). The first three add up to the lift deadline.
+    # Tick budget of each state (R19). The first three add up to the lift budget.
     settle_ticks: int = 150
     go_to_object_ticks: int = 190
     grasp_ticks: int = 260
@@ -75,10 +75,11 @@ class Config:
     min_retry_ticks: int = 300       # no new attempt is started with fewer ticks left
     max_attempts: int = 8            # nor after this many attempts
 
-    # CPU-time budgets of the planning calls (R26), seconds.
-    ready_seconds: float = 3.0
-    parking_seconds: float = 20.0
-    planning_seconds: float = 20.0
+    # Work allowed to each planning call (R26), in steps of work done (common.Budget), never in seconds:
+    # a time limit made the same seed pick the plate in one run and not in the next.
+    ready_work: int = 6000           # the move to the ready pose
+    parking_work: int = 40000        # choosing where the base parks
+    planning_work: int = 40000       # the arm motion of one grasp
 
     # Geometry of the drive.
     grid_resolution: float = 0.10    # metres per cell of the floor map
@@ -96,8 +97,9 @@ class Config:
                                      # 12.5 N at 1.9 mm, 180 N at 30 mm)
     squeeze: float = 0.030           # how far inside the object the finger targets are put, metres
     pad_grip_radius: float = 0.006   # radius at which a pad's friction acts against the object turning on it
-    rank_by_mass: bool = True        # grasps are ranked by where the centre of mass lies from the pads' line
-                                     # (False: by nearness to the middle of the object, and swinging is ignored)
+    rank_by_mass: bool = False       # True: grasps are ranked by where the centre of mass lies from the pads'
+                                     # line and those the weight would swing go last. Withdrawn: a grasp is
+                                     # chosen to get the object off the table, not for the carry (docs/plan.md)
     grip_safety: float = 2.0         # the grip's friction must hold this many times the object's weight
     moment_safety: float = 2.0       # the pads must resist this many times the weight's turning moment, or
                                      # the object is first dragged to the edge of what it lies on
@@ -110,7 +112,7 @@ class Config:
     carry_margin: float = 0.012      # least gap between the robot with its load and the scene during the carry
     aligned_share: float = 0.2       # share of the base's jolt that still acts across the pads when the wrist
                                      # keeps their closing line along the direction of travel
-    reach_seconds: float = 6.0       # CPU-time budget for planning the final reach
+    reach_work: int = 12000          # work allowed to planning the hold for the carry, and the final reach
     # The hold for the carry. The object turns almost freely about the line
     # between the pads, so it is carried hanging below that line.
     carry_hold: bool = True          # re-pose the hand before the carry (False: carry in the post-lift pose)
@@ -129,7 +131,7 @@ class Config:
                                      # 9 of 15 delivered against 11 without (apple, mug and sugar box squeezed out)
     hold_settle: int = 20            # ticks waited after the re-pose for the object to stop swinging
     hold_rate: float = 0.03          # fastest any arm joint moves while the hold is taken, rad per tick
-    hang_long: bool = True           # a long object lying down is gripped between its centre of mass and its
+    hang_long: bool = False          # withdrawn, as rank_by_mass. True: a long object lying down is gripped between its centre of mass and its
                                      # nearer end, so it hangs on end from the pads with that end (a hammer's
                                      # head) above the fingers: it does not lag the base's turns, and if it
                                      # creeps down through the pads the head comes to rest on them
@@ -348,9 +350,9 @@ class Solver:
         opened[list(robot.fingers)] = robot.upper[list(robot.fingers)]
         scene.collision.release()
         scene.collision.focus([x, y])
-        deadline = Deadline(config.ready_seconds)
+        budget = Budget(config.ready_work)
         for _ in range(4):
-            ready = ik.solve(scene.sim, position, turn, opened, self.rng, deadline)
+            ready = ik.solve(scene.sim, position, turn, opened, self.rng, budget)
             if ready is None:
                 return None
             if scene.collision.is_free(ready, 0.02):
@@ -373,7 +375,7 @@ class Solver:
             if ready is not None:
                 scene.sim.set_object(obs["object_pos"], obs["object_xyzw"])
                 path = arm_planner.plan_transit(start, ready, scene.sim, scene.collision, self.rng,
-                                                Deadline(self.config.ready_seconds),
+                                                Budget(self.config.ready_work),
                                                 avoid_object=attempt.unwind is None)
             if path is None:                         # stay as we are, with the hand open
                 path = np.array([start, start])
@@ -456,11 +458,12 @@ class Solver:
                 return self._failed("no grasp candidates")
             attempt.candidates, attempt.tiers = candidates, tiers
             attempt.object_at_plan = obj.position.copy()
+            work = Budget(config.parking_work)
             attempt.parking, stats = choose_parking(attempt.candidates, obj, scene.grid, scene.sim,
-                                                    scene.collision, self._hold, self.rng,
-                                                    Deadline(config.parking_seconds),
+                                                    scene.collision, self._hold, self.rng, work,
                                                     exclude=tuple(self._tried_parking),
                                                     facing=toward if rake else None, tiers=tiers)
+            stats["work"] = work.spent
             if attempt.parking is None and not rake and not self._dragged and attempt.pick_mode == "floor":
                 # Out of reach where it lies, under something: rake it out
                 # the nearest way, to where the base can stand round it.
@@ -471,7 +474,7 @@ class Solver:
                     attempt.candidates, attempt.tiers = candidates, [0] * len(candidates)
                     attempt.parking, stats = choose_parking(candidates, obj, scene.grid, scene.sim,
                                                             scene.collision, self._hold, self.rng,
-                                                            Deadline(config.parking_seconds), facing=toward)
+                                                            Budget(config.parking_work), facing=toward)
             attempt.search = dict(found=len(found), candidates=len(candidates),
                                   kinds=sorted({c.kind for c in candidates}),
                                   object=np.round(obj.position, 3).tolist(), parking=stats)
@@ -503,10 +506,11 @@ class Solver:
             ranked = travel_order(attempt.candidates, toward, ParkingSettings().travel_weight, attempt.tiers)
             known = set(attempt.parking.reachable) if attempt.parking else set()
             order = [k for k in ranked if k in known] + [k for k in ranked if k not in known]
+            work = Budget(config.planning_work)
             plan, stats = arm_planner.plan_grasp([attempt.candidates[k] for k in order], self._hold, obj,
-                                                 scene.sim, scene.collision, self.rng,
-                                                 Deadline(config.planning_seconds),
+                                                 scene.sim, scene.collision, self.rng, work,
                                                  drag_for=lambda c: c.kind == "rake")
+            stats["work"] = work.spent
             attempt.plan_stats = stats
             if plan is None:
                 if attempt.parking is not None:
@@ -677,7 +681,7 @@ class Solver:
         contact, far from the centre (a plate held by its rim), cannot."""
         grip, _, mass = self._grip(candidate)
         gripper = self.scene.sim.gripper
-        arm = obj.position - candidate.centre
+        arm = (obj.position if self.config.rank_by_mass else obj.centre) - candidate.centre
         moment = np.cross(arm, [0.0, 0.0, -9.8 * mass])
         moment = moment - (moment @ candidate.closing_axis) * candidate.closing_axis   # turning about the pads' line is free
         contact = min(gripper.pad_tip - gripper.pad_back, 2.0 * (gripper.pad_tip - candidate.offset))
@@ -889,7 +893,7 @@ class Solver:
                            for k in robot.arm)
 
             # The end pose, from seeds with the arm in the plane of the centre line.
-            deadline, found = Deadline(config.reach_seconds), []
+            budget, found = Budget(config.reach_work), []
             pan, lift, upper_roll, elbow, fore_roll, flex, _ = robot.arm
             for seed_lift in (-0.8, -0.2, 0.4):
                 for seed_elbow in (0.8, 1.6):
@@ -897,7 +901,7 @@ class Solver:
                         seed = q0.copy()
                         seed[[pan, upper_roll, fore_roll]] = 0.0
                         seed[[lift, elbow, flex]] = seed_lift, seed_elbow, seed_flex
-                        q = ik.solve(sim, position_to, turn_to, seed, self.rng, deadline, restarts=0)
+                        q = ik.solve(sim, position_to, turn_to, seed, self.rng, budget, restarts=0, unstick=True)
                         if q is not None and clear(q):
                             found.append(q)
             if not found:
@@ -924,7 +928,7 @@ class Solver:
                     # Each step continues from the one before, nudged toward
                     # the end's fold, so the arm never jumps between solutions.
                     q = ik.solve(sim, grip + shift + part @ (position - grip), part @ turn,
-                                 last + (end - start) / count, self.rng, deadline, restarts=0)
+                                 last + (end - start) / count, self.rng, budget, restarts=0, unstick=True)
                     if q is None or np.abs(q[joints] - last[joints]).max() > 0.3:
                         stats["blocked"] = f"{name}, step {k} of {count}: " + \
                             ("out of reach" if q is None else "the arm would jump")
@@ -1061,9 +1065,9 @@ class Solver:
             scene.collision.focus(robot.base_pose(self._hold)[:2])
             why = {}
             path = arm_planner.straight_line(self._hold, gap / distance, distance, scene.sim, scene.collision,
-                                             self.rng, Deadline(config.reach_seconds), arm_planner.PlannerSettings(),
+                                             self.rng, Budget(config.reach_work), arm_planner.PlannerSettings(),
                                              load_after=0.0, least=max(0.01, distance - 0.5 * config.goal_tolerance),
-                                             why=why)
+                                             why=why, unstick=True)
             scene.collision.release()
             if path is None or len(path) < 2:
                 return self._failed(f"goal out of reach ({why.get('stopped')})")

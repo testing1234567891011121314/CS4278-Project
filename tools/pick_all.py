@@ -36,7 +36,7 @@ LIFT, HOLD = 0.10, 50
 
 
 def run(object_idx: int, maze_seed: int, cloud_seed: int, ticks: int, verbose: bool, deliver: bool = False,
-        settings: dict = None, library: str = None) -> dict:
+        settings: dict = None, library: str = None, batch_maze: bool = False) -> dict:
     import pybullet as p
     from solver import Config, Solver, State
 
@@ -45,7 +45,7 @@ def run(object_idx: int, maze_seed: int, cloud_seed: int, ticks: int, verbose: b
                grasp_error_mm=None, errors=0, ticks=0, wall_s=None, delivered_tick=None, goal_cm=None,
                navigate_tick=None)
     started = time.perf_counter()
-    env = make_env(object_idx, maze_seed, cloud_seed, library=library)
+    env = make_env(object_idx, maze_seed, cloud_seed, library=library, batch_maze=batch_maze)
     solver = None
     try:
         client = env.pb_physics_client
@@ -136,6 +136,8 @@ def run(object_idx: int, maze_seed: int, cloud_seed: int, ticks: int, verbose: b
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--objects", type=int, nargs="+", default=None, help="indices; default all")
+    parser.add_argument("--batch-maze", action="store_true",
+                        help="the maze run_batch.py (run.sh) builds, with --maze-seed as its layout seed")
     parser.add_argument("--library", default=None,
                         help="folder of other objects in the course's format, e.g. assets/ycb_extra")
     parser.add_argument("--maze-seed", type=int, default=42)
@@ -159,7 +161,7 @@ def main() -> int:
             settings[name] = ast.literal_eval(value)          # Python spellings too: True, False, None
     if args.one is not None:
         row = run(args.one, args.maze_seed, args.cloud_seed, args.ticks, True, args.deliver, settings,
-                  args.library)
+                  args.library, args.batch_maze)
         print("ROW:" + json.dumps(row), flush=True)
         return 0
 
@@ -175,7 +177,8 @@ def main() -> int:
             subprocess.run([sys.executable, __file__, "--one", str(object_idx), "--maze-seed", str(args.maze_seed),
                             "--cloud-seed", str(args.cloud_seed), "--ticks", str(args.ticks)] +
                            (["--deliver"] if args.deliver else []) + (["--set"] + args.set if args.set else []) +
-                           (["--library", args.library] if args.library else []),
+                           (["--library", args.library] if args.library else []) +
+                           (["--batch-maze"] if args.batch_maze else []),
                            stdout=sink, stderr=subprocess.STDOUT)
         text = log.read_text(errors="replace")
         at = text.rfind("ROW:")

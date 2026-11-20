@@ -320,6 +320,101 @@ course's own 15 with `tools/ycb_library.py --check`:
 So a library object is a plausible object of the same kind, not a copy of
 what a grader would load. First run: `runs/library_01`.
 
+### What the library run shows: where the problems are
+
+`runs/library_01`: the 63 further objects, on the committed code (`f09377d`),
+the env's own maze, cloud seed 300. Tables: `tools/carry_report.py
+runs/library_01` (saved as `runs/library_01/report.txt`; the same tool on the
+course's `runs/deliver_11` is in `runs/deliver_11/report.txt`). One trial per
+object: these are counts that show where to look, not rates.
+
+**How far the 63 got**
+
+| Stage | Objects |
+|---|---|
+| reached the grasp | 59 |
+| lifted 10 cm | 53 |
+| held 50 ticks | 48 |
+| reached NAVIGATE | 53 |
+| reached REACH | 26 |
+| delivered | 24 |
+
+The pick loses 15 of 63 and the carry loses 27 of the 53 that get to it.
+The carry is the larger blocker.
+
+**1. Most objects are lost at the start of the carry, not along the way.**
+Of 63 carries that lost the object, 38 lost it within 400 ticks of entering
+NAVIGATE, 30 of them between ticks 200 and 400. Those ticks are the hold, the
+torso's rise, the wrist rolls, the turn on the spot and the first metre of
+the drive. The course's own run shows the same: 8 of its 10 losses fall in
+the first 400 ticks. The logs do not say which of those steps it is; the
+travel-pose survey records it per pose.
+
+| Ticks after entering NAVIGATE | Carries lost |
+|---|---|
+| 0-199 | 8 |
+| 200-399 | 30 |
+| 400-999 | 17 |
+| 1,000 on | 8 |
+
+**2. Speed.** The later a carry starts, the faster it must go, and the less
+often it arrives.
+
+| Carry's speed | Carries | Delivered |
+|---|---|---|
+| 10-12 mm per tick | 37 | 13 |
+| 12-16 | 19 | 5 |
+| 16-22 | 16 | 4 |
+| over 22 | 17 | 2 |
+
+Carries that start after tick 1,500 deliver 4 of 23. A re-pick that late is
+close to worthless as things stand.
+
+**3. Mass.** No object over 0.6 kg was delivered (0 of 10 carries; 2 of 7
+between 0.2 and 0.6 kg; 16 of 42 between 0.05 and 0.2 kg). Very light ones do
+not do better (6 of 30 under 0.05 kg): they are the small and thin ones.
+
+**4. How full the hand is.** Grasps wider than 85 mm, close to the hand's
+103 mm, deliver 2 of 15, and are lost soonest (median 272 ticks).
+
+**5. Depth in the hand.** Contacts 0-8 mm from the back of the pads deliver
+17 of 45; contacts 12-24 mm out deliver 7 of 44. This fits the creep along
+the fingers seen on the sugar box: a deep grasp has more pad left to slide on.
+
+**6. What does not separate delivered from lost.** The hand's direction
+(straight down 18 of 70, tilted 6 of 17), wrist steering (18 of 72 against 6
+of 17), and the size of the turn on the spot (11 of 44 under 45 degrees, 13
+of 45 above). The side hold was taken three times in the whole run (laid
+twice, rolled once) and delivered none.
+
+**7. Recovery.** After 61 drops that were followed by another attempt, the
+object was picked up and lost again 21 times, picked up and delivered or
+still being carried at the end 13 times, and not picked up 27 times (lost in
+the lift 6, no grasp plan 5, lost in the back-off 4, and others).
+
+**8. The pick's own blockers** (10 objects never lifted, 16 attempts ended
+"object moved during the drive").
+
+| Blocker | Objects |
+|---|---|
+| wider than the open hand everywhere | pitcher base, mini soccer ball, large wood block, chain (lying flat) |
+| flat and thin on the table: raked, then no candidates | fork, spoon, knife, nine-hole peg board |
+| too small to hold | dice |
+| arm does not arrive at the approach or transit, eight times | Rubik's cube |
+| round, still rolling when the base drives up ("object moved during the drive") | lemon, orange, plum, softball, tennis ball, marbles; the same message is the first failure of the course's bleach cleanser, mustard bottle and mug |
+
+**What this means for the travel-pose trials**
+
+- Record where in the set-up the object is lost (taking the pose, the turn,
+  the first metre). That is where three losses in five happen.
+- Test each pose at more than one speed: speed matters more here than the
+  hand's direction does.
+- Include the heavy and the hand-filling objects on purpose: nothing over
+  0.6 kg has been delivered by any pose so far.
+- Record slip along the fingers per metre: depth in the hand is the one
+  grasp property that separates delivered from lost, and it cannot be
+  changed after the lift, so the pose has to slow the creep instead.
+
 ## 6. Change log (continues `GRASP.md` section 6)
 
 | # | Change | Fixed | Broke or left failing |

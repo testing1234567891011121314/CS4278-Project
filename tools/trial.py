@@ -35,10 +35,13 @@ def object_names(library: str = None) -> list[str]:
     return [d.name for d in sorted((ROOT / library).glob("*")) if d.is_dir()]
 
 
-def make_env(object_idx: int, maze_seed: int, cloud_seed=None, gui: bool = False, library: str = None):
+def make_env(object_idx: int, maze_seed: int, cloud_seed=None, gui: bool = False, library: str = None,
+             batch_maze: bool = False):
     """A reset env. `cloud_seed` fixes the point-cloud sample; None leaves it
     unseeded, as in the graded runs. `library` reads the object from another
-    folder of objects in the course's format (see tools/ycb_library.py)."""
+    folder of objects in the course's format (see tools/ycb_library.py).
+    `batch_maze` builds the maze as `run_batch.py` (and so `run.sh`) does,
+    with `maze_seed` as its layout seed; otherwise the env builds its own."""
     import trimesh
     os.chdir(ROOT)                      # the env loads its assets by relative path
     from pick_nav_reach_env_multi import PickNavReachEnv
@@ -65,6 +68,26 @@ def make_env(object_idx: int, maze_seed: int, cloud_seed=None, gui: bool = False
                 self.object_canonical_normals = self.object_canonical_mesh.face_normals[faces].astype(np.float32)
 
         PickNavReachEnv = LibraryEnv
+    if batch_maze:
+        import json
+        import numpy as np
+        import pybullet as p
+        from run_batch import prepare_maze
+        batch = ROOT / "runs" / "tmp" / f"batch_maze_{os.getpid()}_{object_idx}_{maze_seed}"
+        batch.mkdir(parents=True, exist_ok=True)
+        spec = json.loads(Path(prepare_maze(batch, maze_seed)).read_text())
+        Base = PickNavReachEnv
+
+        class BatchMazeEnv(Base):
+            """The env with the maze `run_batch.py` builds: `trial_worker.py`'s own override."""
+
+            def _load_maze(self):
+                self.maze_out_pos_x, self.maze_out_pos_y = spec["goal_xy"]
+                self.cube_positions = np.asarray(spec["cube_positions"], dtype=float)
+                p.loadURDF(spec["urdf_path"], useFixedBase=True, flags=p.URDF_MERGE_FIXED_LINKS,
+                           physicsClientId=self.pb_physics_client)
+
+        PickNavReachEnv = BatchMazeEnv
 
     folder = ROOT / "runs" / "tmp"
     folder.mkdir(parents=True, exist_ok=True)

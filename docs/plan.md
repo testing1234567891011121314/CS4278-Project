@@ -144,3 +144,120 @@ cleanly inside the budget.
 3. Segment 1, then the experiments for the three hard objects, then segment 2.
 4. Segment 3.
 5. The rest of segment 4.
+
+## Segment 3 from here: the pick is fixed, the travel pose is investigated
+
+Written 2026-11-20, after the first eleven carry attempts (`NAVIGATE.md`).
+It replaces "chooses a carry posture" in segment 3 above with a plan.
+
+**Rule.** The grasp and the travel pose are two problems. The grasp is chosen
+only to get the object off the table. A loss during the carry is fixed after
+the lift, never by choosing a different grasp. An optimal grasp is not an
+optimal travel pose.
+
+**Why the rule.** Between the pick commit (`b701e73`) and the first carry
+commit (`f09377d`) I changed which grasp is chosen in order to help the carry.
+Under `run.sh` the plate, which the pick commit grasps, is no longer grasped,
+and the hammer is not gripped the way the change intended. My evidence for
+those changes was one fixed cloud draw in a different maze from `run.sh`'s.
+
+**Target.** 15 of 15 delivered; a re-pick only where there is no choice.
+
+### Order of work (set by the user, 2026-11-20)
+
+1. **Measure the pick against the pass bar.** The pick as restored, with
+   work-based planning limits: all 15 objects on five cloud seeds in
+   `run.sh`'s maze. Per object: lifted 10 cm and held 50 ticks by tick 600,
+   out of five. The bar is 4 of 5 (`docs/requirements.md`). No fixing yet.
+2. **Find the best travel pose** (steps 3 and 4 below), with the grasp left
+   exactly as the pick makes it.
+3. **Then return to the grasp** for the objects that miss 4 of 5.
+
+An earlier "15 of 15" for the pick was two cloud draws in the env's own maze.
+It is not a rate and is not used as a baseline. Results are quoted with their
+seeds, maze and number of trials.
+
+### Step 1. Put the pick back, and prove it
+
+| | |
+|---|---|
+| Does | Up to the end of the back-off, the solver chooses and executes grasps exactly as `b701e73` does. Removed from that path: the centre-of-mass ranking, the "swings" tier, the grip under the hammer's head, the changed order of tight fits, and the arm solver's stuck-joint handling (kept only for the hold and the final reach). |
+| Passes when | On the same cloud seeds in `run.sh`'s maze, every one of the 15 objects has the same lift tick, hold result and back-off as the exported `b701e73` code (`runs/tmp/pre_nav/`). Two cloud seeds at least. Any difference means the restore is incomplete. |
+| Not allowed | Judging by "looks as good". The check is equality. |
+
+### Step 2. Test under the conditions that are graded and that the user runs
+
+| | |
+|---|---|
+| Does | `tools/pick_all.py` gets `run.sh`'s maze (built as `run_batch.py` builds it) as an option, so a full run costs no video and about a minute per object. |
+| Conditions from now on | `run.sh`'s maze; several cloud seeds per comparison; old code against new on the same seeds. One fixed draw in the env's default maze is no longer accepted as evidence for anything. |
+| Baseline | With the pick restored and the carry as committed: delivered count per object over 3 cloud seeds. Every later change is compared with this. |
+
+### Step 3. Survey travel poses
+
+A measurement, not a design. `tools/travel_poses.py`:
+
+1. Pick the object once with the restored pick. Save the simulator's state at
+   the end of the back-off. (Test equipment only: the solver itself still
+   never writes to the simulator, R30.)
+2. For each pose in the table below, restore that state, move the hand into
+   the pose slowly, and apply one fixed stimulus built from the carry's own
+   code: a turn on the spot, then 2 m straight at carry speed.
+3. Record what happened.
+
+| Variable | Values surveyed |
+|---|---|
+| Hand elevation | pointing down; 45 degrees down and forward; level; 45 degrees up and forward |
+| Pads' line | level; vertical (one finger under the object) |
+| Pads' line against the travel (hand pointing down) | along; across |
+| Arm | folded onto the base's centre line (the unfolded arm does not pass the maze); plus the pose as lifted, as the baseline |
+
+| Recorded per object and pose | |
+|---|---|
+| Reachable | whether the arm can take the pose, and whether the way into it is clear |
+| Lost | no, or in which part: taking the pose, the turn, the drive; and after how far |
+| Slip per metre | along the fingers, along the pads' line, across both |
+| Turn in the hand | degrees, about each of the hand's axes |
+
+Output: one table, 15 objects by about nine poses, in `runs/travel_NN/` and
+summarised in `NAVIGATE.md`. No pose is favoured beforehand, including the
+side hold.
+
+Fixed by the user for every pose (2026-11-20): **the base turns with the
+route.** Its heading follows the travel, which is what keeps the gripper
+lined up with the direction of travel. A carry in which the base keeps one
+heading and slides sideways was proposed and rejected for that reason. The
+survey therefore adds, to the poses above, the hand turned about the vertical
+so the pads' line lies along the base's heading ("pads forward"), with the
+wrist left alone during the drive, at 0.70 m and 0.40 m from the base's
+centre; and as a control the same with the line across the heading.
+
+**The back-off is not to be hard-coded** (user, same day): after an object is
+picked up off the floor, backing straight away from where it lay has caused
+collisions. The retreat is to be chosen from the scene: the direction and
+distance that are clear, or no retreat at all where folding the arm in
+already clears whatever the hand was over. To be done with step 4, and
+checked on re-picks from the floor in particular.
+
+### Step 4. Turn the table into the hold, and check it on whole trials
+
+| | |
+|---|---|
+| Does | For each object the pose (or the rule that picks the pose from what can be measured after the lift: where the centre of mass lies from the pads' line, the hand's direction, the object's size) that the survey shows carries best. |
+| Passes when | On 3 cloud seeds in `run.sh`'s maze the delivered count is higher than the step 2 baseline and no object that was delivered there is lost. A rule that helps one object and costs another is not kept; both go in the change log. |
+| If an object has no pose that carries it | Reported as a finding with its numbers. The grasp is not changed to fix it. What remains to try for it is speed, turn rate, the route, and recovery. |
+
+### Step 5. What is left after the pose
+
+In this order, each judged as in step 4: speed and turn rate per object
+(from the survey's slip per metre); the turn on the spot at the start of the
+carry; recovery after a drop (the plate on the floor is currently never
+picked up again).
+
+### Records
+
+`NAVIGATE.md` gets every attempt, as now. `GRASP.md` gets a note that the
+grasp-side changes of its sections 6 and 7 are withdrawn. The library of 63
+further objects (`runs/library_01`) is a second test set for the result, not
+something to tune on.
+
