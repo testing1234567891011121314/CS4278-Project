@@ -3,8 +3,10 @@
 For each object: pick it once with the solver, save the simulator's state at
 the end of the back-off, and from that same state try every pose of
 `custom_libraries.navigation.travel_pose.SURVEY`. Each pose gets the same
-stimulus, built from the carry's own code: the turn on the spot and the first
-2.5 m of the route to the goal, at the carry's speed. The grasp is whatever
+stimulus, built from `navigation/carry.py`: the turn on the spot and the first
+2.5 m of the route to the goal, at a carry's speed. (The solver itself has no
+carry at present: after the back-off it holds its pose, and the survey takes
+over from there.) The grasp is whatever
 the pick made; only the hand's direction and the arm's fold differ.
 
     pnr/bin/python tools/travel_poses.py [--objects 0 1 ...] [--cloud-seed 1] [--maze-seed 42]
@@ -41,6 +43,10 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from trial import ROOT, close_env, make_env, object_names, quiet
 
+ROUTE_CLEARANCES = (0.42, 0.38, 0.34)   # distances the stimulus's route keeps from walls, in the order tried, metres
+POSE_RATE = 0.03                        # fastest any arm joint moves while a pose is taken, rad per tick
+SETTLE_TICKS = 20                       # ticks waited after a pose is taken
+
 FIELDS = ["object", "name", "pose", "reached", "lost_in", "driven_m", "ticks", "slip_fingers_mm", "slip_pads_mm",
           "slip_across_mm", "turn_deg", "turn_fingers_deg", "turn_pads_deg", "turn_across_deg", "least_force_N",
           "arm_touched_wall", "hand_z", "lever_mm", "lever_deg", "mass_kg", "pick_tick", "note"]
@@ -52,6 +58,7 @@ def survey(object_idx: int, maze_seed: int, cloud_seed: int, step: float, distan
     from custom_libraries.grasping import ik
     from custom_libraries.grasping.executor import PathStepper, is_held
     from custom_libraries.navigation import carry
+    from custom_libraries.navigation.grid import OccupancyGrid
     from custom_libraries.navigation.travel_pose import SURVEY, fold_path, hand_rotation
     from custom_libraries.planning_sim import rotation
     from solver import Config, Solver, State
@@ -59,7 +66,7 @@ def survey(object_idx: int, maze_seed: int, cloud_seed: int, step: float, distan
     name = object_names()[object_idx]
     env = make_env(object_idx, maze_seed, cloud_seed, batch_maze=batch_maze)
     client = env.pb_physics_client
-    solver = Solver(env, Config(seed=cloud_seed, carry_hold=False))
+    solver = Solver(env, Config(seed=cloud_seed))
     rows = []
 
     def blank(pose: str, **more) -> dict:
@@ -113,7 +120,9 @@ def survey(object_idx: int, maze_seed: int, cloud_seed: int, step: float, distan
         forward = np.array([np.cos(base[2]), np.sin(base[2]), 0.0])
 
         # The stimulus: the start of the route the carry would take.
-        routes = carry.plan_route(scene.carry_grids, base[:2], scene.world.goal[:2], carry.CarrySettings())
+        grids = [OccupancyGrid.from_world(scene.world, solver.config.grid_resolution, keep, obstacle_radius=keep)
+                 for keep in ROUTE_CLEARANCES]
+        routes = carry.plan_route(grids, base[:2], scene.world.goal[:2], carry.CarrySettings())
         if not routes:
             return [blank("(no route)", note="no route from the back-off to the goal")]
         route = routes[0]
@@ -154,14 +163,14 @@ def survey(object_idx: int, maze_seed: int, cloud_seed: int, step: float, distan
                 if len(path) < 2:
                     row["reached"] = False
                     continue
-                limit = np.full(len(hold), solver.config.hold_rate)
+                limit = np.full(len(hold), POSE_RATE)
                 limit[robot.torso] = 0.002
                 stepper = PathStepper(path, limit)
                 held = True
                 while held and not stepper.finished:
                     action = stepper.step()
                     held = tick(action)
-                for _ in range(solver.config.hold_settle):
+                for _ in range(SETTLE_TICKS):
                     held = held and tick(action)
                 if not held:
                     row["lost_in"] = "pose"

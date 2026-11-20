@@ -33,17 +33,6 @@ class ObjectState:
         """Centre of the cloud's bounding box, a stand-in for the centre of mass."""
         return (self.cloud.min(axis=0) + self.cloud.max(axis=0)) / 2.0
 
-    def long_axis(self, least: float, ratio: float):
-        """Unit direction of the object's length in the world, if it is at
-        least `least` metres long and `ratio` times as long as it is wide
-        (a hammer, not a plate or a box); otherwise None."""
-        centred = self.cloud - self.cloud.mean(axis=0)
-        _, vectors = np.linalg.eigh(centred.T @ centred)            # principal directions, the longest last
-        extents = np.ptp(centred @ vectors, axis=0)
-        if extents[2] >= least and extents[2] >= ratio * extents[1]:
-            return vectors[:, 2]
-        return None
-
 
 @dataclass(frozen=True)
 class Box:

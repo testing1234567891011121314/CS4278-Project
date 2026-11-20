@@ -13,9 +13,16 @@ from typing import Optional
 
 import numpy as np
 
-from custom_libraries.common import Budget
+from custom_libraries.common import Deadline
 from custom_libraries.grasping import ik
 from custom_libraries.robot import wrap_angle
+
+
+def axis_rotation(axis, angle: float) -> np.ndarray:
+    """The 3x3 rotation by `angle` radians about the unit vector `axis`."""
+    x, y, z = np.asarray(axis, dtype=float)
+    k = np.array([[0.0, -z, y], [z, 0.0, -x], [-y, x, 0.0]])
+    return np.eye(3) + np.sin(angle) * k + (1.0 - np.cos(angle)) * (k @ k)
 
 
 @dataclass(frozen=True)
@@ -69,17 +76,17 @@ def hand_rotation(pose: TravelPose, turn: np.ndarray, forward: np.ndarray) -> np
         wanted = forward if pose.pads == "forward" else np.cross(up, forward)
         turn_by = float(np.arctan2(wanted[1], wanted[0]) - np.arctan2(line[1], line[0]))
         turn_by = (turn_by + np.pi / 2.0) % np.pi - np.pi / 2.0      # a line is the same after half a turn
-        return ik.axis_rotation(up, turn_by)
+        return axis_rotation(up, turn_by)
     if pose.elevation is None:
         if np.linalg.norm(approach[:2]) > 0.3:          # not pointing straight down: turn it to point forward
-            return ik.axis_rotation(up, float(np.arctan2(forward[1], forward[0]) -
+            return axis_rotation(up, float(np.arctan2(forward[1], forward[0]) -
                                               np.arctan2(approach[1], approach[0])))
         return np.eye(3)
     if pose.elevation <= -89.0:
         tilt = np.cross(approach, -up)                  # the smallest turn that stands the hand upright
         if np.linalg.norm(tilt) < 1e-6:
             return np.eye(3)
-        return ik.axis_rotation(tilt / np.linalg.norm(tilt), float(np.arcsin(min(1.0, np.linalg.norm(tilt)))))
+        return axis_rotation(tilt / np.linalg.norm(tilt), float(np.arcsin(min(1.0, np.linalg.norm(tilt)))))
     e = np.radians(pose.elevation)
     left = np.cross(up, forward)
     axis = np.cos(e) * forward + np.sin(e) * up
@@ -91,7 +98,7 @@ def hand_rotation(pose: TravelPose, turn: np.ndarray, forward: np.ndarray) -> np
 
 
 def fold_path(scene, rng: np.random.Generator, q0: np.ndarray, grip: np.ndarray, centre: np.ndarray,
-              orientation, spin: np.ndarray, reach: float, work: int = 12000,
+              orientation, spin: np.ndarray, reach: float, seconds: float = 6.0,
               rigid: bool = True) -> tuple[np.ndarray, dict]:
     """A (K, 15) joint path from `q0` that turns the hand by `spin` about the
     point `grip` (where the pads hold the object) while bringing that point
@@ -134,7 +141,7 @@ def fold_path(scene, rng: np.random.Generator, q0: np.ndarray, grip: np.ndarray,
                        for k in robot.arm)
 
         # The end pose, from seeds with the arm in the plane of the centre line.
-        budget, found = Budget(work), []
+        deadline, found = Deadline(seconds), []
         pan, lift, upper_roll, elbow, fore_roll, flex, _ = robot.arm
         for seed_lift in (-0.8, -0.2, 0.4):
             for seed_elbow in (0.8, 1.6):
@@ -142,7 +149,7 @@ def fold_path(scene, rng: np.random.Generator, q0: np.ndarray, grip: np.ndarray,
                     seed = q0.copy()
                     seed[[pan, upper_roll, fore_roll]] = 0.0
                     seed[[lift, elbow, flex]] = seed_lift, seed_elbow, seed_flex
-                    q = ik.solve(sim, position_to, turn_to, seed, rng, budget, restarts=0, unstick=True)
+                    q = ik.solve(sim, position_to, turn_to, seed, rng, deadline, restarts=0)
                     if q is not None and clear(q):
                         found.append(q)
         if not found:
@@ -162,10 +169,10 @@ def fold_path(scene, rng: np.random.Generator, q0: np.ndarray, grip: np.ndarray,
             out, last = [], np.array(start, dtype=float)
             for k in range(1, count + 1):
                 t = k / count
-                part = ik.axis_rotation(axis, (turned[0] + t * (turned[1] - turned[0])) * angle)
+                part = axis_rotation(axis, (turned[0] + t * (turned[1] - turned[0])) * angle)
                 shift = (moved[0] + t * (moved[1] - moved[0])) * (grip_to - grip)
                 q = ik.solve(sim, grip + shift + part @ (position - grip), part @ turn,
-                             last + (end - start) / count, rng, budget, restarts=0, unstick=True)
+                             last + (end - start) / count, rng, deadline, restarts=0)
                 if q is None or np.abs(q[joints] - last[joints]).max() > 0.3:
                     stats["blocked"] = f"{name}, step {k} of {count}: " + \
                         ("out of reach" if q is None else "the arm would jump")

@@ -10,7 +10,7 @@ from typing import Optional
 import numpy as np
 import pybullet as p
 
-from custom_libraries.common import Budget
+from custom_libraries.common import Deadline
 from custom_libraries.planning_sim import PlanningSim, rotation
 from custom_libraries.robot import wrap_angle
 
@@ -29,13 +29,6 @@ def rotation_vector(matrix: np.ndarray) -> np.ndarray:
         signs[k] = 1.0
         return axis * signs * angle
     return axis / (2.0 * np.sin(angle)) * angle
-
-
-def axis_rotation(axis, angle: float) -> np.ndarray:
-    """The 3x3 rotation by `angle` radians about the unit vector `axis`."""
-    x, y, z = np.asarray(axis, dtype=float)
-    k = np.array([[0.0, -z, y], [z, 0.0, -x], [-y, x, 0.0]])
-    return np.eye(3) + np.sin(angle) * k + (1.0 - np.cos(angle)) * (k @ k)
 
 
 def jacobian(sim: PlanningSim, qpos) -> np.ndarray:
@@ -58,16 +51,12 @@ def jacobian(sim: PlanningSim, qpos) -> np.ndarray:
 
 
 def solve(sim: PlanningSim, position, turn: np.ndarray, seed_qpos, rng: np.random.Generator,
-          budget: Budget, restarts: int = 6, position_tolerance: float = 0.001,
-          angle_tolerance: float = 0.005, iterations: int = 80, damping: float = 0.05,
-          unstick: bool = False) -> Optional[np.ndarray]:
+          deadline: Deadline, restarts: int = 6, position_tolerance: float = 0.001,
+          angle_tolerance: float = 0.005, iterations: int = 80, damping: float = 0.05) -> Optional[np.ndarray]:
     """Joint values, within limits, that put the gripper frame at the world
     `position` with the 3x3 rotation `turn`. The search starts from
-    `seed_qpos` and restarts from random arm configurations until `restarts`
-    or the work `budget` is spent (one step per iteration). Only the torso and arm move. None if not found.
-    With `unstick`, a joint resting on a limit that the step would push past
-    it is left out of that step (used after the lift only: the pick's arm
-    motions are solved without it, as when the pick was verified)."""
+    `seed_qpos` and restarts from random arm configurations until the deadline
+    or `restarts` is spent. Only the torso and arm move. None if not found."""
     robot = sim.robot
     joints = list(robot.plan_joints)
     limited = ~robot.wraps[joints]
@@ -80,9 +69,8 @@ def solve(sim: PlanningSim, position, turn: np.ndarray, seed_qpos, rng: np.rando
             q = seed.copy()
             q[joints] = robot.sample(rng, joints)
         for _ in range(iterations):
-            if budget.expired():
+            if deadline.expired():
                 return None
-            budget.spend()
             here, facing = sim.gripper_pose(q)
             error = np.concatenate([target - here, rotation_vector(turn @ facing.T)])
             if np.linalg.norm(error[:3]) < position_tolerance and np.linalg.norm(error[3:]) < angle_tolerance:
@@ -93,12 +81,5 @@ def solve(sim: PlanningSim, position, turn: np.ndarray, seed_qpos, rng: np.rando
             error[3:] *= min(1.0, 0.50 / max(np.linalg.norm(error[3:]), 1e-12))
             j = jacobian(sim, q)
             step = j.T @ np.linalg.solve(j @ j.T + damping ** 2 * np.eye(6), error)
-            # A joint already on a limit that the step would push past it
-            # cannot help: leave it out and let the others make the move.
-            stuck = limited & (((q[joints] >= upper - 1e-9) & (step > 0)) | ((q[joints] <= lower + 1e-9) & (step < 0)))
-            if unstick and stuck.any():
-                free = j[:, ~stuck]
-                step = np.zeros(len(joints))
-                step[~stuck] = free.T @ np.linalg.solve(free @ free.T + damping ** 2 * np.eye(6), error)
             q[joints] = np.where(limited, np.clip(q[joints] + step, lower, upper), q[joints] + step)
     return None

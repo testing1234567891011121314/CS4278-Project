@@ -1,5 +1,13 @@
 # NAVIGATE.md: carrying the object to the goal
 
+> **State of the code (2026-11-20, later).** The carry described below is
+> not in the solver at present. At the user's request the pick path was
+> restored byte for byte to commit `b701e73`, which has no carry: after the
+> back-off the solver holds its pose. The carry's code is in commits
+> `f09377d` (11 of 15 on one seed) and `39b169f`. `navigation/carry.py` (the
+> route follower) and the travel-pose survey (`tools/travel_poses.py`) remain,
+> and do not touch the pick. What follows is the record of what was tried.
+
 What the carry (states NAVIGATE and REACH, plus the hold taken before them)
 has to cope with, every attempt at it so far, what each attempt failed on,
 what was changed, and what that fixed or broke. The pick itself is in

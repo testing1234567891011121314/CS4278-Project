@@ -6,13 +6,13 @@ from typing import Optional
 import numpy as np
 
 from custom_libraries.collision import CollisionChecker
-from custom_libraries.common import Budget, Status
+from custom_libraries.common import Deadline, Status
 from custom_libraries.robot import RobotModel
 from custom_libraries.world import World
 
 
 def plan_reach(qpos, obs, robot: RobotModel, world: World, collision: CollisionChecker,
-               rng: np.random.Generator, budget: Budget) -> Optional[np.ndarray]:
+               rng: np.random.Generator, deadline: Deadline) -> Optional[np.ndarray]:
     """A (K, 15) joint path that puts the object's centre, not the gripper, on
     the goal, keeping the gripper's orientation so the object is not tipped
     out. None if the goal is out of reach from where the base stands."""

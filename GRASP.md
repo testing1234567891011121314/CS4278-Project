@@ -354,3 +354,14 @@ So with planning made repeatable, this seed gives 12 of 15 lifted and held
 (not the plate, the marker or the hammer). Whether each object reaches the
 bar of 4 trials in 5 is being measured on cloud seeds 1-5 (`runs/pick_work/`).
 
+**Later the same day: reverted cleanly, at the user's request.** The settings
+described above no longer exist. `solver.py` and every file of the pick path
+(`custom_libraries/common.py`, `collision.py`, `world.py`, `grasping/*`,
+`navigation/parking.py`, `navigation/reach.py`) are byte for byte those of
+`b701e73`: the same git blob hashes. `planning_sim.py` is that of `947a0e8`,
+which is `b701e73` plus the mesh-path fix that `run.sh` needs. So the solver
+again has time limits on planning and no carry: after the back-off it holds
+its pose. The carry of `NAVIGATE.md` is in commits `f09377d` and `39b169f`.
+Replacing the time limits by counts of work is to be re-applied as a change
+of its own on top of this.
+

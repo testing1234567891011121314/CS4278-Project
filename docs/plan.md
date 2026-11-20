@@ -163,6 +163,11 @@ those changes was one fixed cloud draw in a different maze from `run.sh`'s.
 
 **Target.** 15 of 15 delivered; a re-pick only where there is no choice.
 
+**Clean revert (user, 2026-11-20).** The pick path is byte for byte that of
+`b701e73` (same git hashes), not the same behaviour kept behind switches.
+The solver therefore has no carry at present. Counting planning work instead
+of time comes back as a separate change on top, and nothing else.
+
 ### Order of work (set by the user, 2026-11-20)
 
 1. **Measure the pick against the pass bar.** The pick as restored, with

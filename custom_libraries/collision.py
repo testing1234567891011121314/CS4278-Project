@@ -114,22 +114,6 @@ class CollisionChecker:
                 out["object"] = min(out["object"], c[8])
         return out
 
-    def nearest(self, qpos) -> tuple[float, str]:
-        """The smallest gap between the robot and the fixed bodies at `qpos`
-        and the name of the robot link it is at: for reports, not for checks."""
-        sim = self.sim
-        sim.set_robot(qpos)
-        gap, link = self.look, -2
-        for body in self._near:
-            for c in p.getClosestPoints(sim.robot_id, body, self.look, physicsClientId=sim.client):
-                if body == sim.floor_id and c[3] not in self.arm_links:
-                    continue
-                if c[8] < gap:
-                    gap, link = c[8], c[3]
-        name = "base" if link == -1 else "none" if link == -2 else \
-            p.getJointInfo(sim.robot_id, link, physicsClientId=sim.client)[12].decode()
-        return float(gap), name
-
     def is_free(self, qpos, margin: float, object_margin: Optional[float] = None,
                 load_margin: Optional[float] = None) -> bool:
         """True if every gap at `qpos` is at least its margin. `object_margin`

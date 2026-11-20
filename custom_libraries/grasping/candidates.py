@@ -32,9 +32,6 @@ class CandidateSettings:
     max_wall: float = 0.012             # thickest wall treated as thin
     wall_quality: float = 0.5           # a thin wall's place among the pairs' alignment scores (0 to 1)
     tight_quality: float = 0.3          # a tight fit's alignment score is scaled by this
-    central: str = "centre"             # what a grasp should be near: "centre", the middle of the bounding box
-                                        # (as the pick was verified); "mass", the closing line passes the centre
-                                        # of mass (tried for the carry's sake and withdrawn, GRASP.md section 8)
     rake_gap: float = 0.006             # a raking hand starts this far beyond the object's far edge, metres
     rake_height: float = 0.006          # ... with its fingertips this far above the support
     rake_leans: tuple = (0.0, np.radians(20.0), np.radians(40.0), np.radians(60.0))   # how far the raking
@@ -123,21 +120,7 @@ def antipodal_candidates(obj: ObjectState, gripper: Gripper, support, limit: int
     widths = np.concatenate([widths, wall_widths])
     if len(centres) == 0:
         return []
-    # Where the centre of mass lies relative to the closing line. The object
-    # can turn freely about that line: a centre of mass hanging below it is
-    # stable, one to the side swings the object round, one above tips it over.
-    off = obj.position - centres
-    off = off - np.einsum("ij,ij->i", off, lines)[:, None] * lines          # from the line to the centre of mass
-    level = np.cross(lines, [0.0, 0.0, 1.0])                                # horizontal, across the line
-    flat = np.linalg.norm(level, axis=1)
-    upright_line = flat < 1e-6                                              # a vertical line has no "beside"
-    level = level / np.where(upright_line, 1.0, flat)[:, None]
-    beside = np.where(upright_line, np.linalg.norm(off[:, :2], axis=1), np.abs(np.einsum("ij,ij->i", off, level)))
-    above = np.where(upright_line, 0.0, np.maximum(0.0, off[:, 2]))
-    if settings.central == "mass":
-        central = np.exp(-beside / 0.02) * np.exp(-above / 0.03)
-    else:                                                                   # nearness to the middle of the object
-        central = np.exp(-np.linalg.norm(centres - obj.centre, axis=1) / 0.04)
+    central = np.exp(-np.linalg.norm(centres - obj.centre, axis=1) / 0.04)
     quality = 0.6 * aligned + 0.4 * central
 
     # Thin the contacts: the best of each cell of centre position and line direction.
