@@ -15,7 +15,8 @@ Branch `rewrite/solver`, pushed.
 | `b701e73` | The pick the user verified. Still the reference for the grasp. |
 | `0b1b621` | Planning limits count cycles of work, not seconds. The only change to the pick's path since `b701e73`. |
 | `6d0a0b8` | Result tables of the pick's regression run (`runs/pick_cycles`). |
-| this session's commit | The carry rebuilt on top of the untouched pick: back-off chosen from the scene, travel pose, carry, reach, retry. `NAVIGATE_V2.md`. |
+| `dd0ab31` | The carry rebuilt on top of the untouched pick: back-off chosen from the scene, travel pose, carry, reach, retry. `NAVIGATE_V2.md`. |
+| `3526a5e` | Result tables of the surveys and full runs `NAVIGATE_V2.md` cites. |
 
 `assets/maze.urdf` and `pnr/pyvenv.cfg` show as modified and are not ours:
 leave them out of every commit. The untracked `old/`, `pnr/bin`, `pnr/lib`,
