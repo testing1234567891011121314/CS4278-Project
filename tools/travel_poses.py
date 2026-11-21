@@ -17,9 +17,15 @@ itself never writes to the simulator (R30).
 
 Columns of OUT/results.csv, one row per object and pose:
   reached      the arm could take the pose and the way into it was clear
-  lost_in      where the object was lost: "pose" (while the pose was taken), a
-               phase of the carry ("roll across", "turn", "roll along",
-               "drive"), or empty if it was still held at the end
+  lost_in      where the object left the hand (the solver's own test: it no
+               longer presses on a finger or the palm): "pose" (while the pose
+               was taken), a phase of the carry ("roll across", "turn", "roll
+               along", "drive"), or empty if it was still in the hand at the end
+  touched      the first thing other than the robot that the object touched
+               while still in the hand: what, in which phase, how far along
+  pads_lost_m  how far the object had been led when it was first off one of
+               the two pads four ticks running (the pick's stricter test);
+               empty if both pads held it throughout
   driven_m     how far the object was led along the route before the end or the loss
   slip_*_mm    how far the object moved in the hand during the stimulus: along
                the fingers, along the pads' line, across both
@@ -47,18 +53,21 @@ ROUTE_CLEARANCES = (0.42, 0.38, 0.34)   # distances the stimulus's route keeps f
 POSE_RATE = 0.03                        # fastest any arm joint moves while a pose is taken, rad per tick
 SETTLE_TICKS = 20                       # ticks waited after a pose is taken
 
-FIELDS = ["object", "name", "pose", "reached", "lost_in", "driven_m", "ticks", "slip_fingers_mm", "slip_pads_mm",
+FIELDS = ["object", "name", "pose", "reached", "lost_in", "driven_m", "pads_lost_m", "touched", "ticks", "slip_fingers_mm", "slip_pads_mm",
           "slip_across_mm", "turn_deg", "turn_fingers_deg", "turn_pads_deg", "turn_across_deg", "least_force_N",
           "arm_touched_wall", "hand_z", "lever_mm", "lever_deg", "mass_kg", "pick_tick", "note"]
 
 
-def survey(object_idx: int, maze_seed: int, cloud_seed: int, step: float, distance: float, batch_maze: bool) -> list:
+def survey(object_idx: int, maze_seed: int, cloud_seed: int, step: float, distance: float, batch_maze: bool,
+           turn_step: float = None, only: list = None, trace: bool = False) -> list:
+    import dataclasses
     import pybullet as p
     from custom_libraries.common import Status
     from custom_libraries.grasping import ik
     from custom_libraries.grasping.executor import PathStepper, is_held
     from custom_libraries.navigation import carry
     from custom_libraries.navigation.grid import OccupancyGrid
+    from custom_libraries.navigation.transport import in_hand as carried
     from custom_libraries.navigation.travel_pose import SURVEY, fold_path, hand_rotation
     from custom_libraries.planning_sim import rotation
     from solver import Config, Solver, State
@@ -74,7 +83,7 @@ def survey(object_idx: int, maze_seed: int, cloud_seed: int, step: float, distan
 
     try:
         obs = env._get_obs()
-        while solver.tick < 900 and solver.state is not State.NAVIGATE:
+        while solver.tick < 1400 and solver.state is not State.NAVIGATE:
             if solver.state in (State.DONE, State.STOPPED):
                 break
             with quiet():
@@ -122,6 +131,7 @@ def survey(object_idx: int, maze_seed: int, cloud_seed: int, step: float, distan
         # The stimulus: the start of the route the carry would take.
         grids = [OccupancyGrid.from_world(scene.world, solver.config.grid_resolution, keep, obstacle_radius=keep)
                  for keep in ROUTE_CLEARANCES]
+        grids.sort(key=lambda grid: not grid.is_free(base[:2]))     # as the solver does: no hook at the start
         routes = carry.plan_route(grids, base[:2], scene.world.goal[:2], carry.CarrySettings())
         if not routes:
             return [blank("(no route)", note="no route from the back-off to the goal")]
@@ -131,7 +141,7 @@ def survey(object_idx: int, maze_seed: int, cloud_seed: int, step: float, distan
         keep = marks < length
         route = np.vstack([route[keep], [np.interp(length, marks, route[:, 0]), np.interp(length, marks, route[:, 1])]])
 
-        for pose in SURVEY:
+        for pose in [s for k, s in enumerate(SURVEY) if only is None or k in only]:
             p.restoreState(stateId=saved, physicsClientId=client)
             obs = env._get_obs()
             row = blank(pose.name, hand_z=round(float(turn[2, 0]), 2), lever_mm=round(1000 * float(np.linalg.norm(lever))),
@@ -139,11 +149,11 @@ def survey(object_idx: int, maze_seed: int, cloud_seed: int, step: float, distan
                         lost_in="", ticks=0, least_force_N=None, arm_touched_wall=False)
             rows.append(row)
             action = hold.copy()
-            lost = 0
+            lost, off_pads, led, stage = 0, 0, 0.0, "pose"
 
             def tick(action) -> bool:
-                """One env step; False once the object has been off the pads four ticks running."""
-                nonlocal obs, lost
+                """One env step; False once the object has been out of the hand four ticks running."""
+                nonlocal obs, lost, off_pads
                 with quiet():
                     obs, _ = env.step(action)
                 row["ticks"] += 1
@@ -152,7 +162,33 @@ def survey(object_idx: int, maze_seed: int, cloud_seed: int, step: float, distan
                 if any(c[2] not in (env.robot_id, env.object_id) and c[3] in scene.collision.arm_links
                        for c in p.getContactPoints(bodyA=env.robot_id, physicsClientId=client)):
                     row["arm_touched_wall"] = True
-                lost = 0 if is_held(env, robot) else lost + 1
+                if row["touched"] is None and lost == 0:
+                    # The first thing other than the robot that the object, still in the hand, touches.
+                    hits = [c for c in p.getContactPoints(bodyA=env.object_id, physicsClientId=client)
+                            if c[2] != env.robot_id and c[9] > 0]
+                    if hits:
+                        body = p.getBodyInfo(hits[0][2], physicsClientId=client)[1].decode() or str(hits[0][2])
+                        row["touched"] = f"{body} in {stage} at {led:.2f} m, tick {row['ticks']}, " \
+                                         f"{max(c[9] for c in hits):.0f} N"
+                if trace:
+                    where, _ = in_hand(obs)
+                    touching = sorted({p.getJointInfo(env.robot_id, c[3], physicsClientId=client)[12].decode()
+                                       if c[3] >= 0 else "base" for c in
+                                       p.getContactPoints(bodyA=env.robot_id, physicsClientId=client)
+                                       if c[2] not in (env.robot_id, env.object_id) and
+                                       p.getBodyInfo(c[2], physicsClientId=client)[1] != b"plane"})
+                    forces = {link: round(sum(c[9] for c in p.getContactPoints(env.robot_id, env.object_id,
+                                                                               physicsClientId=client)
+                                              if c[3] == link)) for link in (*robot.finger_links, robot.gripper_link)}
+                    base_now = robot.base_pose(obs["qpos"])
+                    print(f"T {row['ticks']:4d} {stage:11s} led {led:6.3f}  base {base_now[0]:6.3f} {base_now[1]:6.3f} "
+                          f"{np.degrees(base_now[2]):7.1f}  obj z {obs['object_pos'][2]:.3f}  in hand mm "
+                          f"{1000 * where[0]:6.1f} {1000 * where[1]:6.1f} {1000 * where[2]:6.1f}  "
+                          f"N {list(forces.values())}  robot touches {touching}", flush=True)
+                off_pads = 0 if is_held(env, robot) else off_pads + 1
+                if off_pads >= 4 and row["pads_lost_m"] is None:
+                    row["pads_lost_m"] = round(led, 2)
+                lost = 0 if carried(env, robot, obs) else lost + 1
                 return lost < 4
 
             # Take the pose.
@@ -183,17 +219,24 @@ def survey(object_idx: int, maze_seed: int, cloud_seed: int, step: float, distan
                 if upright and pose.steer != "none" else None
             base_now = robot.base_pose(action)
             plan = carry.make_plan(route, base_now, np.asarray(obs["object_pos"])[:2], closing,
-                                   action[robot.arm[-1]], int(np.sign(now[2, 0])), step)
+                                   action[robot.arm[-1]], int(np.sign(now[2, 0])), turn_step or step)
             follower = carry.CarryFollower(plan, robot, action, 0.0, plan.turn)
+            if trace:
+                print(f"PLAN arm {plan.arm:.3f} bearing {np.degrees(plan.bearing):.1f} turn {np.degrees(plan.turn):.1f} "
+                      f"base {np.round(base_now, 3).tolist()} object {np.round(obs['object_pos'][:2], 3).tolist()}\n"
+                      f"ROUTE {np.round(route[:14], 2).tolist()}", flush=True)
             start = in_hand(obs)
             last = start
             status = Status.RUNNING
-            while status is Status.RUNNING and row["ticks"] < 1500:
+            while status is Status.RUNNING and row["ticks"] < 3200:
+                if follower.phase == "drive" and follower.plan.step != step:      # the turn had its own speed
+                    follower.plan = dataclasses.replace(follower.plan, step=step)
                 action, status = follower.step(robot.base_pose(obs["qpos"]))
+                led, stage = float(follower._along - plan.arm), follower.phase
                 if not tick(action):
                     row["lost_in"] = follower.phase
                     break
-                if is_held(env, robot):
+                if carried(env, robot, obs):
                     last = in_hand(obs)
             if status is Status.FAILED and not row["lost_in"]:
                 row["note"] = ((row["note"] or "") + " carry: " + str(follower.failure))[:200]
@@ -220,13 +263,18 @@ def main() -> int:
     parser.add_argument("--maze-seed", type=int, default=42)
     parser.add_argument("--cloud-seed", type=int, default=1)
     parser.add_argument("--step-mm", type=float, default=11.0, help="the object's speed in the stimulus, mm per tick")
+    parser.add_argument("--turn-mm", type=float, default=None,
+                        help="the object's speed in the turn on the spot, if different, mm per tick")
+    parser.add_argument("--poses", type=int, nargs="+", default=None, help="indices into SURVEY; default all")
+    parser.add_argument("--trace", action="store_true", help="one line per tick in the object's log")
     parser.add_argument("--distance", type=float, default=2.5, help="metres of route driven in the stimulus")
     parser.add_argument("--env-maze", action="store_true", help="the env's own maze instead of run.sh's")
     parser.add_argument("--out", default="runs/travel_poses")
     parser.add_argument("--one", type=int, default=None, help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.one is not None:
-        rows = survey(args.one, args.maze_seed, args.cloud_seed, args.step_mm / 1000.0, args.distance, not args.env_maze)
+        rows = survey(args.one, args.maze_seed, args.cloud_seed, args.step_mm / 1000.0, args.distance, not args.env_maze,
+                      None if args.turn_mm is None else args.turn_mm / 1000.0, args.poses, args.trace)
         print("ROWS:" + json.dumps(rows), flush=True)
         return 0
 
@@ -238,7 +286,10 @@ def main() -> int:
         with open(log, "w") as sink:
             subprocess.run([sys.executable, __file__, "--one", str(object_idx), "--maze-seed", str(args.maze_seed),
                             "--cloud-seed", str(args.cloud_seed), "--step-mm", str(args.step_mm),
-                            "--distance", str(args.distance)] + (["--env-maze"] if args.env_maze else []),
+                            "--distance", str(args.distance)] + (["--env-maze"] if args.env_maze else []) +
+                           (["--turn-mm", str(args.turn_mm)] if args.turn_mm is not None else []) +
+                           (["--poses"] + [str(k) for k in args.poses] if args.poses else []) +
+                           (["--trace"] if args.trace else []),
                            stdout=sink, stderr=subprocess.STDOUT)
         text = log.read_text(errors="replace")
         at = text.rfind("ROWS:")
@@ -251,7 +302,9 @@ def main() -> int:
                   ("not reachable" if r["reached"] is False else
                    f"lost in {r['lost_in']:11s} after {r['driven_m']} m" if r["lost_in"] else
                    f"held  {r['driven_m']} m  slip {r['slip_fingers_mm']}/{r['slip_pads_mm']}/{r['slip_across_mm']} mm  "
-                   f"turned {r['turn_deg']} deg" if r["driven_m"] is not None else str(r["note"])), flush=True)
+                   f"turned {r['turn_deg']} deg" if r["driven_m"] is not None else str(r["note"])) +
+                  (f"   (off a pad from {r['pads_lost_m']} m)" if r.get("pads_lost_m") is not None else "") +
+                  (f"   touched {r['touched']}" if r.get("touched") else ""), flush=True)
     with open(out / "results.csv", "w", newline="") as sink:
         writer = csv.DictWriter(sink, fieldnames=FIELDS)
         writer.writeheader()

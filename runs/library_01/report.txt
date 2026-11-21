@@ -1,3 +1,7 @@
+NOTE (2026-11-21): this run used commit f09377d, whose grasp selection had regressed from the
+verified pick (b701e73). The pick, grasp-property and recovery counts below do not describe the
+current pick. See NAVIGATE.md, the note above "What the library run shows".
+
 library_01: 63 objects
   reached GRASP                     59
   lifted 10 cm with both pads on    53

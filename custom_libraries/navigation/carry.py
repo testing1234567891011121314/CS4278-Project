@@ -10,6 +10,7 @@ holds it.
 """
 from __future__ import annotations
 
+import functools
 from dataclasses import dataclass
 from typing import Optional
 
@@ -28,6 +29,9 @@ class CarrySettings:
     min_step: float = 0.004         # slowest, however heavy the object or weak the grip
     ramp: float = 0.0015            # change of the object's step per tick
     max_yaw: float = 0.05           # most the base turns per tick, rad
+    turn_step: Optional[float] = None   # fastest the object goes round in the turn on the spot, metres per tick
+                                    # (None: as fast as it is led). The 1 kg can was lost in that turn at
+                                    # 11 mm per tick in every pose and kept at 6 (runs/travel_can_*)
     max_roll: float = 0.04          # most the wrist rolls per tick, rad: faster rolls slide objects out
     torso_step: float = 0.002       # the torso rises this far per tick, metres, before the turn. Every tick's
                                     # rise jolts the object upward: at 4 mm per tick the apple was lost later
@@ -76,9 +80,34 @@ class CarryPlan:
     roll_now: float             # the wrist roll when the plan was made
     step: float                 # fastest the object is led, metres per tick
 
-    @property
+    @functools.cached_property
     def marks(self) -> np.ndarray:
         return np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(self.path, axis=0), axis=1))])
+
+    @functools.cached_property
+    def trail(self) -> tuple[np.ndarray, np.ndarray]:
+        """Where the base is on the route for each place of the object on
+        it: two arrays, the object's distance along the route and the base's.
+
+        The base is the first point of the route, going forward from where
+        it was, that is no more than one arm from the object as the crow
+        flies. It only ever moves forward, and never jumps: where the route
+        curls so that the object comes back within an arm of the base, the
+        base waits. (Taking any point of the route one arm behind the object
+        made the base's target jump 230 mm in one tick on a route that began
+        with a hook; runs/travel_trace02.)"""
+        spacing = 0.005
+        alongs = np.append(np.arange(self.arm, self.length, spacing), self.length)
+        backs, back = np.empty(len(alongs)), 0.0
+        for k, along in enumerate(alongs):
+            lead, limit = self.point(along), max(0.0, along - self.arm)
+            while back < limit:
+                gap = float(np.linalg.norm(lead - self.point(back))) - self.arm
+                if gap <= 1e-5:
+                    break
+                back = min(limit, back + gap)            # the gap closes no faster than the base advances
+            backs[k] = back
+        return alongs, backs
 
     @property
     def length(self) -> float:
@@ -92,20 +121,7 @@ class CarryPlan:
         """The base's (x, y, yaw) and the heading of the object's travel when
         the object is `along` metres down the route (at least one arm)."""
         lead = self.point(along)
-        low, high = max(0.0, along - 2.0 * self.arm), max(0.0, along - self.arm)
-        # The base is the point of the route one arm behind the object as the
-        # crow flies; round a corner that is farther back along the route.
-        if np.linalg.norm(lead - self.point(low)) <= self.arm:
-            back = low
-        else:
-            for _ in range(30):
-                mid = (low + high) / 2.0
-                if np.linalg.norm(lead - self.point(mid)) > self.arm:
-                    low = mid
-                else:
-                    high = mid
-            back = (low + high) / 2.0
-        base = self.point(back)
+        base = self.point(float(np.interp(along, *self.trail)))
         toward = lead - base
         ahead = self.point(min(self.length, along + 0.02)) - self.point(max(0.0, along - 0.02))
         heading = float(np.arctan2(ahead[1], ahead[0]))
@@ -140,10 +156,18 @@ def make_plan(route: np.ndarray, base_pose, object_xy, closing_heading: Optional
     base_pose = np.asarray(base_pose, dtype=float)
     toward = np.asarray(object_xy, dtype=float)[:2] - base_pose[:2]
     bearing = float(wrap_angle(np.arctan2(toward[1], toward[0]) - base_pose[2]))
-    first = route[1] - route[0]
-    start_yaw = float(np.arctan2(first[1], first[0])) - bearing
     steer = closing_heading is not None and roll_sign != 0
-    return CarryPlan(path=np.asarray(route, dtype=float), arm=float(np.linalg.norm(toward)), bearing=bearing,
+    route = np.asarray(route, dtype=float)
+    arm = float(np.linalg.norm(toward))
+    # The turn on the spot ends on the heading the drive begins with: toward
+    # the point one arm's length down the route. That is not the direction of
+    # the route's first leg when that leg is shorter than the arm; turning to
+    # the leg left a jump of 9 degrees in one tick at the start of the drive,
+    # which threw the bleach bottle out of the hand (runs/travel_trace01).
+    marks = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(route, axis=0), axis=1))])
+    first = np.array([np.interp(arm, marks, route[:, 0]), np.interp(arm, marks, route[:, 1])]) - route[0]
+    start_yaw = float(np.arctan2(first[1], first[0])) - bearing
+    return CarryPlan(path=route, arm=arm, bearing=bearing,
                      yaw_now=float(base_pose[2]), turn=float(wrap_angle(start_yaw - base_pose[2])),
                      roll_sign=roll_sign if steer else 0,
                      closing=float(closing_heading - base_pose[2]) if steer else 0.0,
@@ -184,8 +208,15 @@ class CarryFollower:
         self._yaw_goal = plan.yaw_now + turn
         self._along, self._step, self._turn_rate = plan.arm, 0.0, 0.0
         self._waited = 0
+        self._base = plan.path[0].copy()                 # where the base's target is on the floor
+        self.jumps = 0                                   # ticks on which the route asked for more than a tick may do
         self.phase = "raise"
         self.failure: Optional[str] = None
+
+    @property
+    def led(self) -> float:
+        """How far the object has been led along the route since the drive began, metres."""
+        return float(self._along - self.plan.arm)
 
     def _roll_toward(self, wanted: float) -> bool:
         """Move the roll target toward `wanted`; True once it is there."""
@@ -213,7 +244,8 @@ class CarryFollower:
                 self.phase = "turn"
         elif self.phase == "turn":
             left = self._yaw_goal - self._yaw
-            limit = min(s.max_yaw, plan.step / max(plan.arm, 1e-6))      # the object goes round at arm's length
+            round_step = plan.step if s.turn_step is None else min(plan.step, s.turn_step)
+            limit = min(s.max_yaw, round_step / max(plan.arm, 1e-6))     # the object goes round at arm's length
             stopping = np.sqrt(2.0 * (s.ramp / max(plan.arm, 1e-6)) * abs(left))
             self._turn_rate = min(self._turn_rate + s.ramp / max(plan.arm, 1e-6), limit, max(stopping, 1e-4))
             self._yaw += float(np.clip(left, -self._turn_rate, self._turn_rate))
@@ -233,14 +265,23 @@ class CarryFollower:
                 roll = plan.roll(pose[2], heading, self._target[self._roll_joint])
                 turning = abs(float(wrap_angle(pose[2] - self._yaw)))
                 rolling = abs(roll - self._target[self._roll_joint])
-                if turning <= s.max_yaw and rolling <= s.max_roll:
+                # The base trails the object and can be asked to move faster
+                # than it (40 mm in a tick where the object moved 15, as it
+                # caught up after a hook in the route): every such tick is a
+                # harder jolt than the speed the carry was planned at.
+                moving = float(np.linalg.norm(pose[:2] - self._base))
+                if turning <= s.max_yaw and rolling <= s.max_roll and moving <= 1.2 * plan.step:
                     break
                 step *= 0.6
+            else:
+                self.jumps += 1                          # even the shortest step asks for more turn than a tick may make
             self._along, self._step = along, step
-            self._yaw += float(wrap_angle(pose[2] - self._yaw))
+            # The heading never jumps, whatever the route asks for: it closes the gap at the limit.
+            self._yaw += float(np.clip(wrap_angle(pose[2] - self._yaw), -s.max_yaw, s.max_yaw))
             self._target[self._roll_joint] += float(np.clip(roll - self._target[self._roll_joint],
                                                             -s.max_roll, s.max_roll))
             self._target = robot.with_base(self._target, [pose[0], pose[1], self._yaw])
+            self._base = pose[:2].copy()
             lag = float(np.linalg.norm(pose[:2] - base_pose[:2]))
             if lag > s.max_lag:
                 self.failure = "base fell behind its route"

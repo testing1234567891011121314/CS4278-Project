@@ -6,8 +6,10 @@ Drop-in for the course's KeyBoardController (R1):
     while True:
         obs, info = env.step(solver.get_action())
 
-See docs/plan.md for the segment each state belongs to. NAVIGATE and REACH
-(segment 3) are not written yet: after the back-off the solver holds its pose.
+See docs/plan.md for the segment each state belongs to. The pick (SETTLE to
+the end of GRASP and DRAG) is that of commit b701e73 and is not changed for
+the carry's sake. Everything after it (BACK_OFF, NAVIGATE, REACH) is planned
+in custom_libraries/navigation/transport.py.
 """
 from __future__ import annotations
 
@@ -25,6 +27,7 @@ from custom_libraries.grasping import arm_planner, ik
 from custom_libraries.grasping.arm_planner import GraspPlan
 from custom_libraries.grasping.candidates import GraspCandidate, antipodal_candidates, rake_candidates
 from custom_libraries.grasping.executor import GraspExecutor, PathStepper, grasp_error, is_held
+from custom_libraries.navigation import carry, transport
 from custom_libraries.navigation.base_follower import BaseFollower
 from custom_libraries.navigation.grid import OccupancyGrid
 from custom_libraries.navigation.parking import (ParkingPose, ParkingSettings, choose_parking, make_follower,
@@ -67,8 +70,8 @@ class Config:
     grasp_ticks: int = 260
     drag_ticks: int = 260
     back_off_ticks: int = 260
-    navigate_ticks: int = 2000
-    reach_ticks: int = 200
+    navigate_ticks: int = 2900       # the carry is paced to the ticks left in the episode, which bound it
+    reach_ticks: int = 600           # the final approach, a raise to the goal's height, a second approach
     settle_wait_ticks: int = 120     # an object still moving after this is approached as it is
     min_retry_ticks: int = 300       # no new attempt is started with fewer ticks left
     max_attempts: int = 8            # nor after this many attempts
@@ -102,6 +105,37 @@ class Config:
                                      # kept sliding when the hand stopped and fell off the table
     drag_slack: float = 0.08         # a dragged object may trail the base by this much, metres
     rake_clear: float = 0.35         # an object raked out from under something ends this far beyond its edge
+    # After the pick (custom_libraries/navigation/transport.py). Planning work is counted in cycles, as above.
+    back_off_headings: tuple = (0.0, 45.0, -45.0, 90.0, -90.0, 135.0, -135.0, 180.0)
+                                     # directions tried for the back-off, degrees from straight away from
+                                     # where the object stood
+    back_off_distances: tuple = (0.15, 0.3, 0.45, 0.6)   # lengths tried, metres, after "no retreat at all":
+                                     # straight away at each length first, then the other directions
+    back_off_tries: int = 16         # retreats examined before falling back to `back_off` straight away
+    back_off_look: float = 1.5       # metres of the route checked to tell whether a carry can start somewhere
+    travel_upright: float = 0.8      # a hand pointing down at least this steeply (-z of its axis) is stood
+                                     # straight down for the carry; any other is kept and turned forward
+    travel_heavy: float = 0.6        # from this mass, kg, a hand pointing down is laid level first: the object
+                                     # then slides into the palm, not out along the fingers
+    travel_reach: float = 0.60       # the object is brought in to this far from the base's centre, metres. At
+                                     # 0.70 the level poses' elbow met the door jamb of the maze on the way in
+                                     # and six of fifteen carries were refused; at 0.50 the arm cannot take them
+    travel_work: int = 12000         # work allowed to planning the move into the travel pose
+    travel_rate: float = 0.03        # fastest any arm joint moves while the travel pose is taken, rad per tick
+    travel_settle: int = 20          # ticks waited after it for the object to stop swinging
+    carry_clearances: tuple = (0.42, 0.38, 0.34)   # distances the carry's route keeps from walls, in order tried
+    carry_margin: float = 0.012      # least gap between the robot with its load and the scene during the carry
+    carry_reserve: int = 300         # ticks kept back from the carry for its set-up (raise, turn, rolls) and the reach
+    carry_haste: float = 1.25        # the object is led this many times faster than the ticks left require
+    carry_turn_step: float = 0.006   # fastest the object goes round in the turn on the spot, metres per tick
+    carry_retries: int = 2           # times a carry that failed with the object still in the hand is planned again
+    lost_ticks: int = 4              # ticks in a row out of the hand that count as a drop
+    reach_work: int = 12000          # work allowed to planning the final reach
+    reach_step: float = 0.004        # fastest the base moves the object in the final approach, metres per tick
+    reach_near: float = 0.25         # an object this close to the goal on the floor plan goes straight to the reach
+    reach_approach_ticks: int = 150  # ticks the base and torso may take over the final approach
+    raise_reserve: int = 200         # ticks kept back from the carry of an object that will arrive under the
+                                     # goal, for raising it there
     max_found: int = 1600            # grasp candidates taken from the cloud
     max_candidates: int = 60         # of those the hand fits, the best this many go on
 
@@ -152,6 +186,15 @@ class Attempt:
     retreat: Optional[BaseFollower] = None
     drag_from: Optional[tuple] = None               # where the base and the object were when a drag began
     lost: int = 0                                   # ticks in a row without the hold, after the grasp
+    away: bool = False                              # the back-off has been planned: the hand has left the grasp
+    travel: Optional[PathStepper] = None            # the move into the travel pose
+    travel_wait: int = 0                            # ticks waited after it
+    carry: Optional[carry.CarryFollower] = None     # the drive to the goal
+    carry_failures: int = 0                         # carries that failed with the object still in the hand
+    reach: Optional[PathStepper] = None             # the final move of the hand
+    reach_wait: int = 0
+    raising: Optional[PathStepper] = None           # the move that brings the object up to the goal's height
+    raised: bool = False                            # that move has been tried
     search: Optional[dict] = None                   # what the candidate and parking searches found
     plan_stats: Optional[dict] = None
     lifted_tick: Optional[int] = None
@@ -186,6 +229,7 @@ class Solver:
         self._tried_parking: list[np.ndarray] = []       # (x, y) of parking poses that led nowhere
         self._tried_grasps: list[np.ndarray] = []        # centres of failed grasps, in the object's frame
         self._dragged = False                            # the object has been dragged to an edge in this trial
+        self._carry_grids: Optional[list] = None         # floor maps for the carry's route
         self._handlers = {
             State.SETTLE: self._settle,
             State.GO_TO_OBJECT: self._go_to_object,
@@ -544,32 +588,25 @@ class Solver:
         return None
 
     def _back_off(self, obs) -> tuple[np.ndarray, Optional[State]]:
-        """Segment 3. Back the base straight away from where the object stood,
-        slowly, with the arm still. Exit: NAVIGATE. Failures: object lost,
-        base blocked."""
+        """Segment 3. Take the base, with the object, to where the carry can
+        start. The retreat is chosen from the scene (transport.choose_back_off):
+        its direction and length, or none at all. It is driven slowly, with
+        the arm still. Exit: NAVIGATE. Failures: object lost, base blocked."""
         scene, attempt, config = self._scene(obs), self.attempt, self.config
         robot = scene.robot
-        if attempt.retreat is None:
+        if not attempt.away:
+            attempt.away = True
             base = robot.base_pose(self._hold)
             origin = attempt.object_at_plan if attempt.object_at_plan is not None else obs["object_pos"]
-            outward = base[:2] - np.asarray(origin, dtype=float)[:2]
-            outward = outward / max(np.linalg.norm(outward), 1e-9)
-            scene.collision.focus(base[:2])
-            scene.collision.hold(self._hold, obs["object_pos"], obs["object_xyzw"])
-            step = self._carry_step(outward)
-            attempt.plan_stats["carry_step_mm"] = round(1000 * step, 1)
-            for distance in config.back_off:
-                path = np.array([base[:2], base[:2] + distance * outward])
-                follower = BaseFollower(path, base[2], None, step, 0.03, min(config.carry_ramp, step / 5.0))
-                if all(scene.collision.is_free(robot.with_base(self._hold, pose), 0.01, load_margin=0.005)
-                       for pose in follower.poses()):
-                    attempt.retreat = follower
-                    break
-            scene.collision.release()
+            away = base[:2] - np.asarray(origin, dtype=float)[:2]
+            step = self._carry_step(away)
+            attempt.retreat, stats = transport.choose_back_off(
+                scene, self._grids(scene), self.rng, self._hold, self._load(obs), away, step,
+                min(config.carry_ramp, step / 5.0), config.episode_ticks - self.tick, config)
+            attempt.plan_stats = dict(attempt.plan_stats or {}, carry_step_mm=round(1000 * step, 1), back_off=stats)
             if attempt.retreat is None:
-                return self._hold, State.NAVIGATE        # nowhere to back off to: go on from here
-        attempt.lost = 0 if is_held(self.env, robot) else attempt.lost + 1
-        if attempt.lost >= 4:
+                return self._hold, State.NAVIGATE        # the carry can start from here
+        if self._dropped(obs):
             return self._failed("object lost during the back-off")
         target, status = attempt.retreat.step(robot.base_pose(obs["qpos"]))
         if status is Status.FAILED:
@@ -638,27 +675,141 @@ class Solver:
         limit = config.carry_safety * friction * grip / (max(mass, 1e-6) * jolt)
         return float(np.clip(limit, config.min_carry_step, config.carry_step))
 
+    def _grids(self, scene: Scene) -> list:
+        if self._carry_grids is None:
+            self._carry_grids = transport.carry_grids(scene, self.config)
+        return self._carry_grids
+
+    def _load(self, obs) -> transport.Load:
+        """The object as it is held now, for the planners after the pick."""
+        import pybullet as p
+        grip, _ = transport.grip_point(self.env, self.scene.robot)
+        mass = p.getDynamicsInfo(self.env.object_id, -1, physicsClientId=self.env.pb_physics_client)[0]
+        return transport.Load(self.scene, self._hold, obs["object_pos"], obs["object_xyzw"], grip, mass)
+
+    def _dropped(self, obs) -> bool:
+        """True once the object has been out of the hand `lost_ticks` ticks running."""
+        attempt = self.attempt
+        attempt.lost = 0 if transport.in_hand(self.env, self.scene.robot, obs) else attempt.lost + 1
+        return attempt.lost >= self.config.lost_ticks
+
     def _navigate(self, obs) -> tuple[np.ndarray, Optional[State]]:
-        """Segment 3, not written yet: the solver holds its pose with the
-        object in the hand."""
-        return self._hold, None
+        """Segment 3. Take the travel pose, slowly; then carry the object
+        through the maze, the object led along the route and the base turning
+        with it an arm's length behind (navigation/carry.py). Exit: REACH.
+        Failures: object lost, no clear route, base blocked."""
+        scene, attempt, config = self._scene(obs), self.attempt, self.config
+        robot = scene.robot
+        if attempt.travel is None:
+            path, stats = transport.plan_travel(scene, self._grids(scene), self.rng, self._hold, self._load(obs),
+                                                config.episode_ticks - self.tick, config)
+            limit = np.full(len(self._hold), config.travel_rate)
+            limit[robot.torso] = 0.002
+            attempt.travel = PathStepper(path, limit)
+            attempt.travel_wait = 0 if len(path) > 1 else config.travel_settle      # nothing to change: no wait
+            attempt.plan_stats = dict(attempt.plan_stats or {}, travel=stats)
+        if attempt.carry is None and (not attempt.travel.finished or attempt.travel_wait < config.travel_settle):
+            if self._dropped(obs):
+                return self._failed("object lost while taking the travel pose")
+            if not attempt.travel.finished:
+                return attempt.travel.step(), None
+            attempt.travel_wait += 1
+            return self._hold, None
+        if attempt.carry is None:
+            gap = scene.world.goal[:2] - np.asarray(obs["object_pos"], dtype=float)[:2]
+            if np.linalg.norm(gap) < config.reach_near:
+                return self._hold, State.REACH           # already there: no route to plan
+            attempt.carry, stats = transport.plan_carry(scene, self._grids(scene), self._hold, self._load(obs),
+                                                        config.episode_ticks - self.tick, config)
+            attempt.plan_stats = dict(attempt.plan_stats or {}, carry=stats)
+            if attempt.carry is None:
+                return self._failed("no clear route to the goal")
+        if self._dropped(obs):
+            attempt.plan_stats = dict(attempt.plan_stats or {}, lost=dict(
+                tick=self.tick, phase=attempt.carry.phase, led_m=round(attempt.carry.led, 2)))
+            return self._failed("object lost during the carry")
+        action, status = attempt.carry.step(robot.base_pose(obs["qpos"]))
+        if status is Status.FAILED:
+            return self._failed(attempt.carry.failure)
+        return action, (State.REACH if status is Status.DONE else None)
 
     def _reach(self, obs) -> tuple[np.ndarray, Optional[State]]:
-        """Segment 3. Move the arm so the object is at the goal.
-        Exit: DONE. Failures: object lost, goal out of reach."""
-        raise NotImplementedError("segment 3: reach")
+        """Segment 3. Put the object, not the hand, on the goal: first by
+        moving the base and the torso with the arm still, then, for what they
+        cannot do, by a straight move of the hand. Exit: DONE. Failures:
+        object lost, goal out of reach."""
+        scene, attempt, config = self._scene(obs), self.attempt, self.config
+        distance = float(np.linalg.norm(scene.world.goal - np.asarray(obs["object_pos"], dtype=float)))
+        if self._dropped(obs):
+            return self._failed("object lost during the reach")
+        if attempt.raising is not None:                  # the hand is bringing the object up to the goal's height
+            if not attempt.raising.finished:
+                return attempt.raising.step(), None
+            attempt.raising = None
+            return self._hold, None                      # the base and torso then close what is left
+        if attempt.reach is None:
+            if distance < 0.5 * config.goal_tolerance:
+                self.report.delivered_tick = self.tick
+                return self._hold, State.DONE
+            if attempt.reach_wait < config.reach_approach_ticks:
+                action, spent = transport.reach_step(scene, self._hold, self._load(obs), config)
+                if action is not None and not spent:
+                    attempt.reach_wait += 1
+                    return action, None
+            attempt.reach_wait = 0
+            if distance < 0.8 * config.goal_tolerance:   # near enough already; the arm could only make it worse
+                self.report.delivered_tick = self.tick
+                return self._hold, State.DONE
+            below = float(scene.world.goal[2] - obs["object_pos"][2])
+            if not attempt.raised and below > 0.5 * config.goal_tolerance:
+                attempt.raised = True
+                path, stats = transport.plan_raise(scene, self.rng, self._hold, self._load(obs), config)
+                attempt.plan_stats = dict(attempt.plan_stats or {}, raised=dict(stats, below_m=round(below, 3)))
+                if path is not None:
+                    limit = np.full(len(self._hold), config.travel_rate)
+                    limit[scene.robot.torso] = 0.002
+                    attempt.raising = PathStepper(path, limit)
+                    return self._hold, None
+            path = transport.plan_reach(scene, self.rng, self._hold, self._load(obs), config)
+            if path is None:
+                return self._failed("goal out of reach")
+            limit = np.full(len(self._hold), 0.02)
+            limit[scene.robot.torso] = 0.004
+            attempt.reach = PathStepper(path, limit)
+        if not attempt.reach.finished:
+            return attempt.reach.step(), None
+        attempt.reach_wait += 1
+        if distance < config.goal_tolerance * 0.8 or (attempt.reach_wait > 20 and distance < config.goal_tolerance):
+            self.report.delivered_tick = self.tick
+            return self._hold, State.DONE
+        if attempt.reach_wait > 40:
+            return self._failed(f"object stopped {distance:.3f} m from the goal")
+        return self._hold, None
 
     def _retry(self, obs) -> tuple[np.ndarray, Optional[State]]:
-        """Segment 4. With the object still in the hand, go on carrying it.
-        Otherwise start a fresh attempt from where the object now is, if
-        enough ticks remain. Exit: NAVIGATE, SETTLE or STOPPED."""
-        scene = self._scene(obs)
-        if self.attempt.lifted_tick is not None and is_held(self.env, scene.robot):
-            return self._hold, State.NAVIGATE
+        """Segment 4. With the object still in the hand, go on carrying it:
+        the carry and the reach are planned afresh, a set number of times.
+        Otherwise start a fresh attempt from where the object now is (table
+        or floor), if enough ticks remain. Exit: NAVIGATE, SETTLE or STOPPED."""
+        scene, attempt = self._scene(obs), self.attempt
+        if attempt.lifted_tick is not None and transport.in_hand(self.env, scene.robot, obs):
+            attempt.carry, attempt.reach, attempt.reach_wait, attempt.lost = None, None, 0, 0
+            attempt.raising = None
+            attempt.carry_failures += 1
+            return self._hold, (State.NAVIGATE if attempt.carry_failures <= self.config.carry_retries
+                                else State.STOPPED)
         if self.config.episode_ticks - self.tick < self.config.min_retry_ticks or \
                 self.attempt.index + 1 >= self.config.max_attempts:
             return self._hold, State.STOPPED
-        unwind = self._way_out(scene)
+        if attempt.away:
+            # The object was dropped after the hand had left the grasp: open
+            # the hand where it is. The way to the ready pose is planned from there.
+            fingers = list(scene.robot.fingers)
+            opened = self._hold.copy()
+            opened[fingers] = scene.robot.upper[fingers]
+            unwind = np.array([self._hold.copy(), opened])
+        else:
+            unwind = self._way_out(scene)
         self._new_attempt()
         self.attempt.unwind = unwind
         return self._hold, State.SETTLE

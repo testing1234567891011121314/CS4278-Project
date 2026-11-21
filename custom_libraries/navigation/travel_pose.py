@@ -18,6 +18,48 @@ from custom_libraries.grasping import ik
 from custom_libraries.robot import wrap_angle
 
 
+def solve_arm(sim, position, turn: np.ndarray, seed_qpos, budget: Budget, position_tolerance: float = 0.001,
+              angle_tolerance: float = 0.005, iterations: int = 80, damping: float = 0.05) -> Optional[np.ndarray]:
+    """Joint values, within limits, that put the gripper frame at the world
+    `position` with the 3x3 rotation `turn`, found from `seed_qpos`. Only the
+    torso and arm move. None if not found.
+
+    The same iteration as the pick's `grasping.ik.solve`, without restarts
+    and with one difference: a joint already on a limit that the step would
+    push past it is left out of that step, and the others make the move. The
+    pick's solver stops there. From an arm stretched down to the floor it
+    could not turn the hand at all, so an object picked from the floor could
+    not be raised to the goal (runs/deliver_try06). The pick's solver is not
+    changed."""
+    robot = sim.robot
+    joints = list(robot.plan_joints)
+    limited = ~robot.wraps[joints]
+    lower, upper = robot.lower[joints], robot.upper[joints]
+    seed = np.array(seed_qpos, dtype=float)
+    target = np.asarray(position, dtype=float)
+    q = seed.copy()
+    for _ in range(iterations):
+        if budget.expired():
+            return None
+        budget.spend()
+        here, facing = sim.gripper_pose(q)
+        error = np.concatenate([target - here, ik.rotation_vector(turn @ facing.T)])
+        if np.linalg.norm(error[:3]) < position_tolerance and np.linalg.norm(error[3:]) < angle_tolerance:
+            q[joints] = np.where(limited, q[joints], seed[joints] + wrap_angle(q[joints] - seed[joints]))
+            return q
+        error[:3] *= min(1.0, 0.10 / max(np.linalg.norm(error[:3]), 1e-12))     # bound the step
+        error[3:] *= min(1.0, 0.50 / max(np.linalg.norm(error[3:]), 1e-12))
+        j = ik.jacobian(sim, q)
+        step = j.T @ np.linalg.solve(j @ j.T + damping ** 2 * np.eye(6), error)
+        stuck = limited & (((q[joints] >= upper - 1e-9) & (step > 0)) | ((q[joints] <= lower + 1e-9) & (step < 0)))
+        if stuck.any():
+            free = j[:, ~stuck]
+            step = np.zeros(len(joints))
+            step[~stuck] = free.T @ np.linalg.solve(free @ free.T + damping ** 2 * np.eye(6), error)
+        q[joints] = np.where(limited, np.clip(q[joints] + step, lower, upper), q[joints] + step)
+    return None
+
+
 def axis_rotation(axis, angle: float) -> np.ndarray:
     """The 3x3 rotation by `angle` radians about the unit vector `axis`."""
     x, y, z = np.asarray(axis, dtype=float)
@@ -99,11 +141,13 @@ def hand_rotation(pose: TravelPose, turn: np.ndarray, forward: np.ndarray) -> np
 
 def fold_path(scene, rng: np.random.Generator, q0: np.ndarray, grip: np.ndarray, centre: np.ndarray,
               orientation, spin: np.ndarray, reach: float, work: int = 12000,
-              rigid: bool = True) -> tuple[np.ndarray, dict]:
+              rigid: bool = True, height: Optional[float] = None) -> tuple[np.ndarray, dict]:
     """A (K, 15) joint path from `q0` that turns the hand by `spin` about the
     point `grip` (where the pads hold the object) while bringing that point
     onto the base's centre line, `reach` metres ahead of the base's centre at
     most, with the arm folded into the vertical plane through that line.
+    With `height` the object's centre is also brought to that height above
+    the floor; without it the grip point stays at the height it has.
 
     `centre` and `orientation` are the object's pose now; with `rigid` it is
     taken to move with the hand and is checked against the scene and the
@@ -119,6 +163,8 @@ def fold_path(scene, rng: np.random.Generator, q0: np.ndarray, grip: np.ndarray,
     carried = spin @ (np.asarray(centre, dtype=float) - grip)
     reach = min(float(np.linalg.norm(np.asarray(centre)[:2] - base[:2])), reach)
     grip_to = np.array([base[0], base[1], grip[2]]) + reach * forward - [carried[0], carried[1], 0.0]
+    if height is not None:
+        grip_to[2] = height - carried[2]
     turn_to = spin @ turn
     position_to = grip_to + spin @ (position - grip)
     stats: dict = {}
@@ -140,21 +186,30 @@ def fold_path(scene, rng: np.random.Generator, q0: np.ndarray, grip: np.ndarray,
             return max(abs(float((sim.link_pose(robot.joint_indices[k])[0] - [base[0], base[1], 0.0]) @ left))
                        for k in robot.arm)
 
-        # The end pose, from seeds with the arm in the plane of the centre line.
-        budget, found = Budget(work), []
+        # The end pose, from seeds with the arm in the plane of the centre
+        # line, the elbow above it or below it: a level hand found only from
+        # the first seeds tried had its elbow 17 to 24 cm to the side, which
+        # does not pass this maze (runs/deliver_13).
+        # Every seed gets its full 80 iterations; `work` is then allowed
+        # to each end pose's way in, separately. (One allowance for all of it
+        # ran out on the first end pose that failed late, and the rest were
+        # reported "out of reach at step 1"; runs/deliver_try05.)
+        lifts, elbows, flexes = (-1.1, -0.8, -0.2, 0.4), (-2.0, -1.2, 0.8, 1.6, 2.1), (-1.4, -0.8, 0.4, 1.4)
+        budget, found = Budget(len(lifts) * len(elbows) * len(flexes) * 80), []
         pan, lift, upper_roll, elbow, fore_roll, flex, _ = robot.arm
-        for seed_lift in (-0.8, -0.2, 0.4):
-            for seed_elbow in (0.8, 1.6):
-                for seed_flex in (-0.8, 0.4, 1.4):
+        for seed_lift in lifts:
+            for seed_elbow in elbows:
+                for seed_flex in flexes:
                     seed = q0.copy()
                     seed[[pan, upper_roll, fore_roll]] = 0.0
                     seed[[lift, elbow, flex]] = seed_lift, seed_elbow, seed_flex
-                    q = ik.solve(sim, position_to, turn_to, seed, rng, budget, restarts=0)
+                    q = solve_arm(sim, position_to, turn_to, seed, budget)
                     if q is not None and clear(q):
                         found.append(q)
         if not found:
             stats["kept"] = "no folded pose within reach and clear"
             return np.array([q0]), stats
+        stats["end_spreads_cm"] = sorted({round(100 * spread(q)) for q in found})
         vector = ik.rotation_vector(spin)
         angle = float(np.linalg.norm(vector))
         axis = vector / angle if angle > 1e-9 else up
@@ -171,11 +226,12 @@ def fold_path(scene, rng: np.random.Generator, q0: np.ndarray, grip: np.ndarray,
                 t = k / count
                 part = axis_rotation(axis, (turned[0] + t * (turned[1] - turned[0])) * angle)
                 shift = (moved[0] + t * (moved[1] - moved[0])) * (grip_to - grip)
-                q = ik.solve(sim, grip + shift + part @ (position - grip), part @ turn,
-                             last + (end - start) / count, rng, budget, restarts=0)
+                q = solve_arm(sim, grip + shift + part @ (position - grip), part @ turn,
+                              last + (end - start) / count, budget)
                 if q is None or np.abs(q[joints] - last[joints]).max() > 0.3:
                     stats["blocked"] = f"{name}, step {k} of {count}: " + \
-                        ("out of reach" if q is None else "the arm would jump")
+                        ("out of work" if q is None and budget.expired() else
+                         "out of reach" if q is None else "the arm would jump")
                     return None
                 last = q
                 if not clear(q):
@@ -198,6 +254,7 @@ def fold_path(scene, rng: np.random.Generator, q0: np.ndarray, grip: np.ndarray,
             return None if folded is None else [q0] + turned + folded
 
         for q1 in sorted(found, key=spread)[:6]:        # the narrowest end pose whose way in is clear
+            budget = Budget(work)
             q1 = q1.copy()
             q1[joints] = np.where(robot.wraps[joints], q0[joints] + wrap_angle(q1[joints] - q0[joints]), q1[joints])
             path = way(q1)

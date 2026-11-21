@@ -330,6 +330,21 @@ what a grader would load. First run: `runs/library_01`.
 
 ### What the library run shows: where the problems are
 
+> **Read these findings with their source in mind (note of 2026-11-21).**
+> `runs/library_01` was run on commit `f09377d`, whose grasp selection had
+> regressed from the pick the user verified (`b701e73`): grasps ranked by the
+> centre of mass, the "swings" tier, the grip under the hammer's head, a
+> changed order of tight fits and a changed lever in the lift rule. Under
+> `run.sh` that code no longer grasped the plate. The grasp has since been
+> restored to `b701e73` byte for byte, so nothing below describes the current
+> pick. In particular the pick's own counts (items 8 and "how far the 63
+> got"), the grasp properties the carry losses are sorted by (width, depth in
+> the hand, hand direction) and the recovery counts after a drop (item 7:
+> every re-pick used the regressed selection) may come out differently now.
+> The run is also one trial per object, in the env's own maze (not
+> `run.sh`'s), on cloud seed 300. Use it to see where to look, and measure
+> again on the current code before relying on any number.
+
 `runs/library_01`: the 63 further objects, on the committed code (`f09377d`),
 the env's own maze, cloud seed 300. Tables: `tools/carry_report.py
 runs/library_01` (saved as `runs/library_01/report.txt`; the same tool on the
