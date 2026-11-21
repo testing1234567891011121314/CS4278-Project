@@ -141,7 +141,8 @@ def hand_rotation(pose: TravelPose, turn: np.ndarray, forward: np.ndarray) -> np
 
 def fold_path(scene, rng: np.random.Generator, q0: np.ndarray, grip: np.ndarray, centre: np.ndarray,
               orientation, spin: np.ndarray, reach: float, work: int = 12000,
-              rigid: bool = True, height: Optional[float] = None) -> tuple[np.ndarray, dict]:
+              rigid: bool = True, height: Optional[float] = None, nth: int = 0,
+              more_ways: int = 0) -> tuple[np.ndarray, dict]:
     """A (K, 15) joint path from `q0` that turns the hand by `spin` about the
     point `grip` (where the pads hold the object) while bringing that point
     onto the base's centre line, `reach` metres ahead of the base's centre at
@@ -152,7 +153,17 @@ def fold_path(scene, rng: np.random.Generator, q0: np.ndarray, grip: np.ndarray,
     `centre` and `orientation` are the object's pose now; with `rigid` it is
     taken to move with the hand and is checked against the scene and the
     robot. Returns the path (one row if no such pose is within reach and
-    clear) and a record of what was found."""
+    clear) and a record of what was found.
+
+    `nth` asks for the end pose after the first `nth` that have a clear way
+    in, the narrowest first: the caller's way of asking for another arm when
+    the carry does not pass with the narrowest. With `more_ways` more ways in
+    are tried when the hand cannot be led there along a straight line: from
+    1, the move first and the turn after it; from 2, last, the joints taken
+    straight from where they are to the end pose, the hand going wherever
+    that takes it. (That last way lost the bleach, the plate and the sugar
+    box eight times at its start or within a metre of it; NAVIGATE_V2.md,
+    section 7.18. The caller leaves it out for a weak hold.)"""
     robot, sim = scene.robot, scene.sim
     q0 = np.array(q0, dtype=float)
     position, turn = sim.gripper_pose(q0)
@@ -248,19 +259,64 @@ def fold_path(scene, rng: np.random.Generator, q0: np.ndarray, grip: np.ndarray,
             if both is not None:
                 return [q0] + both
             turned = leg(q0, q0, (0.0, 1.0), (0.0, 0.0), "turning in place")
-            if turned is None:
-                return None
-            folded = leg(turned[-1], q1, (1.0, 1.0), (0.0, 1.0), "folding after the turn")
-            return None if folded is None else [q0] + turned + folded
+            if turned is not None:
+                folded = leg(turned[-1], q1, (1.0, 1.0), (0.0, 1.0), "folding after the turn")
+                if folded is not None:
+                    return [q0] + turned + folded
+            return None
 
-        for q1 in sorted(found, key=spread)[:6]:        # the narrowest end pose whose way in is clear
+        def other_way(q1) -> Optional[list]:
+            """The move first and the turn where it ends; failing that, joint by joint."""
+            nonlocal budget
+            first = stats.get("blocked")                # the record keeps why the straight ways failed
             budget = Budget(work)
+            moved = leg(q0, q1, (0.0, 0.0), (0.0, 1.0), "folding before the turn")
+            if moved is not None:
+                turned = leg(moved[-1], q1, (0.0, 1.0), (1.0, 1.0), "turning after folding")
+                if turned is not None:
+                    stats.update(way="the move, then the turn", straight_ways=first)
+                    return [q0] + moved + turned
+            if more_ways < 2:
+                stats["blocked"] = first
+                return None
+            # Joint by joint. The hand may not turn further from where it is
+            # going than it is now by more than half a radian on the way.
+            whole = float(np.linalg.norm(ik.rotation_vector(turn_to @ turn.T)))
+            count = max(2, int(np.ceil(np.abs(q1[joints] - q0[joints]).max() / 0.05)))
+            out = []
+            for k in range(1, count + 1):
+                q = q0 + (q1 - q0) * k / count
+                _, facing = sim.gripper_pose(q)
+                if float(np.linalg.norm(ik.rotation_vector(turn_to @ facing.T))) > whole + 0.5 or not clear(q):
+                    stats["blocked"] = first
+                    return None
+                out.append(q)
+            stats.update(way="joint by joint", straight_ways=first)
+            return [q0] + out
+
+        # The narrowest end pose whose way in is clear. Every end pose is tried
+        # along a straight way first; the other ways come after all of those,
+        # so they change nothing where a straight way exists. (Taken before a
+        # wider arm's straight way, joint by joint cost the mug its first
+        # carry on cloud seed 2; runs/deliver_16_s2.)
+        ends, passed = [], 0
+        for q1 in sorted(found, key=spread)[:6]:
             q1 = q1.copy()
             q1[joints] = np.where(robot.wraps[joints], q0[joints] + wrap_angle(q1[joints] - q0[joints]), q1[joints])
-            path = way(q1)
-            if path is not None:
-                stats.update(spread_cm=[round(100 * spread(q0)), round(100 * spread(q1))], reach_m=round(reach, 2))
-                return np.array(path), stats
+            ends.append(q1)
+        for find in (way, other_way) if more_ways else (way,):
+            for q1 in ends:
+                budget = Budget(work)
+                path = find(q1)
+                if path is not None:
+                    passed += 1
+                    if passed <= nth:
+                        continue
+                    if find is way:
+                        stats.pop("way", None)
+                    stats.update(spread_cm=[round(100 * spread(q0)), round(100 * spread(q1))],
+                                 reach_m=round(reach, 2))
+                    return np.array(path), stats
         stats["kept"] = "the way into every folded pose is blocked"
         return np.array([q0]), stats
     finally:

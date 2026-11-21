@@ -209,6 +209,9 @@ class CarryFollower:
         self._along, self._step, self._turn_rate = plan.arm, 0.0, 0.0
         self._waited = 0
         self._base = plan.path[0].copy()                 # where the base's target is on the floor
+        self._pace = plan.step                           # fastest the object is led now (set_pace)
+        self._reseat: Optional[float] = None             # the wrist roll a re-seat is turning to
+        self.reseats = 0                                 # half turns of the wrist made to re-seat the object
         self.jumps = 0                                   # ticks on which the route asked for more than a tick may do
         self.phase = "raise"
         self.failure: Optional[str] = None
@@ -224,12 +227,44 @@ class CarryFollower:
         self._target[self._roll_joint] += float(np.clip(gap, -self.settings.max_roll, self.settings.max_roll))
         return abs(gap) <= self.settings.max_roll
 
+    @property
+    def left(self) -> float:
+        """Metres of the route the object still has to be led."""
+        return max(0.0, self.plan.length - self._along)
+
+    def set_pace(self, step: float) -> None:
+        """Lead the object at `step` metres per tick from here on, never slower than the plan's own speed."""
+        self._pace = float(np.clip(step, self.plan.step, self.settings.max_step))
+
+    def reseat(self) -> bool:
+        """Ask for the object to be re-seated: the drive slows to rest, the
+        wrist rolls half a turn, the drive goes on. For a level hand whose
+        pads' line is level too, which lets a heavy object sink across the
+        pads: after half a turn what had sunk below the hand's axis stands
+        above it and has all that way to sink again. (The master chef can,
+        51 mm down, did not move in the hand during the roll;
+        runs/reseat_can_s5.log.) True if it will be done: only during the
+        drive, only where the wrist's roll is not steering the pads' line,
+        and one at a time."""
+        if self.phase != "drive" or self.plan.roll_sign != 0 or self._reseat is not None:
+            return False
+        self._reseat = float(self._target[self._roll_joint] + np.pi)
+        return True
+
     def step(self, base_pose) -> tuple[np.ndarray, Status]:
         """The next (15,) action, given the base's measured world pose. DONE
         when the base rests at the end of the route. FAILED if it cannot keep up."""
         s, plan, robot = self.settings, self.plan, self.robot
         base_pose = np.asarray(base_pose, dtype=float)
         start = plan.path[0]
+
+        if self.phase == "reseat":                       # the base rests where it is while the wrist rolls
+            gap = self._reseat - self._target[self._roll_joint]
+            self._target[self._roll_joint] += float(np.clip(gap, -s.max_roll, s.max_roll))
+            if abs(gap) <= s.max_roll:
+                self._reseat, self.phase = None, "drive"
+                self.reseats += 1
+            return self._target.copy(), Status.RUNNING
 
         if self.phase == "raise":
             gap = self._torso_goal - self._target[robot.torso]
@@ -258,7 +293,12 @@ class CarryFollower:
         elif self.phase == "drive":
             left = plan.length - self._along
             stopping = np.sqrt(2.0 * s.ramp * max(left, 0.0))
-            step = min(self._step + s.ramp, plan.step, max(stopping, s.ramp))
+            step = min(self._step + s.ramp, self._pace, max(stopping, s.ramp))
+            if self._reseat is not None:                 # slow to rest for a re-seat
+                step = max(self._step - s.ramp, 0.0)
+                if step <= 1e-9:
+                    self._step, self.phase = 0.0, "reseat"
+                    return self._target.copy(), Status.RUNNING
             for _ in range(8):                           # shorten the step until every rate is within its limit
                 along = min(plan.length, self._along + step)
                 pose, heading = plan.pose(along)
@@ -270,7 +310,7 @@ class CarryFollower:
                 # caught up after a hook in the route): every such tick is a
                 # harder jolt than the speed the carry was planned at.
                 moving = float(np.linalg.norm(pose[:2] - self._base))
-                if turning <= s.max_yaw and rolling <= s.max_roll and moving <= 1.2 * plan.step:
+                if turning <= s.max_yaw and rolling <= s.max_roll and moving <= 1.2 * self._pace:
                     break
                 step *= 0.6
             else:

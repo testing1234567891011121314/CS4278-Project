@@ -22,7 +22,7 @@ from custom_libraries.grasping import arm_planner
 from custom_libraries.navigation import carry
 from custom_libraries.navigation.base_follower import BaseFollower
 from custom_libraries.navigation.grid import OccupancyGrid
-from custom_libraries.navigation.travel_pose import TravelPose, fold_path, hand_rotation
+from custom_libraries.navigation.travel_pose import TravelPose, fold_path, hand_rotation, solve_arm
 from custom_libraries.planning_sim import rotation
 
 # The poses the surveys of 2026-11-21 left standing (runs/travel_01 to travel_03, NAVIGATE_V2.md).
@@ -95,6 +95,11 @@ class Load:
             grip = hand + turn[:, 0] * (sim.gripper.pad_back + sim.gripper.pad_tip) / 2.0
         self._grip = turn.T @ (np.asarray(grip, dtype=float) - hand)
 
+    @property
+    def lever(self) -> float:
+        """How far along the hand's axis the object's centre lies from where the pads hold it, metres."""
+        return abs(float(self._centre[0] - self._grip[0]))
+
     def at(self, q) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """The object's centre, its orientation (xyzw) and the grip point with the robot at `q`."""
         from custom_libraries.collision import _quaternion
@@ -117,13 +122,19 @@ def travel_poses(turn: np.ndarray, mass: float, config) -> list[TravelPose]:
       objects the whole route, and the hammer, apple and bowl in both
       surveys. Then the hand stood straight down, the wrist keeping the pads'
       line along the travel, which is all the mug and the marker can take.
-    No pose carried every object; NAVIGATE_V2.md has the table."""
+    No pose carried every object; NAVIGATE_V2.md has the table.
+
+    `config.travel_order`, for experiments, replaces the rule by a fixed
+    order of poses: names out of "under", "level", "down", "folded"."""
+    if config.travel_order:
+        return [dict(under=UNDER, level=LEVEL, down=DOWN, folded=FOLDED)[name] for name in config.travel_order]
     if turn[2, 0] > -config.travel_upright:
         return [FOLDED]
     return ([LEVEL] if mass >= config.travel_heavy else []) + [UNDER, DOWN, FOLDED]
 
 
-def plan_travel_pose(scene, rng: np.random.Generator, q, load: Load, config) -> tuple[np.ndarray, dict]:
+def plan_travel_pose(scene, rng: np.random.Generator, q, load: Load, config,
+                     more_ways: int = 0) -> tuple[np.ndarray, dict]:
     """The (K, 15) move from `q` into the travel pose: the first pose of
     `travel_poses` that is within reach with a clear way in, with the object
     at the goal's height if that is within reach too (the final reach is then
@@ -139,7 +150,8 @@ def plan_travel_pose(scene, rng: np.random.Generator, q, load: Load, config) -> 
     for pose in travel_poses(turn, load.mass, config):
         for height in (float(scene.world.goal[2]), None):
             path, stats = fold_path(scene, rng, q, grip, centre, orientation, hand_rotation(pose, turn, forward),
-                                    config.travel_reach, work=config.travel_work, height=height)
+                                    config.travel_reach, work=config.travel_work, height=height,
+                                    more_ways=more_ways)
             if len(path) >= 2:
                 return path, dict(stats, pose=pose.name, at_goal_height=height is not None, not_reached=tried)
             tried[pose.name + (" at the goal's height" if height is not None else "")] = \
@@ -148,7 +160,8 @@ def plan_travel_pose(scene, rng: np.random.Generator, q, load: Load, config) -> 
 
 
 def plan_travel(scene, grids: list[OccupancyGrid], rng: np.random.Generator, q, load: Load, ticks_left: int,
-                config) -> tuple[np.ndarray, dict]:
+                config, margin: Optional[float] = None, haste: Optional[float] = None,
+                fragile: bool = False) -> tuple[np.ndarray, dict]:
     """The (K, 15) move from `q` into the pose the object will travel in: the
     first pose of `travel_poses` that is within reach, has a clear way in,
     and in which the whole carry to the goal is clear. A pose is not taken
@@ -156,6 +169,14 @@ def plan_travel(scene, grids: list[OccupancyGrid], rng: np.random.Generator, q, 
     17 to 24 cm to the side, and on this maze's route that touched a wall in
     10 of 23 carries (runs/travel_03) and was refused outright in six of
     fifteen trials (runs/deliver_13).
+
+    For each pose up to `config.travel_arms` arms are tried, the narrowest
+    first: the carry was often refused for the narrowest arm by a few
+    millimetres at one corner (runs/blocked_s3), and another arm for the same
+    hand may pass. `margin` replaces `config.carry_margin` (the retry asks
+    for less after a carry was refused with the object in the hand), `haste`
+    `config.carry_haste`. For a `fragile` hold no way into a pose is made
+    joint by joint.
 
     If no pose passes the carry's check, the first within reach is taken and
     the carry is planned from it as it comes. One row if none is within reach."""
@@ -169,34 +190,49 @@ def plan_travel(scene, grids: list[OccupancyGrid], rng: np.random.Generator, q, 
     for pose in travel_poses(turn, load.mass, config):
         for height in (float(scene.world.goal[2]), None):
             name = pose.name + (" at the goal's height" if height is not None else "")
-            path, stats = fold_path(scene, rng, q, grip, centre, orientation, hand_rotation(pose, turn, forward),
-                                    config.travel_reach, work=config.travel_work, height=height)
-            if len(path) < 2:
-                tried[name] = stats.get("blocked", stats.get("kept"))
-                continue
-            record = dict(stats, pose=pose.name, at_goal_height=height is not None)
-            follower, why = plan_carry(scene, grids, path[-1], load, ticks_left, config)
-            if follower is not None:
-                return path, dict(record, not_reached=tried)
-            nearest = why.get("blocked") or [{}]
-            tried[name] = f"carry blocked: {nearest[0].get('nearest')} at base {nearest[0].get('base')}, " \
-                          f"arm spread {stats.get('spread_cm')} cm of {stats.get('end_spreads_cm')}"
-            fallback = fallback or (path, record)
-            break                                       # the same pose at another height is no narrower
+            blocked = False
+            for nth in range(max(1, config.travel_arms)):
+                path, stats = fold_path(scene, rng, q, grip, centre, orientation, hand_rotation(pose, turn, forward),
+                                        config.travel_reach, work=config.travel_work, height=height, nth=nth,
+                                        more_ways=min(int(config.travel_more_ways), 1 if fragile else 2))
+                if len(path) < 2:
+                    if nth == 0:
+                        tried[name] = stats.get("blocked", stats.get("kept"))
+                    break
+                record = dict(stats, pose=pose.name, at_goal_height=height is not None, arm=nth)
+                follower, why = plan_carry(scene, grids, path[-1], load, ticks_left, config, margin=margin,
+                                           haste=haste)
+                if follower is not None:
+                    return path, dict(record, not_reached=tried)
+                blocked = True
+                nearest = why.get("blocked") or [{}]
+                tried[name + (f", arm {nth}" if nth else "")] = \
+                    f"carry blocked: {nearest[0].get('nearest')} at base {nearest[0].get('base')}, " \
+                    f"arm spread {stats.get('spread_cm')} cm of {stats.get('end_spreads_cm')}; each route: " + \
+                    " / ".join(f"pose {b.get('pose')} turn {b.get('turn_deg')} at {b.get('base')} "
+                               f"{b.get('nearest')} gaps {b.get('gaps_mm')}" for b in nearest)
+                fallback = fallback or (path, record)
+            if blocked:
+                break                                   # the same pose at another height is no narrower
     if fallback is not None:
         return fallback[0], dict(fallback[1], not_reached=tried, carry_blocked=True)
     return np.array([q]), dict(pose="as lifted", not_reached=tried)
 
 
 def plan_carry(scene, grids: list[OccupancyGrid], q, load: Load, ticks_left: int, config,
-               whole_route: bool = True) -> tuple[Optional[carry.CarryFollower], dict]:
+               whole_route: bool = True, margin: Optional[float] = None,
+               haste: Optional[float] = None, reserve: int = 0) -> tuple[Optional[carry.CarryFollower], dict]:
     """Choose a route to the goal and check the whole carry along it, the
     object in the hand, against the scene. `q` is the pose the arm keeps.
     With `whole_route` False only the turn on the spot and the first metres
     are checked (enough to tell whether a carry can start from here).
+    `margin` is the least gap asked for (`config.carry_margin` if None);
+    `haste` replaces `config.carry_haste`; `reserve` is ticks kept back on
+    top of `config.carry_reserve`.
     Returns the follower, or None and why."""
     robot, world = scene.robot, scene.world
-    settings = carry.CarrySettings(turn_step=config.carry_turn_step)
+    margin = config.carry_margin if margin is None else margin
+    settings = carry.CarrySettings(turn_step=config.carry_turn_step, max_yaw=config.carry_max_yaw)
     q = np.array(q, dtype=float)
     base = robot.base_pose(q)
     _, hand = scene.sim.gripper_pose(q)
@@ -221,8 +257,10 @@ def plan_carry(scene, grids: list[OccupancyGrid], q, load: Load, ticks_left: int
             length = float(np.linalg.norm(np.diff(route, axis=0), axis=1).sum())
             # An object that will arrive well under the goal has to be raised there: ticks are kept back for it.
             low = world.goal[2] - position[2] - rise > 0.5 * config.goal_tolerance
-            needed = (length - arm) / max(ticks_left - config.carry_reserve - (config.raise_reserve if low else 0), 1)
-            step = float(np.clip(config.carry_haste * needed, settings.min_step, settings.max_step))
+            needed = (length - arm) / max(ticks_left - config.carry_reserve - reserve
+                                          - (config.raise_reserve if low else 0), 1)
+            step = float(np.clip((config.carry_haste if haste is None else haste) * needed,
+                                 settings.min_step, settings.max_step))
             plan = carry.make_plan(route, base, position[:2], closing, q[roll_joint], int(np.sign(hand[2, 0])), step)
             if plan.length <= plan.arm:
                 continue
@@ -236,7 +274,7 @@ def plan_carry(scene, grids: list[OccupancyGrid], q, load: Load, ticks_left: int
                     at = robot.with_base(raised, pose)
                     at[roll_joint] = roll
                     scene.collision.focus(pose[:2])
-                    if not scene.collision.is_free(at, config.carry_margin, load_margin=config.carry_margin):
+                    if not scene.collision.is_free(at, margin, load_margin=margin):
                         gaps = scene.collision.clearances(at, with_object=False)
                         blocked.append(dict(pose=index, turn_deg=round(float(np.degrees(turn))),
                                             base=[round(float(v), 2) for v in pose],
@@ -248,7 +286,83 @@ def plan_carry(scene, grids: list[OccupancyGrid], q, load: Load, ticks_left: int
                     stats = dict(route_m=round(plan.length, 2), step_mm=round(1000 * step, 1), steered=bool(upright),
                                  rise_m=round(rise, 3), turn_deg=round(float(np.degrees(turn))))
                     return carry.CarryFollower(plan, robot, q, rise, turn, settings), stats
-        return None, dict(blocked=blocked[:4])
+        return None, dict(blocked=blocked[:8])
+    finally:
+        scene.collision.release()
+
+
+def sag(env, robot, obs) -> Optional[float]:
+    """How far the object's centre is below the hand's axis, metres, measured
+    across the pads (negative: above it). None unless the hand is level with
+    the pads' line level too, so that across the pads is up and down."""
+    link = p.getLinkState(env.robot_id, robot.gripper_link, computeForwardKinematics=True,
+                          physicsClientId=env.pb_physics_client)
+    hand, turn = np.array(link[4]), rotation(link[5])
+    if abs(turn[2, 2]) < 0.8:
+        return None
+    across = float(turn[:, 2] @ (np.asarray(obs["object_pos"], dtype=float) - hand))
+    return -across * float(np.sign(turn[2, 2]))
+
+
+def hand_rate(scene, path: np.ndarray, rate: float, speed: float) -> float:
+    """The joint rate, `rate` at most, at which the hand moves no faster than
+    `speed` metres per tick anywhere along the joint path `path`. A path made
+    joint by joint can swing the hand a long way for a small change of the
+    joints; one led along a straight line cannot."""
+    path = np.asarray(path, dtype=float)
+    hands = np.array([scene.sim.gripper_pose(q)[0] for q in path])
+    for a, b, ha, hb in zip(path[:-1], path[1:], hands[:-1], hands[1:]):
+        joints, hand = float(np.abs(b - a).max()), float(np.linalg.norm(hb - ha))
+        if hand > 1e-9:
+            rate = min(rate, speed * joints / hand)
+    return max(rate, 1e-4)
+
+
+def load_contact(env) -> Optional[np.ndarray]:
+    """The unit vector that points away from what the held object rests
+    against (the floor, a wall, the table), read from the env's contacts.
+    None if it touches nothing but the robot."""
+    push = np.zeros(3)
+    for c in p.getContactPoints(bodyA=env.object_id, physicsClientId=env.pb_physics_client):
+        if c[2] != env.robot_id and c[9] > 0.5:
+            push += c[9] * np.asarray(c[7], dtype=float)        # the normal on the other body, toward the object
+    size = float(np.linalg.norm(push))
+    return push / size if size > 1e-9 else None
+
+
+def plan_free(scene, q, load: Load, push: np.ndarray, config) -> tuple[Optional[np.ndarray], dict]:
+    """The (K, 15) move that takes the held object off what it rests against:
+    the hand goes straight along `push`, a centimetre at a time and without
+    turning, until the object is `config.free_gap` clear of everything fixed,
+    `config.free_reach` at most. None if the arm cannot make it.
+
+    A can picked up from the floor was still standing on it, with its whole
+    weight, when the pick was done; every travel pose and every route was
+    then refused because the object touched something, and the trial stopped
+    with the can in the hand 4.8 m from the goal (runs/can_full_s5)."""
+    robot, sim = scene.robot, scene.sim
+    q = np.array(q, dtype=float)
+    position, turn = sim.gripper_pose(q)
+    centre, orientation, _ = load.at(q)
+    budget = Budget(config.travel_work)
+    scene.collision.focus(robot.base_pose(q)[:2])
+    scene.collision.hold(q, centre, orientation)
+    try:
+        path, gap = [q], 0.0
+        for k in range(1, int(round(config.free_reach / 0.01)) + 1):
+            step = solve_arm(sim, position + 0.01 * k * np.asarray(push, dtype=float), turn, path[-1], budget)
+            if step is None:
+                break
+            gaps = scene.collision.clearances(step, with_object=False)
+            if gaps["scene"] < 0.01 or gaps["own"] < 0.0:
+                break
+            path.append(step)
+            gap = gaps["load"]
+            if gap >= config.free_gap:
+                break
+        stats = dict(push=[round(float(v), 2) for v in push], moved_m=round(0.01 * (len(path) - 1), 2),
+                     gap_mm=round(1000 * gap))
+        return (np.array(path) if len(path) > 1 and gap >= 0.005 else None), stats
     finally:
         scene.collision.release()
 
@@ -296,27 +410,37 @@ def choose_back_off(scene, grids: list[OccupancyGrid], rng: np.random.Generator,
             scene.collision.release()
         return follower if clear else None
 
-    def carry_starts_from(end) -> Optional[str]:
+    def carry_starts_from(end, more_ways: int) -> Optional[str]:
         """None if the travel pose can be taken and the carry started with the base at `end`; else why not."""
         if not any(grid.is_free(end[:2]) for grid in grids):
             return "no room for a route to begin"
         there = robot.with_base(q, end)
-        path, pose = plan_travel_pose(scene, rng, there, load, config)
+        path, pose = plan_travel_pose(scene, rng, there, load, config, more_ways=more_ways)
         if len(path) < 2:
             return "no travel pose"
         follower, _ = plan_carry(scene, grids, path[-1], load, ticks_left, config, whole_route=False)
         return None if follower is not None else "carry blocked"
 
-    for distance, turn in options[:config.back_off_tries]:
-        follower = follower_for(distance, turn) if distance > 0.0 else None
-        if distance > 0.0 and follower is None:
-            stats["tried"].append([distance, round(float(np.degrees(turn))), "way blocked"])
-            continue
-        why = carry_starts_from(base if follower is None else follower.pose_at(1.0))
-        stats["tried"].append([distance, round(float(np.degrees(turn))), why or "chosen"])
-        if why is None:
-            stats.update(distance_m=distance, heading_deg=round(float(np.degrees(turn))))
-            return follower, stats
+    # Every retreat is first judged with the hand led straight into its pose.
+    # Only if none will do are they judged again with the move made before
+    # the turn: the plate on cloud seed 3 had "no travel pose" at all sixteen,
+    # took the fallback's 0.6 m at 3.9 mm per tick, and was then led at 16.5
+    # mm per tick for want of the 159 ticks that cost (runs/deliver_21_s3).
+    for more_ways in (0, 1) if config.travel_more_ways else (0,):
+        for distance, turn in options[:config.back_off_tries]:
+            follower = follower_for(distance, turn) if distance > 0.0 else None
+            if distance > 0.0 and follower is None:
+                if more_ways == 0:
+                    stats["tried"].append([distance, round(float(np.degrees(turn))), "way blocked"])
+                continue
+            why = carry_starts_from(base if follower is None else follower.pose_at(1.0), more_ways)
+            if more_ways == 0 or why is None:
+                stats["tried"].append([distance, round(float(np.degrees(turn))), why or "chosen"])
+            if why is None:
+                stats.update(distance_m=distance, heading_deg=round(float(np.degrees(turn))))
+                if more_ways:
+                    stats.update(ways="the move, then the turn")
+                return follower, stats
     for distance in config.back_off:                     # nothing better found: as far straight away as is clear
         plain = follower_for(distance, 0.0)
         if plain is not None:

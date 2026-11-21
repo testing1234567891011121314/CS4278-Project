@@ -117,9 +117,18 @@ class Config:
                                      # straight down for the carry; any other is kept and turned forward
     travel_heavy: float = 0.6        # from this mass, kg, a hand pointing down is laid level first: the object
                                      # then slides into the palm, not out along the fingers
+    travel_order: tuple = ()         # experiments: a fixed order of travel poses in place of the rule, names
+                                     # out of "under", "level", "down", "folded" (transport.travel_poses)
     travel_reach: float = 0.60       # the object is brought in to this far from the base's centre, metres. At
                                      # 0.70 the level poses' elbow met the door jamb of the maze on the way in
                                      # and six of fifteen carries were refused; at 0.50 the arm cannot take them
+    travel_arms: int = 3             # arms tried for each travel pose, the narrowest first, until the carry passes
+    travel_more_ways: int = 2        # ways into a travel pose tried when the hand cannot be led there straight:
+                                     # 0 none, 1 the move before the turn, 2 then also joint by joint
+                                     # (travel_pose.fold_path); a weak hold is never led joint by joint
+    travel_hand_step: float = 0.006  # fastest the hand moves along a way made joint by joint, metres per tick
+    free_gap: float = 0.03           # a held object that rests against something is first taken this far off it
+    free_reach: float = 0.20         # ... by a straight move of the hand of at most this length, metres (0: never)
     travel_work: int = 12000         # work allowed to planning the move into the travel pose
     travel_rate: float = 0.03        # fastest any arm joint moves while the travel pose is taken, rad per tick
     travel_settle: int = 20          # ticks waited after it for the object to stop swinging
@@ -127,8 +136,22 @@ class Config:
     carry_margin: float = 0.012      # least gap between the robot with its load and the scene during the carry
     carry_reserve: int = 300         # ticks kept back from the carry for its set-up (raise, turn, rolls) and the reach
     carry_haste: float = 1.25        # the object is led this many times faster than the ticks left require
+    carry_fragile: float = 0.0045    # a hold whose own speed limit (_carry_step, metres per tick) is under this
+                                     # gets no haste at all and no way into a pose made joint by joint (0: never).
+                                     # The three objects under it (can 3.0, bleach 3.2, plate 3.3 to 3.9 mm per
+                                     # tick) were the three never delivered on cloud seeds 2 and 3
+    reseat_slack: int = 150          # after a re-seat the pace is set so the carry ends this many ticks early
     carry_turn_step: float = 0.006   # fastest the object goes round in the turn on the spot, metres per tick
+    carry_max_yaw: float = 0.05      # most the base turns per tick during the drive, rad: the object is slowed
+                                     # in a bend until the turn is within it
+    reseat_sag: float = 0.035        # an object that has sunk this far below the axis of a level hand, across
+                                     # the pads, is re-seated by half a turn of the wrist, metres (0: never)
+    reseat_room: float = 0.04        # least gap to everything fixed, all through that turn
+    reseat_lever: float = 0.03       # ... and only where the object's centre is within this of the pads along the
+                                     # hand's axis: held by one end it droops instead, and the turn does not help
     carry_retries: int = 2           # times a carry that failed with the object still in the hand is planned again
+    carry_retry_margins: tuple = (1.0, 0.5, 0.15)   # share of carry_margin asked for by the first plan and by
+                                     # each one after it: the same plan a second time is refused a second time
     lost_ticks: int = 4              # ticks in a row out of the hand that count as a drop
     reach_work: int = 12000          # work allowed to planning the final reach
     reach_step: float = 0.004        # fastest the base moves the object in the final approach, metres per tick
@@ -187,10 +210,16 @@ class Attempt:
     drag_from: Optional[tuple] = None               # where the base and the object were when a drag began
     lost: int = 0                                   # ticks in a row without the hold, after the grasp
     away: bool = False                              # the back-off has been planned: the hand has left the grasp
+    freed: bool = False                             # the held object has been looked at for what it rests against
+    freeing: Optional[PathStepper] = None           # the move that takes it off that
     travel: Optional[PathStepper] = None            # the move into the travel pose
     travel_wait: int = 0                            # ticks waited after it
     carry: Optional[carry.CarryFollower] = None     # the drive to the goal
     carry_failures: int = 0                         # carries that failed with the object still in the hand
+    sag_from: Optional[float] = None                # least the object has been below a level hand's axis, metres
+    fragile: Optional[bool] = None                  # the hold's own speed limit is under Config.carry_fragile
+    seatable: bool = False                          # this carry's hold can be re-seated by half a turn of the wrist
+    reseats: int = 0                                # re-seats of this carry that have been paced for
     reach: Optional[PathStepper] = None             # the final move of the hand
     reach_wait: int = 0
     raising: Optional[PathStepper] = None           # the move that brings the object up to the goal's height
@@ -594,6 +623,24 @@ class Solver:
         the arm still. Exit: NAVIGATE. Failures: object lost, base blocked."""
         scene, attempt, config = self._scene(obs), self.attempt, self.config
         robot = scene.robot
+        if not attempt.freed:
+            # An object picked up where it lay can still rest against the
+            # floor or a wall: nothing can be planned until it is off that.
+            attempt.freed = True
+            push = transport.load_contact(self.env) if config.free_reach > 0 else None
+            if push is not None:
+                path, stats = transport.plan_free(scene, self._hold, self._load(obs), push, config)
+                attempt.plan_stats = dict(attempt.plan_stats or {}, freed=stats)
+                if path is not None:
+                    limit = np.full(len(self._hold), config.travel_rate)
+                    limit[robot.torso] = 0.002
+                    attempt.freeing = PathStepper(path, limit)
+        if attempt.freeing is not None:
+            if self._dropped(obs):
+                return self._failed("object lost while it was taken off what it rested against")
+            if not attempt.freeing.finished:
+                return attempt.freeing.step(), None
+            attempt.freeing = None
         if not attempt.away:
             attempt.away = True
             base = robot.base_pose(self._hold)
@@ -700,10 +747,26 @@ class Solver:
         Failures: object lost, no clear route, base blocked."""
         scene, attempt, config = self._scene(obs), self.attempt, self.config
         robot = scene.robot
+        # A carry refused with the object in the hand is planned again with a smaller margin.
+        shares = config.carry_retry_margins or (1.0,)
+        margin = config.carry_margin * shares[min(attempt.carry_failures, len(shares) - 1)]
+        # A hold too weak for the speed is led no faster than the ticks left
+        # require, and is not swung into its pose joint by joint.
+        if attempt.fragile is None:
+            attempt.fragile = bool(self._carry_step(None) < config.carry_fragile)
+            attempt.plan_stats = dict(attempt.plan_stats or {}, fragile=attempt.fragile)
+        haste = 1.0 if attempt.fragile else config.carry_haste
         if attempt.travel is None:
             path, stats = transport.plan_travel(scene, self._grids(scene), self.rng, self._hold, self._load(obs),
-                                                config.episode_ticks - self.tick, config)
-            limit = np.full(len(self._hold), config.travel_rate)
+                                                config.episode_ticks - self.tick, config, margin=margin, haste=haste,
+                                                fragile=attempt.fragile)
+            if attempt.carry_failures:
+                stats = dict(stats, margin_mm=round(1000 * margin, 1))
+            rate = config.travel_rate
+            if stats.get("way") == "joint by joint":
+                rate = transport.hand_rate(scene, path, rate, config.travel_hand_step)
+                stats = dict(stats, rate=round(rate, 4))
+            limit = np.full(len(self._hold), rate)
             limit[robot.torso] = 0.002
             attempt.travel = PathStepper(path, limit)
             attempt.travel_wait = 0 if len(path) > 1 else config.travel_settle      # nothing to change: no wait
@@ -719,8 +782,17 @@ class Solver:
             gap = scene.world.goal[:2] - np.asarray(obs["object_pos"], dtype=float)[:2]
             if np.linalg.norm(gap) < config.reach_near:
                 return self._hold, State.REACH           # already there: no route to plan
-            attempt.carry, stats = transport.plan_carry(scene, self._grids(scene), self._hold, self._load(obs),
-                                                        config.episode_ticks - self.tick, config)
+            # A hold can be re-seated where the hand is level with the pads'
+            # line level, and the pads hold the object about its middle: then
+            # it sinks across the pads, and half a turn of the wrist undoes that.
+            load = self._load(obs)
+            attempt.seatable = bool(config.reseat_sag > 0 and transport.sag(self.env, robot, obs) is not None
+                                    and load.lever < config.reseat_lever)
+            attempt.carry, stats = transport.plan_carry(
+                scene, self._grids(scene), self._hold, load, config.episode_ticks - self.tick, config, margin=margin,
+                haste=haste)
+            if isinstance(stats, dict):
+                stats = dict(stats, lever_mm=round(1000 * load.lever), seatable=attempt.seatable)
             attempt.plan_stats = dict(attempt.plan_stats or {}, carry=stats)
             if attempt.carry is None:
                 return self._failed("no clear route to the goal")
@@ -728,10 +800,43 @@ class Solver:
             attempt.plan_stats = dict(attempt.plan_stats or {}, lost=dict(
                 tick=self.tick, phase=attempt.carry.phase, led_m=round(attempt.carry.led, 2)))
             return self._failed("object lost during the carry")
+        if attempt.carry.reseats > attempt.reseats:
+            # A re-seat has just ended. The drive rested through it: the pace
+            # is set again from the ticks that are left, never under the plan's.
+            attempt.reseats = attempt.carry.reseats
+            ticks = max(config.episode_ticks - self.tick - config.reseat_slack, 1)
+            attempt.carry.set_pace(haste * attempt.carry.left / ticks)
+        if attempt.seatable and attempt.carry.phase == "drive":
+            # An object sinking across the pads of a level hand is re-seated by half a turn of the wrist.
+            sag = transport.sag(self.env, robot, obs)
+            if sag is not None:
+                attempt.sag_from = sag if attempt.sag_from is None else min(attempt.sag_from, sag)
+                if sag > config.reseat_sag and sag - attempt.sag_from > 0.5 * config.reseat_sag and \
+                        self.tick % 5 == 0 and self._roll_clear(scene, obs) and attempt.carry.reseat():
+                    attempt.sag_from = None
+                    attempt.plan_stats = dict(attempt.plan_stats, reseats=(attempt.plan_stats.get("reseats") or []) + [
+                        dict(tick=self.tick, led_m=round(attempt.carry.led, 2), sag_mm=round(1000 * sag))])
         action, status = attempt.carry.step(robot.base_pose(obs["qpos"]))
         if status is Status.FAILED:
             return self._failed(attempt.carry.failure)
         return action, (State.REACH if status is Status.DONE else None)
+
+    def _roll_clear(self, scene: Scene, obs) -> bool:
+        """Whether the wrist can roll half a turn here, the object with it, clear of everything."""
+        robot = scene.robot
+        q = self._hold.copy()
+        centre, orientation, _ = self._load(obs).at(q)
+        scene.collision.focus(robot.base_pose(q)[:2])
+        scene.collision.hold(q, centre, orientation)
+        try:
+            for angle in np.linspace(0.0, np.pi, 9)[1:]:
+                rolled = q.copy()
+                rolled[robot.arm[-1]] += angle
+                if not scene.collision.is_free(rolled, self.config.reseat_room, load_margin=self.config.reseat_room):
+                    return False
+            return True
+        finally:
+            scene.collision.release()
 
     def _reach(self, obs) -> tuple[np.ndarray, Optional[State]]:
         """Segment 3. Put the object, not the hand, on the goal: first by
@@ -796,6 +901,10 @@ class Solver:
             attempt.carry, attempt.reach, attempt.reach_wait, attempt.lost = None, None, 0, 0
             attempt.raising = None
             attempt.carry_failures += 1
+            attempt.plan_stats = dict(attempt.plan_stats or {}, carry_retries=attempt.carry_failures)
+            gap = scene.world.goal[:2] - np.asarray(obs["object_pos"], dtype=float)[:2]
+            if len(self.config.carry_retry_margins) > 1 and np.linalg.norm(gap) >= self.config.reach_near:
+                attempt.travel, attempt.travel_wait = None, 0    # the pose is chosen again, with the smaller margin
             return self._hold, (State.NAVIGATE if attempt.carry_failures <= self.config.carry_retries
                                 else State.STOPPED)
         if self.config.episode_ticks - self.tick < self.config.min_retry_ticks or \
