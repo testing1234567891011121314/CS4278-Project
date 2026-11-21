@@ -1,0 +1,1 @@
+{"objects": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14], "maze_seed": 42, "cloud_seed": 2, "step_mm": 15.0, "turn_mm": 6.0, "poses": [1, 6, 8, 10, 12], "distance": 30.0, "env_maze": false, "out": "runs/travel_02", "one": null}

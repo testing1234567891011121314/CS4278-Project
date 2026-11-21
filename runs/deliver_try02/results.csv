@@ -1,0 +1,3 @@
+object,name,rest_z,lift_tick,max_lift_cm,hold_50,held_at_end,backed_off_m,state,attempts,failure,grasp_error_mm,errors,ticks,wall_s,delivered_tick,goal_cm,navigate_tick
+5,banana,0.645,192,25.5,True,True,17.68,done,1,,3.2,0,2499,40.0,2469,1.4,269
+12,large_marker,0.011,811,23.8,True,False,11.42,stopped,7,object moved before the close; object moved during the drive; object moved during the drive; no grasp plan; object lost during the carry; object moved during the drive; no grasp plan,,0,2769,81.8,,490.8,875

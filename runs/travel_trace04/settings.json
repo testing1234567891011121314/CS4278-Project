@@ -1,0 +1,1 @@
+{"objects": [8, 1], "maze_seed": 42, "cloud_seed": 2, "step_mm": 15.0, "turn_mm": 6.0, "poses": [6], "trace": true, "distance": 30.0, "env_maze": false, "out": "runs/travel_trace04", "one": null}

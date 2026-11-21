@@ -1,0 +1,76 @@
+object,name,pose,reached,lost_in,driven_m,pads_lost_m,touched,ticks,slip_fingers_mm,slip_pads_mm,slip_across_mm,turn_deg,turn_fingers_deg,turn_pads_deg,turn_across_deg,least_force_N,arm_touched_wall,hand_z,lever_mm,lever_deg,mass_kg,pick_tick,note
+0,master_chef_can,folded 0.70,True,,26.12,,,2136,-11.5,4.0,-22.5,20.9,-2.9,-15.3,-14.0,28,False,-0.0,14,6,1.054,323,"{spread_cm: [32, 11], reach_m: 0.7}"
+0,master_chef_can,"down, pads along",True,drive,0.5,0.5,,389,23.0,1.5,-6.8,14.8,5.4,13.7,-1.4,0,False,-0.0,14,6,1.054,323,"{spread_cm: [32, 4], reach_m: 0.7}"
+0,master_chef_can,level,True,,26.12,,,2137,-11.8,2.9,-22.5,43.8,-7.2,-15.3,-40.4,326,False,-0.0,14,6,1.054,323,"{spread_cm: [32, 11], reach_m: 0.7}"
+0,master_chef_can,"level, finger under",False,,,,,0,,,,,,,,,False,-0.0,14,6,1.054,323,"{blocked: turning in place, step 1 of 39: out of reach, kept: the way into every folded pose is blocked}"
+0,master_chef_can,"up 30, finger under",False,,,,,0,,,,,,,,,False,-0.0,14,6,1.054,323,{kept: no folded pose within reach and clear}
+1,sugar_box,folded 0.70,True,drive,6.46,6.46,,776,18.2,2.2,9.8,18.4,-9.4,-12.3,10.0,0,False,-1.0,10,84,0.638,270,"{spread_cm: [13, 7], reach_m: 0.7}"
+1,sugar_box,"down, pads along",True,drive,6.55,6.55,,786,24.9,11.3,8.6,20.6,-4.5,-18.4,8.2,0,False,-1.0,10,84,0.638,270,"{spread_cm: [13, 7], reach_m: 0.7}"
+1,sugar_box,level,True,,26.05,,,2123,-35.3,1.5,3.1,15.2,0.8,15.1,-0.6,8,False,-1.0,10,84,0.638,270,"{spread_cm: [13, 22], reach_m: 0.7}"
+1,sugar_box,"level, finger under",True,turn,0.0,0.0,,297,9.5,-0.0,-1.9,12.4,-1.8,5.9,10.8,0,False,-1.0,10,84,0.638,270,"{blocked: turning in place, step 43 of 53: out of reach, spread_cm: [13, 24], reach_m: 0.7}"
+1,sugar_box,"up 30, finger under",False,,,,,0,,,,,,,,,False,-1.0,10,84,0.638,270,{kept: no folded pose within reach and clear}
+2,tomato_soup_can,folded 0.70,True,,26.12,,,2248,24.4,0.4,-5.8,13.9,13.8,-0.7,-0.4,8,False,-1.0,43,1,0.319,306,"{spread_cm: [17, 2], reach_m: 0.7}"
+2,tomato_soup_can,"down, pads along",True,,26.12,,,2253,4.0,-0.3,0.3,7.8,-7.7,-1.5,0.8,9,False,-1.0,43,1,0.319,306,"{spread_cm: [17, 2], reach_m: 0.7}"
+2,tomato_soup_can,level,False,,,,,0,,,,,,,,,False,-1.0,43,1,0.319,306,"{blocked: turning in place, step 1 of 38: out of reach, kept: the way into every folded pose is blocked}"
+2,tomato_soup_can,"level, finger under",True,drive,5.26,5.26,,696,6.3,-40.3,50.5,38.3,13.8,-35.7,1.3,0,True,-1.0,43,1,0.319,306,"{spread_cm: [17, 17], reach_m: 0.7}"
+2,tomato_soup_can,"up 30, finger under",False,,,,,0,,,,,,,,,False,-1.0,43,1,0.319,306,"{blocked: turning in place, step 1 of 59: out of reach, kept: the way into every folded pose is blocked}"
+3,mustard_bottle,folded 0.70,True,,27.05,,,2274,-10.1,-0.3,-2.3,16.8,-2.0,11.6,12.0,382,False,-1.0,17,85,0.612,397,"{spread_cm: [19, 3], reach_m: 0.69}"
+3,mustard_bottle,"down, pads along",True,,27.05,,,2278,-9.5,-0.2,-1.9,16.2,-1.8,11.1,11.6,386,False,-1.0,17,85,0.612,397,"{spread_cm: [19, 3], reach_m: 0.69}"
+3,mustard_bottle,level,False,,,,,0,,,,,,,,,False,-1.0,17,85,0.612,397,"{blocked: turning in place, step 1 of 38: out of reach, kept: the way into every folded pose is blocked}"
+3,mustard_bottle,"level, finger under",True,,27.05,,,2159,-15.7,0.1,-2.0,12.2,-0.2,7.5,-9.6,223,True,-1.0,17,85,0.612,397,"{spread_cm: [19, 20], reach_m: 0.69}"
+3,mustard_bottle,"up 30, finger under",False,,,,,0,,,,,,,,,False,-1.0,17,85,0.612,397,{kept: no folded pose within reach and clear}
+4,potted_meat_can,folded 0.70,True,,26.12,,,2185,8.9,-1.1,10.4,14.0,1.1,-13.3,-4.3,276,False,-1.0,33,8,0.354,247,"{spread_cm: [19, 7], reach_m: 0.7}"
+4,potted_meat_can,"down, pads along",True,,26.12,,,2185,12.0,-0.2,6.6,20.0,2.0,-19.9,0.6,116,True,-1.0,33,8,0.354,247,"{spread_cm: [19, 7], reach_m: 0.7}"
+4,potted_meat_can,level,True,,26.11,,,2099,-4.1,0.5,25.0,17.3,2.1,-16.8,-3.6,319,True,-1.0,33,8,0.354,247,"{spread_cm: [19, 8], reach_m: 0.7}"
+4,potted_meat_can,"level, finger under",True,,26.12,,,2048,-2.7,-3.1,-24.3,20.5,-2.1,20.2,-2.2,6,True,-1.0,33,8,0.354,247,"{spread_cm: [19, 10], reach_m: 0.7}"
+4,potted_meat_can,"up 30, finger under",False,,,,,0,,,,,,,,,False,-1.0,33,8,0.354,247,"{blocked: turning in place, step 49 of 49: scene 4 mm, kept: the way into every folded pose is blocked}"
+5,banana,folded 0.70,True,,26.12,,,2170,-5.4,0.4,-0.2,12.2,-1.0,1.1,-12.1,241,False,-1.0,3,76,0.172,269,"{spread_cm: [3, 8], reach_m: 0.7}"
+5,banana,"down, pads along",True,,26.12,,,2171,-6.0,0.3,-0.4,12.9,-1.3,-1.4,-12.7,249,False,-1.0,3,76,0.172,269,"{spread_cm: [3, 7], reach_m: 0.7}"
+5,banana,level,True,turn,0.0,0.0,"table.urdf in turn at 0.00 m, tick 208, 38 N",211,2.3,42.6,62.7,12.6,-1.7,-12.5,-0.2,0,True,-1.0,3,76,0.172,269,"{blocked: turning in place, step 23 of 41: scene 0 mm, spread_cm: [3, 29], reach_m: 0.7}"
+5,banana,"level, finger under",True,,26.11,,,2110,18.6,-1.1,-8.8,47.3,29.9,30.8,19.7,63,False,-1.0,3,76,0.172,269,"{blocked: turning in place, step 18 of 32: scene -3 mm, spread_cm: [3, 24], reach_m: 0.7}"
+5,banana,"up 30, finger under",False,,,,,0,,,,,,,,,False,-1.0,3,76,0.172,269,{kept: no folded pose within reach and clear}
+6,strawberry,folded 0.70,True,,26.1,,,2277,6.3,3.5,0.7,114.3,-19.3,112.4,7.6,215,False,-1.0,5,11,0.048,295,"{spread_cm: [15, 2], reach_m: 0.7}"
+6,strawberry,"down, pads along",True,turn,0.0,0.0,,259,-3.2,1.1,-10.6,34.2,14.6,30.9,-0.9,0,False,-1.0,5,11,0.048,295,"{spread_cm: [15, 1], reach_m: 0.7}"
+6,strawberry,level,True,pose,,0.0,,18,,,,,,,,0,False,-1.0,5,11,0.048,295,"{blocked: turning in place, step 24 of 36: out of reach, spread_cm: [15, 22], reach_m: 0.7}"
+6,strawberry,"level, finger under",True,drive,4.84,4.84,,666,11.0,3.6,3.7,16.9,-4.0,-0.6,16.4,0,True,-1.0,5,11,0.048,295,"{blocked: turning in place, step 17 of 32: own -1 mm, spread_cm: [15, 30], reach_m: 0.7}"
+6,strawberry,"up 30, finger under",False,,,,,0,,,,,,,,,False,-1.0,5,11,0.048,295,{kept: no folded pose within reach and clear}
+7,apple,folded 0.70,True,drive,9.56,9.56,,967,10.9,2.0,23.6,66.0,-26.6,-55.9,22.9,0,False,-0.99,5,4,0.247,326,"{spread_cm: [5, 9], reach_m: 0.7}"
+7,apple,"down, pads along",True,drive,11.62,11.6,,1109,41.9,2.5,14.7,87.4,-35.3,-79.9,3.0,0,False,-0.99,5,4,0.247,326,"{spread_cm: [5, 8], reach_m: 0.7}"
+7,apple,level,True,,26.12,,,2090,-0.7,-0.7,3.5,20.6,1.2,-20.3,3.7,370,False,-0.99,5,4,0.247,326,"{blocked: turning in place, step 25 of 39: scene 9 mm, spread_cm: [5, 20], reach_m: 0.7}"
+7,apple,"level, finger under",True,,26.12,,,2089,3.4,-0.2,3.6,18.1,1.3,-17.1,5.7,358,False,-0.99,5,4,0.247,326,"{spread_cm: [5, 20], reach_m: 0.7}"
+7,apple,"up 30, finger under",False,,,,,0,,,,,,,,,False,-0.99,5,4,0.247,326,{kept: no folded pose within reach and clear}
+8,bleach_cleanser,folded 0.70,True,drive,2.83,2.83,,490,28.2,4.5,1.0,34.3,-6.7,-16.7,29.2,0,False,-1.0,12,53,0.972,626,"{spread_cm: [16, 1], reach_m: 0.7}"
+8,bleach_cleanser,"down, pads along",True,drive,8.45,8.45,,902,35.3,0.3,-0.6,34.9,-11.7,-17.6,27.7,0,False,-1.0,12,53,0.972,626,"{spread_cm: [16, 2], reach_m: 0.7}"
+8,bleach_cleanser,level,True,drive,17.78,17.74,,1418,14.7,14.1,119.3,52.7,-10.3,13.1,-50.0,0,True,-1.0,12,53,0.972,626,"{spread_cm: [16, 12], reach_m: 0.7}"
+8,bleach_cleanser,"level, finger under",True,drive,18.44,18.4,,1522,72.6,-17.7,-27.1,106.6,-67.5,40.8,-71.7,0,False,-1.0,12,53,0.972,626,"{blocked: turning in place, step 55 of 59: out of reach, spread_cm: [16, 27], reach_m: 0.7}"
+8,bleach_cleanser,"up 30, finger under",False,,,,,0,,,,,,,,,False,-1.0,12,53,0.972,626,{kept: no folded pose within reach and clear}
+9,bowl,folded 0.70,True,drive,6.71,6.71,,673,45.7,19.7,6.8,21.5,4.6,-4.4,20.6,0,False,-0.88,47,8,0.033,271,"{spread_cm: [14, 2], reach_m: 0.7}"
+9,bowl,"down, pads along",True,drive,6.61,6.59,,837,0.6,-3.1,4.0,13.0,6.9,-11.0,-0.5,0,False,-0.88,47,8,0.033,271,"{blocked: turning in place, step 9 of 11: out of reach, spread_cm: [14, 8], reach_m: 0.7}"
+9,bowl,level,True,,26.11,,,2042,1.2,0.2,-20.1,11.8,-4.1,11.1,0.5,0,False,-0.88,47,8,0.033,271,"{spread_cm: [14, 18], reach_m: 0.7}"
+9,bowl,"level, finger under",True,,26.11,,,2078,-8.7,0.8,26.9,34.8,4.0,-34.5,1.8,28,False,-0.88,47,8,0.033,271,"{spread_cm: [14, 11], reach_m: 0.7}"
+9,bowl,"up 30, finger under",False,,,,,0,,,,,,,,,False,-0.88,47,8,0.033,271,{kept: no folded pose within reach and clear}
+10,mug,folded 0.70,True,drive,4.04,4.04,,645,1.0,11.3,59.0,91.9,-12.0,-90.0,14.3,0,False,-0.82,35,74,0.138,367,"{spread_cm: [1, 1], reach_m: 0.7}"
+10,mug,"down, pads along",True,,28.79,,,2536,-20.6,-1.0,8.7,5.5,4.0,3.2,2.1,284,False,-0.82,35,74,0.138,367,"{spread_cm: [1, 7], reach_m: 0.7}"
+10,mug,level,False,,,,,0,,,,,,,,,False,-0.82,35,74,0.138,367,{kept: no folded pose within reach and clear}
+10,mug,"level, finger under",False,,,,,0,,,,,,,,,False,-0.82,35,74,0.138,367,{kept: no folded pose within reach and clear}
+10,mug,"up 30, finger under",False,,,,,0,,,,,,,,,False,-0.82,35,74,0.138,367,{kept: no folded pose within reach and clear}
+11,plate,folded 0.70,True,drive,21.08,21.08,,1654,26.7,-53.3,14.8,27.6,-2.8,-12.3,-24.5,0,False,-0.33,108,8,0.058,451,"{spread_cm: [12, 22], reach_m: 0.7}"
+11,plate,"down, pads along",False,,,,,0,,,,,,,,,False,-0.33,108,8,0.058,451,{kept: no folded pose within reach and clear}
+11,plate,level,True,drive,9.49,9.49,,902,-76.1,-50.2,-114.4,46.6,-11.2,41.0,-19.2,0,False,-0.33,108,8,0.058,451,"{spread_cm: [12, 16], reach_m: 0.7}"
+11,plate,"level, finger under",True,drive,12.95,12.95,,1103,-67.2,-53.3,139.6,79.6,14.5,-75.1,-21.8,0,False,-0.33,108,8,0.058,451,"{spread_cm: [12, 20], reach_m: 0.7}"
+11,plate,"up 30, finger under",True,drive,15.37,15.37,,1379,-77.5,-60.8,-123.3,45.7,-16.7,38.5,-18.1,0,False,-0.33,108,8,0.058,451,"{spread_cm: [12, 13], reach_m: 0.7}"
+12,large_marker,folded 0.70,True,drive,5.31,5.31,,635,13.0,0.1,0.7,12.5,1.4,-6.5,-10.6,0,False,-1.0,40,84,0.027,875,"{spread_cm: [1, 1], reach_m: 0.5}"
+12,large_marker,"down, pads along",True,,27.89,,,2230,2.6,0.6,1.5,16.6,1.8,-3.2,-16.1,2,False,-1.0,40,84,0.027,875,"{spread_cm: [1, 1], reach_m: 0.5}"
+12,large_marker,level,False,,,,,0,,,,,,,,,False,-1.0,40,84,0.027,875,{kept: no folded pose within reach and clear}
+12,large_marker,"level, finger under",False,,,,,0,,,,,,,,,False,-1.0,40,84,0.027,875,{kept: no folded pose within reach and clear}
+12,large_marker,"up 30, finger under",False,,,,,0,,,,,,,,,False,-1.0,40,84,0.027,875,{kept: no folded pose within reach and clear}
+13,hammer,folded 0.70,True,roll along,0.0,0.0,,414,12.3,-7.0,-11.6,56.7,-27.5,-32.9,-37.2,0,False,-1.0,6,18,0.259,240,"{spread_cm: [7, 1], reach_m: 0.7}"
+13,hammer,"down, pads along",True,roll along,0.0,0.0,,328,25.0,-31.6,-11.7,118.7,-58.3,-26.4,-100.0,0,False,-1.0,6,18,0.259,240,"{spread_cm: [7, 1], reach_m: 0.7}"
+13,hammer,level,True,drive,10.9,10.9,,1108,-60.6,-31.3,-9.9,86.7,3.1,-3.5,86.6,0,True,-1.0,6,18,0.259,240,"{spread_cm: [7, 17], reach_m: 0.7}"
+13,hammer,"level, finger under",True,,26.12,,,2103,-65.8,-19.9,9.0,104.9,46.7,-42.4,83.8,32,False,-1.0,6,18,0.259,240,"{spread_cm: [7, 2], reach_m: 0.7}"
+13,hammer,"up 30, finger under",False,,,,,0,,,,,,,,,False,-1.0,6,18,0.259,240,{kept: no folded pose within reach and clear}
+14,foam_brick,folded 0.70,True,,26.12,,,2283,10.0,0.7,-6.0,17.9,2.6,17.7,-0.2,7,False,-1.0,16,2,0.185,244,"{spread_cm: [12, 7], reach_m: 0.7}"
+14,foam_brick,"down, pads along",True,,26.12,,,2277,15.1,-0.3,-3.5,8.7,2.1,8.1,2.3,94,False,-1.0,16,2,0.185,244,"{spread_cm: [12, 7], reach_m: 0.7}"
+14,foam_brick,level,True,,26.11,,,2120,9.6,-0.3,-1.5,12.0,-1.6,-11.8,1.5,290,True,-1.0,16,2,0.185,244,"{spread_cm: [12, 11], reach_m: 0.7}"
+14,foam_brick,"level, finger under",True,drive,5.0,4.99,,678,40.2,-65.9,-16.8,91.0,9.7,90.1,-8.7,0,True,-1.0,16,2,0.185,244,"{spread_cm: [12, 20], reach_m: 0.7}"
+14,foam_brick,"up 30, finger under",False,,,,,0,,,,,,,,,False,-1.0,16,2,0.185,244,{kept: no folded pose within reach and clear}

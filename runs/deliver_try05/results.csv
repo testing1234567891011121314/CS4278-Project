@@ -1,0 +1,4 @@
+object,name,rest_z,lift_tick,max_lift_cm,hold_50,held_at_end,backed_off_m,state,attempts,failure,grasp_error_mm,errors,ticks,wall_s,delivered_tick,goal_cm,navigate_tick
+12,large_marker,0.011,811,24.4,True,False,10.37,stopped,8,object moved before the close; object moved during the drive; object moved during the drive; no grasp plan; object lost during the carry; no grasp plan; no grasp plan; no parking pose,,0,2645,104.0,,637.1,875
+7,apple,0.662,249,15.7,True,False,6.1,stopped,8,object lost during the carry; object moved during the drive; no grasp plan; no grasp plan; no grasp plan; no grasp plan; no grasp plan; no grasp plan,,0,1470,203.1,,1652.7,326
+6,strawberry,0.646,223,25.5,True,True,17.81,stopped,2,object lost during the carry; goal out of reach,7.5,0,2965,111.4,,55.0,295

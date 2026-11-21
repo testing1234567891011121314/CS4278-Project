@@ -1,0 +1,16 @@
+object,name,rest_z,lift_tick,max_lift_cm,hold_50,held_at_end,backed_off_m,state,attempts,failure,grasp_error_mm,errors,ticks,wall_s,delivered_tick,goal_cm,navigate_tick
+0,master_chef_can,0.696,207,20.6,True,True,17.68,done,2,no parking pose,21.0,0,2495,55.4,2456,0.3,373
+1,sugar_box,0.65,212,54.8,True,False,5.17,stopped,4,object lost during the carry; object lost during the carry; object lost during the carry; object lost during the carry,17.5,0,2811,79.9,,1405.2,270
+2,tomato_soup_can,0.677,225,22.3,True,True,17.68,done,2,no parking pose,1.0,0,2674,43.9,2644,0.1,322
+3,mustard_bottle,0.66,335,25.5,True,True,17.93,done,2,object moved during the drive,0.7,0,2699,45.4,2664,0.5,397
+4,potted_meat_can,0.668,170,23.2,True,True,17.68,done,1,,2.1,0,2616,54.7,2587,1.5,265
+5,banana,0.645,192,15.4,True,True,17.71,stopped,1,no clear route to the goal,3.2,0,2703,56.1,,10.2,281
+6,strawberry,0.646,223,25.6,True,True,13.01,navigate,3,object lost during the carry; object lost during the carry,2.1,0,3000,77.4,,577.2,302
+7,apple,0.662,249,15.7,True,True,17.78,navigate,3,object lost during the carry; object moved during the drive; goal out of reach,1.9,0,3000,91.2,,48.8,338
+8,bleach_cleanser,0.652,514,24.9,True,False,1.78,stopped,8,object moved during the drive; no grasp plan; object lost during the carry; object moved during the drive; no grasp plan; object lost during the carry; object moved during the drive; no grasp plan,,0,2584,186.3,,1661.3,673
+9,bowl,0.654,193,15.7,True,False,9.15,stopped,8,object lost during the carry; no grasp candidates; no grasp candidates; no grasp candidates; no grasp candidates; no grasp candidates; no grasp candidates; no grasp candidates,,0,1983,63.1,,889.8,287
+10,mug,0.045,302,53.3,True,True,18.4,navigate,3,object moved during the drive; object lost during the carry,5.0,0,3000,79.6,,62.2,367
+11,plate,0.641,387,16.6,True,False,5.78,stopped,8,dragged to the edge; object lost during the carry; no parking pose; object lost during the carry; no grasp plan; no parking pose; no parking pose; no parking pose,,0,1621,171.0,,1588.2,451
+12,large_marker,0.011,811,24.4,True,True,15.8,stopped,5,object moved before the close; object moved during the drive; object moved during the drive; no grasp plan; goal out of reach,4.7,0,2946,62.6,,65.7,875
+13,hammer,0.644,159,25.3,True,False,5.64,stopped,4,object lost during the carry; object lost during the carry; object lost during the carry; object lost while taking the travel pose,43.3,0,2831,72.2,,1225.8,262
+14,foam_brick,0.652,173,24.8,True,True,17.68,done,1,,1.4,0,2682,41.1,2652,1.6,255

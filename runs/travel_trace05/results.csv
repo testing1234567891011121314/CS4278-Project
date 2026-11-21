@@ -1,0 +1,7 @@
+object,name,pose,reached,lost_in,driven_m,pads_lost_m,touched,ticks,slip_fingers_mm,slip_pads_mm,slip_across_mm,turn_deg,turn_fingers_deg,turn_pads_deg,turn_across_deg,least_force_N,arm_touched_wall,hand_z,lever_mm,lever_deg,mass_kg,pick_tick,note
+8,bleach_cleanser,folded 0.70,True,drive,2.83,2.83,,490,28.2,4.5,1.0,34.3,-6.7,-16.7,29.2,0,False,-1.0,12,53,0.972,626,"{spread_cm: [16, 1], reach_m: 0.7}"
+8,bleach_cleanser,level,True,drive,17.78,17.74,,1418,14.7,14.1,119.3,52.7,-10.3,13.1,-50.0,0,True,-1.0,12,53,0.972,626,"{spread_cm: [16, 12], reach_m: 0.7}"
+8,bleach_cleanser,"level, finger under",True,drive,18.44,18.4,,1522,72.6,-17.7,-27.1,106.6,-67.5,40.8,-71.7,0,False,-1.0,12,53,0.972,626,"{blocked: turning in place, step 55 of 59: out of reach, spread_cm: [16, 27], reach_m: 0.7}"
+11,plate,folded 0.70,True,drive,21.08,21.08,,1654,26.7,-53.3,14.8,27.6,-2.8,-12.3,-24.5,0,False,-0.33,108,8,0.058,451,"{spread_cm: [12, 22], reach_m: 0.7}"
+11,plate,level,True,drive,9.49,9.49,,902,-76.1,-50.2,-114.4,46.6,-11.2,41.0,-19.2,0,False,-0.33,108,8,0.058,451,"{spread_cm: [12, 16], reach_m: 0.7}"
+11,plate,"level, finger under",True,drive,12.95,12.95,,1103,-67.2,-53.3,139.6,79.6,14.5,-75.1,-21.8,0,False,-0.33,108,8,0.058,451,"{spread_cm: [12, 20], reach_m: 0.7}"

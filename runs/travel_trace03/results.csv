@@ -1,0 +1,2 @@
+object,name,pose,reached,lost_in,driven_m,pads_lost_m,touched,ticks,slip_fingers_mm,slip_pads_mm,slip_across_mm,turn_deg,turn_fingers_deg,turn_pads_deg,turn_across_deg,least_force_N,arm_touched_wall,hand_z,lever_mm,lever_deg,mass_kg,pick_tick,note
+8,bleach_cleanser,"down, pads along",True,,0.4,,,433,-1.2,0.8,-5.5,4.2,1.9,3.2,1.8,0,False,-1.0,12,51,0.972,577,"{spread_cm: [16, 2], reach_m: 0.7} carry: base fell behind its route"

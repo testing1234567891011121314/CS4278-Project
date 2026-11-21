@@ -1,0 +1,16 @@
+object,name,rest_z,lift_tick,max_lift_cm,hold_50,held_at_end,backed_off_m,state,attempts,failure,grasp_error_mm,errors,ticks,wall_s,delivered_tick,goal_cm,navigate_tick
+0,master_chef_can,0.696,200,20.4,True,False,1.31,stopped,8,no parking pose; object lost during the carry; object moved during the drive; no grasp plan; no grasp plan; no grasp plan; no grasp plan; no grasp plan,,0,1541,310.7,,1867.0,316
+1,sugar_box,0.65,195,25.4,True,True,18.04,done,3,object lost during the carry; object lost while taking the travel pose,2.9,0,2665,129.2,2637,3.6,251
+2,tomato_soup_can,0.677,194,22.4,True,True,17.78,done,2,no parking pose,1.5,0,2643,70.9,2613,0.9,276
+3,mustard_bottle,0.66,336,24.1,True,True,18.02,done,2,object moved during the drive,2.1,0,2632,52.2,2601,4.7,398
+4,potted_meat_can,0.668,163,23.3,True,True,17.78,done,1,,1.6,0,2459,45.7,2430,0.5,242
+5,banana,0.645,160,25.7,True,True,17.78,done,1,,3.6,0,2644,45.8,2615,2.2,233
+6,strawberry,0.646,227,25.7,True,True,17.81,done,1,,5.2,0,2468,41.8,2438,0.3,305
+7,apple,0.662,239,24.0,True,True,17.78,done,2,object lost during the carry,4.6,0,2739,100.4,2709,0.5,311
+8,bleach_cleanser,0.652,511,27.3,True,True,8.31,navigate,7,object moved during the drive; no grasp plan; object lost during the carry; no grasp plan; object lost during the carry; object moved during the drive,4.4,0,3000,198.0,,864.1,624
+9,bowl,0.654,195,24.9,True,True,17.78,done,1,,1.4,0,2628,59.8,2598,1.7,277
+10,mug,0.045,287,85.8,True,True,18.89,done,2,object moved during the drive,3.2,0,2640,181.2,2593,4.8,388
+11,plate,0.641,392,15.4,True,True,0.6,stopped,2,dragged to the edge; no clear route to the goal,7.1,0,639,202.1,,1873.6,614
+12,large_marker,0.011,691,88.9,True,True,16.06,done,4,object moved before the close; object moved during the drive; no grasp plan,9.8,0,2423,59.3,2393,0.7,755
+13,hammer,0.644,160,27.0,True,True,17.78,done,1,,18.5,0,2503,49.8,2475,3.5,242
+14,foam_brick,0.652,182,24.9,True,True,17.78,done,1,,0.4,0,2460,40.4,2430,0.9,260

@@ -1,0 +1,14 @@
+object,name,pose,reached,lost_in,driven_m,ticks,slip_fingers_mm,slip_pads_mm,slip_across_mm,turn_deg,turn_fingers_deg,turn_pads_deg,turn_across_deg,least_force_N,arm_touched_wall,hand_z,lever_mm,lever_deg,mass_kg,pick_tick,note
+0,master_chef_can,as lifted,True,turn,0.0,18,17.3,0.2,-6.4,2.7,-1.0,1.7,-1.9,0,False,-0.0,14,2,1.054,473,
+0,master_chef_can,folded 0.70,True,,2.55,677,1.5,-0.1,1.5,4.2,-0.6,4.1,-0.8,39,False,-0.0,14,2,1.054,473,"{spread_cm: [32, 11], reach_m: 0.7}"
+0,master_chef_can,folded 0.40,False,,,0,,,,,,,,,False,-0.0,14,2,1.054,473,{kept: no folded pose within reach and clear}
+0,master_chef_can,pads forward 0.70,True,turn,0.0,178,13.2,-0.3,-2.6,3.5,-0.6,-3.4,-0.5,0,False,-0.0,14,2,1.054,473,"{spread_cm: [32, 33], reach_m: 0.7}"
+0,master_chef_can,pads forward 0.40,True,turn,0.0,184,17.9,-0.4,-3.6,8.2,-0.8,-7.9,-2.0,0,False,-0.0,14,2,1.054,473,"{spread_cm: [32, 34], reach_m: 0.4}"
+0,master_chef_can,pads sideways 0.40,False,,,0,,,,,,,,,False,-0.0,14,2,1.054,473,{kept: no folded pose within reach and clear}
+0,master_chef_can,"down, pads along",True,,2.54,653,-3.9,-0.5,-7.0,8.5,-0.7,8.5,-0.7,387,False,-0.0,14,2,1.054,473,"{spread_cm: [32, 4], reach_m: 0.7}"
+0,master_chef_can,"down, pads across",True,turn,0.0,123,2.0,-0.1,13.9,3.7,3.2,-1.6,-0.9,0,False,-0.0,14,2,1.054,473,"{spread_cm: [32, 4], reach_m: 0.7}"
+0,master_chef_can,level,True,drive,0.18,336,7.9,-0.3,-6.0,10.3,-0.2,10.3,0.4,0,False,-0.0,14,2,1.054,473,"{spread_cm: [32, 11], reach_m: 0.7}"
+0,master_chef_can,up 45,True,drive,0.04,322,6.2,-0.3,-3.8,8.3,-1.3,8.2,-0.7,0,False,-0.0,14,2,1.054,473,"{blocked: turning in place, step 19 of 30: out of reach, spread_cm: [32, 20], reach_m: 0.7}"
+0,master_chef_can,"level, finger under",False,,,0,,,,,,,,,False,-0.0,14,2,1.054,473,"{blocked: turning in place, step 1 of 39: out of reach, kept: the way into every folded pose is blocked}"
+0,master_chef_can,"level, finger under, 0.40",False,,,0,,,,,,,,,False,-0.0,14,2,1.054,473,{kept: no folded pose within reach and clear}
+0,master_chef_can,"up 30, finger under",True,turn,0.0,204,3.0,-0.1,-19.8,17.5,1.9,17.3,2.0,0,False,-0.0,14,2,1.054,473,"{blocked: turning while folding, step 36 of 61: out of reach, spread_cm: [32, 23], reach_m: 0.7}"

@@ -1,0 +1,16 @@
+object,name,rest_z,lift_tick,max_lift_cm,hold_50,held_at_end,backed_off_m,state,attempts,failure,grasp_error_mm,errors,ticks,wall_s,delivered_tick,goal_cm,navigate_tick
+0,master_chef_can,0.696,207,20.4,True,False,0.56,stopped,8,no parking pose; object lost during the carry; no grasp plan; no grasp plan; no grasp plan; no grasp plan; no grasp plan; no grasp plan,,0,1443,365.3,,1892.5,323
+1,sugar_box,0.65,212,26.0,True,True,17.85,done,1,,13.7,0,2492,43.3,2465,3.6,270
+2,tomato_soup_can,0.677,225,22.3,True,True,0.15,stopped,2,no parking pose; no clear route to the goal,1.0,0,482,38.2,,1782.4,306
+3,mustard_bottle,0.66,335,24.0,True,True,0.0,stopped,2,object moved during the drive; no clear route to the goal,0.7,0,558,33.0,,1794.2,397
+4,potted_meat_can,0.668,170,23.4,True,True,17.68,done,1,,2.1,0,2481,35.3,2451,2.0,247
+5,banana,0.645,192,25.5,True,True,17.68,done,1,,3.2,0,2499,33.6,2469,1.4,269
+6,strawberry,0.646,223,25.3,True,True,0.15,stopped,1,no clear route to the goal,8.2,0,440,30.1,,1786.1,295
+7,apple,0.662,249,23.8,True,True,0.15,stopped,1,no clear route to the goal,1.1,0,593,46.3,,1782.3,326
+8,bleach_cleanser,0.652,514,24.9,True,True,0.15,stopped,3,object moved during the drive; no grasp plan; no clear route to the goal,3.3,0,746,63.6,,1727.1,626
+9,bowl,0.654,193,24.6,True,True,17.68,done,1,,1.9,0,2501,41.1,2471,0.8,271
+10,mug,0.045,302,84.9,True,False,12.34,stopped,4,object moved during the drive; object lost during the carry; object lost while taking the travel pose; object lost while taking the travel pose,10.8,0,2984,97.3,,741.4,367
+11,plate,0.641,387,16.3,True,False,6.01,stopped,8,dragged to the edge; object lost during the carry; hold not verified after the close; hold not verified after the close; hold not verified after the close; hold not verified after the close; no grasp plan; hold not verified after the close,,0,2163,140.8,,1225.6,451
+12,large_marker,0.011,811,23.8,True,False,11.42,stopped,7,object moved before the close; object moved during the drive; object moved during the drive; no grasp plan; object lost during the carry; object moved during the drive; no grasp plan,,0,2769,72.2,,490.8,875
+13,hammer,0.644,159,27.8,True,True,17.7,done,1,,22.1,0,2502,28.4,2472,4.7,240
+14,foam_brick,0.652,173,24.9,True,True,0.15,stopped,1,no clear route to the goal,1.4,0,397,27.4,,1782.3,244

@@ -1,0 +1,2 @@
+object,name,rest_z,lift_tick,max_lift_cm,hold_50,held_at_end,backed_off_m,state,attempts,failure,grasp_error_mm,errors,ticks,wall_s,delivered_tick,goal_cm,navigate_tick
+14,foam_brick,0.652,173,24.8,True,True,17.68,done,1,,1.4,0,2682,51.9,2652,1.6,255
