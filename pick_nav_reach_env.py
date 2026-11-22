@@ -1,4 +1,4 @@
-import time
+from time import time
 import pybullet as p
 import pybullet_data
 import numpy as np
@@ -7,54 +7,18 @@ import trimesh
 from pathlib import Path
 from maze_utils import generate_maze_map, add_left_room_to_maze, create_maze_urdf
 from copy import deepcopy
-# from keyboard_control import KeyBoardController
 from solver import Solver
 from utils import closest_joint_values
-
-from custom_libraries import recording
-record_navigation = recording.record_navigation
-import pkgutil
 
 class PickNavReachEnv:
 
     def __init__(self, 
                  seed=0,
                  object_idx=5,
-                 *,
-                 maze_urdf_path="./assets/maze.urdf",
-                 gui=True
                  ):
-        # Give each parallel trial its own path; preserve the single-run default.
-        self.maze_urdf_path = Path(maze_urdf_path).expanduser().resolve()
         self.set_seed(seed)
 
-        self.gui = gui
-        connection_mode = p.GUI if gui else p.DIRECT
-        self.pb_physics_client = p.connect(connection_mode)
-
-        if self.pb_physics_client < 0:
-            raise RuntimeError("Could not connect to PyBullet.")        
-        
-        self.renderer_plugin_id = None
-
-        if not gui:
-            egl = pkgutil.get_loader("eglRenderer")
-            if egl:
-                plugin_id = p.loadPlugin(
-                    egl.get_filename(),
-                    "_eglRendererPlugin",
-                    physicsClientId=self.pb_physics_client
-                )
-            else:
-                plugin_id = p.loadPlugin("eglRendererPlugin",physicsClientId=self.pb_physics_client)
-
-            if plugin_id < 0:
-                p.disconnect(physicsClientId=self.pb_physics_client)
-                raise RuntimeError("eglRenderer plugin failed to load.")
-
-            self.renderer_plugin_id = plugin_id
-            print(f"Renderer plugin loaded: {plugin_id}")
-        
+        self.pb_physics_client = p.connect(p.GUI)
         p.setAdditionalSearchPath(pybullet_data.getDataPath()) 
         p.setGravity(0,0,-9.8)
 
@@ -210,21 +174,15 @@ class PickNavReachEnv:
 
         self.cube_positions = create_maze_urdf(
             maze, 
-            urdf_path=str(self.maze_urdf_path),
+            urdf_path="./assets/maze.urdf",
             grid_xy=grid_xy, grid_z=grid_z,
             maze_center_x=(n_cols-room_width)/2*grid_xy + maze_offset, 
             maze_center_y=0.0, 
             maze_center_z=0.0,
-            # box_color=(0.95, 0.95, 0.98, 1.0),
-            box_color=(0.75, 0.78, 0.85, 1.0)  # still cool-toned but enough value separation to shade
+            box_color=(0.95, 0.95, 0.98, 1.0),
         )
 
-        p.loadURDF(
-            str(self.maze_urdf_path),
-            useFixedBase=1,
-            flags=p.URDF_MERGE_FIXED_LINKS,
-            physicsClientId=self.pb_physics_client,
-        )
+        p.loadURDF("./assets/maze.urdf", useFixedBase=1, flags=p.URDF_MERGE_FIXED_LINKS)
         
     def visualize_pc_and_normals(self, object_pc, object_normals, visualize_normals=False):
         # remove old debug items
@@ -317,11 +275,9 @@ class PickNavReachEnv:
             # velocityGains=velocity_gains,
         )
 
-        # Edit loop to skip real time waiting for headless collection
         for _ in range(self.substeps):
-            p.stepSimulation(physicsClientId=self.pb_physics_client)
-            if self.gui:
-                time.sleep(1.0 / 240.0)
+            p.stepSimulation()
+            time.sleep(1./240.)
 
         obs = self._get_obs()
 
@@ -414,87 +370,22 @@ class PickNavReachEnv:
         return qpos.copy()
 
 
-# if __name__ == "__main__":
-#     env = PickNavReachEnv(seed=42)
-#     env.reset()
-#     print(f"Action size: {env.action_size}, Obs size: {env.obs_size}")
-
-#     # Set camera angle
-#     p.resetDebugVisualizerCamera(
-#         cameraDistance=8.0,              # Distance from the target, in metres
-#         cameraYaw=45,                    # Horizontal viewing angle, in degrees
-#         cameraPitch=-60,                 # Downward viewing angle, in degrees
-#         cameraTargetPosition=[0, 0, 0],   # World position to look at
-#         physicsClientId=env.pb_physics_client,
-#     )
-#     steps_taken = 0 # Track the number of steps taken in the simulation
-
-#     solver = Solver(env)
-#     # keyboard_controller = KeyBoardController(env)
-    
-#     import time
-#     for i in range (1000):
-#     # while True:
-#         # random_action = np.random.uniform(-1.0, 1.0, size=(env.action_size,))
-#         action = solver.get_action(env)
-#         obs, info = env.step(action)
-#         for k, v in info.items():
-#             print(f"{k}: {v}")
-#         # p.stepSimulation()
-#         # time.sleep(1./240.)
-
-
-#         ## below are additional metrics for debugging ##
-#         steps_taken += 1
-
-#         # Follow the measured base position in world coordinates.
-#         base_x = float(obs["qpos"][0]) - 2.0
-#         base_y = float(obs["qpos"][1])
-
-#         p.resetDebugVisualizerCamera(
-#             cameraDistance=4.0,
-#             cameraYaw=45,
-#             cameraPitch=-60,
-#             cameraTargetPosition=[base_x, base_y, 0.5],
-#             physicsClientId=env.pb_physics_client,
-#         )
-
-## Recording navigation video, using MX130 GPU. The video will be saved in the current working directory.
-# if __name__ == "__main__":
-#     env = PickNavReachEnv(seed=42)
-#     env.reset()
-#     solver = Solver(env)
-
-#     import time
-#     record_navigation(
-#         env,
-#         solver,
-#         encoder_args=[
-#             "-c:v", "libx264",
-#             "-preset", "ultrafast",
-#             "-crf", "20",
-#         ],
-#         label="mx130",
-#         max_steps=1000,
-#     )
-
-
-## Recording navigation video, using P4000 GPU. The video will be saved in the current working directory.
 if __name__ == "__main__":
     env = PickNavReachEnv(seed=42)
     env.reset()
+    print(f"Action size: {env.action_size}, Obs size: {env.obs_size}")
+    
     solver = Solver(env)
-
+    
+    # for i in range (10000):
     import time
-    record_navigation(
-        env,
-        solver,
-        encoder_args=[
-            "-c:v", "h264_nvenc",
-            "-preset", "p1",
-            "-rc", "constqp",
-            "-qp", "23",
-        ],
-        label="p4000",
-        max_steps=250,
-    )
+    while True:
+        # random_action = np.random.uniform(-1.0, 1.0, size=(env.action_size,))
+        action = solver.get_action()
+        obs, info = env.step(action)
+        for k, v in info.items():
+            print(f"{k}: {v}")
+        # p.stepSimulation()
+        # time.sleep(1./240.)
+
+

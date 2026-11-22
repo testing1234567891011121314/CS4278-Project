@@ -1,3 +1,11 @@
+"""Video recording of a trial, for run_batch.py and trial_worker.py.
+
+`record_navigation` steps the env with the solver's actions, renders each
+step, pipes the frames to FFmpeg and writes one JSON line per step (action,
+joint state, object pose, the solver's state, robot contacts, timings).
+"""
+
+
 import json
 import shutil
 import subprocess
@@ -142,7 +150,7 @@ def record_navigation(
                     loop_start = time.perf_counter()
 
                     t0 = time.perf_counter()
-                    action = solver.get_action(env)
+                    action = solver.get_action()
                     action_seconds = time.perf_counter() - t0
 
                     t0 = time.perf_counter()
@@ -181,20 +189,10 @@ def record_navigation(
 
                     contact_seconds = time.perf_counter() - t0
 
-                    waypoint_index = getattr(
-                        solver, "waypoint_index", None
-                    )
-                    path = getattr(solver, "path", None)
-                    waypoint_xy = None
-
-                    if (
-                        path is not None
-                        and waypoint_index is not None
-                        and 0 <= waypoint_index < len(path)
-                    ):
-                        waypoint_xy = solver.convert_to_world(
-                            path[waypoint_index]
-                        )
+                    # What the solver is doing, for reading the log alongside the video.
+                    state = getattr(solver, "state", None)
+                    state = getattr(state, "value", state)
+                    attempt = getattr(getattr(solver, "attempt", None), "index", None)
 
                     t0 = time.perf_counter()
 
@@ -277,11 +275,8 @@ def record_navigation(
                         "object_pos": obs["object_pos"],
                         "object_xyzw": obs["object_xyzw"],
                         "goal_pos": obs["goal_pos"],
-                        "waypoint_index": waypoint_index,
-                        "waypoint_xy": waypoint_xy,
-                        "path_length": (
-                            len(path) if path is not None else None
-                        ),
+                        "state": state,
+                        "attempt": attempt,
                         "contacts": contacts,
                         "info": info,
                         "action_seconds": action_seconds,

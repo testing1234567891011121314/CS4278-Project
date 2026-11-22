@@ -1,4 +1,14 @@
-"""One fixed maze per batch, one trial per object (optionally repeated)."""
+"""One fixed maze per batch, one recorded trial per object (optionally repeated).
+
+    python run_batch.py [--objects 0 1 ...] [--maze-seed 42] [--seed 42] [--cloud-seed 300]
+                        [--repeats 1] [--workers 4] [--max-steps 3000]
+                        [--encoder h264_nvenc|libx264] [--gpu 0 | --gpus 0 1]
+
+Each trial writes a video, a per-step log, worker.log and result.json under
+runs/<batch>/<trial>/; summary.jsonl has one line per trial. A trial needs
+about 1.3 GB (the env plus the solver's planning simulator), so keep
+--workers within the machine's memory. FFmpeg must be on PATH.
+"""
 import argparse
 import hashlib
 import json
@@ -8,7 +18,7 @@ from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 
-from trial_worker import run_trial
+from trial_worker import ENCODERS, run_trial
 
 
 def prepare_maze(batch_dir, seed):
@@ -52,20 +62,32 @@ def prepare_maze(batch_dir, seed):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--workers', type=int, default=4)
-    parser.add_argument('--max-steps', type=int, default=1000)
+    parser.add_argument('--max-steps', type=int, default=3000,
+                        help='env.step calls per trial; a delivery takes most of the 3,000-tick budget')
     parser.add_argument('--maze-seed', type=int, default=42)
     parser.add_argument('--seed', type=int, default=42,
                         help='Environment seed; shared by all objects in a repeat')
+    parser.add_argument('--cloud-seed', type=int, default=None,
+                        help='Seed of the object point-cloud sample (plus the repeat number); '
+                             'default: unseeded, as in the graded runs')
+    parser.add_argument('--encoder', choices=sorted(ENCODERS), default='h264_nvenc',
+                        help='libx264 encodes on the CPU, for a machine without an NVIDIA GPU')
     parser.add_argument('--repeats', type=int, default=1)
-    parser.add_argument('--gpu', type=int, default=0, help='NVENC GPU only')
+    parser.add_argument('--gpu', type=int, default=0, help='NVENC GPU only (single-GPU runs)')
+    parser.add_argument('--gpus', type=int, nargs='+', default=None,
+                        help='NVENC GPU indices to round-robin trials across '
+                             '(overrides --gpu, e.g. --gpus 0 1)')
     parser.add_argument('--objects', type=int, nargs='+', default=list(range(15)))
     args = parser.parse_args()
     if min(args.workers, args.max_steps, args.repeats) < 1:
         parser.error('workers, max-steps and repeats must be positive')
-    if args.maze_seed < 0 or args.seed < 0:
+    if args.maze_seed < 0 or args.seed < 0 or (args.cloud_seed is not None and args.cloud_seed < 0):
         parser.error('seeds must be nonnegative')
     if len(set(args.objects)) != len(args.objects):
         parser.error('object indices must be unique')
+    gpu_pool = args.gpus if args.gpus else [args.gpu]
+    if any(g < 0 for g in gpu_pool):
+        parser.error('GPU indices must be nonnegative')
 
     project = Path(__file__).resolve().parent
     # Match the existing environment's sorted glob exactly.
@@ -82,20 +104,29 @@ def main():
     maze_spec = prepare_maze(batch, args.maze_seed)
     config = vars(args).copy()
     config['trials'] = len(args.objects) * args.repeats
+    config['gpu_pool'] = gpu_pool
     config['objects_resolved'] = [{'index': i, 'name': assets[i].name} for i in args.objects]
     (batch / 'config.json').write_text(json.dumps(config, indent=2), encoding='utf-8')
     print(f'Results: {batch}', flush=True)
-    failures = 0
+    failures = delivered = 0
     with (batch / 'summary.jsonl').open('w', encoding='utf-8', buffering=1) as summary:
         with ProcessPoolExecutor(max_workers=min(args.workers, config['trials']),
                                  mp_context=mp.get_context('spawn')) as pool:
             futures = {}
+            trial_counter = 0
             for repeat in range(args.repeats):
                 for idx in args.objects:
                     name = f'object_{idx:02d}_{assets[idx].name}_repeat_{repeat:03d}'
+                    # Round-robin across the GPU pool so trials spread evenly
+                    # across all available encode/render GPUs rather than
+                    # all contending for a single one.
+                    gpu = gpu_pool[trial_counter % len(gpu_pool)]
+                    trial_counter += 1
+                    cloud_seed = None if args.cloud_seed is None else args.cloud_seed + repeat
                     future = pool.submit(run_trial, str(project), str(batch/name),
-                                         args.seed + repeat, args.max_steps, args.gpu,
-                                         idx, assets[idx].name, repeat, str(maze_spec))
+                                         args.seed + repeat, args.max_steps, gpu,
+                                         idx, assets[idx].name, repeat, str(maze_spec),
+                                         cloud_seed, args.encoder)
                     futures[future] = name
             for future in as_completed(futures):
                 try:
@@ -103,8 +134,15 @@ def main():
                 except Exception as exc:
                     result = {'trial': futures[future], 'status': 'worker_error', 'error': repr(exc)}
                 failures += result['status'] != 'recording_completed'
+                delivered += bool(result.get('task_success'))
                 summary.write(json.dumps(result) + '\n')
-                print(f"{result['trial']}: {result['status']}", flush=True)
+                if result['status'] == 'recording_completed':
+                    outcome = (f"delivered at tick {result.get('ticks')}" if result.get('task_success') else
+                               f"not delivered, ended in {result.get('navigation_status')} at tick {result.get('ticks')}")
+                else:
+                    outcome = str(result.get('error', ''))[:200]
+                print(f"{result['trial']}: {result['status']}: {outcome}", flush=True)
+    print(f"delivered {delivered}/{config['trials']}; trials that did not complete: {failures}", flush=True)
     return 1 if failures else 0
 
 
