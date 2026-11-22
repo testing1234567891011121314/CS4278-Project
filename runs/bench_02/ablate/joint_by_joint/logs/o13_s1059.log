@@ -1,0 +1,214 @@
+pybullet build time: Jan 29 2025 23:16:28
+EGL device choice: -1 of 1.
+Loaded EGL 1.5 after reload.
+GL_VENDOR=Microsoft Corporation
+GL_RENDERER=D3D12 (NVIDIA Quadro P4000)
+GL_VERSION=4.2 (Core Profile) Mesa 23.2.1-1ubuntu3.1~22.04.4
+GL_SHADING_LANGUAGE_VERSION=4.20
+Version = 4.2 (Core Profile) Mesa 23.2.1-1ubuntu3.1~22.04.4
+Vendor = Microsoft Corporation
+Renderer = D3D12 (NVIDIA Quadro P4000)
+b3Warning[examples/Importers/ImportURDFDemo/BulletUrdfImporter.cpp,126]:
+No inertial data for link, using mass=1, localinertiadiagonal = 1,1,1, identity local inertial frameb3Warning[examples/Importers/ImportURDFDemo/BulletUrdfImporter.cpp,126]:
+head_camera_linkb3Warning[examples/Importers/ImportURDFDemo/BulletUrdfImporter.cpp,126]:
+No inertial data for link, using mass=1, localinertiadiagonal = 1,1,1, identity local inertial frameb3Warning[examples/Importers/ImportURDFDemo/BulletUrdfImporter.cpp,126]:
+head_camera_rgb_frameb3Warning[examples/Importers/ImportURDFDemo/BulletUrdfImporter.cpp,126]:
+No inertial data for link, using mass=1, localinertiadiagonal = 1,1,1, identity local inertial frameb3Warning[examples/Importers/ImportURDFDemo/BulletUrdfImporter.cpp,126]:
+head_camera_rgb_optical_frameb3Warning[examples/Importers/ImportURDFDemo/BulletUrdfImporter.cpp,126]:
+No inertial data for link, using mass=1, localinertiadiagonal = 1,1,1, identity local inertial frameb3Warning[examples/Importers/ImportURDFDemo/BulletUrdfImporter.cpp,126]:
+head_camera_depth_frameb3Warning[examples/Importers/ImportURDFDemo/BulletUrdfImporter.cpp,126]:
+No inertial data for link, using mass=1, localinertiadiagonal = 1,1,1, identity local inertial frameb3Warning[examples/Importers/ImportURDFDemo/BulletUrdfImporter.cpp,126]:
+head_camera_depth_optical_frameb3Warning[examples/Importers/ImportURDFDemo/BulletUrdfImporter.cpp,126]:
+No inertial data for link, using mass=1, localinertiadiagonal = 1,1,1, identity local inertial frameb3Warning[examples/Importers/ImportURDFDemo/BulletUrdfImporter.cpp,126]:
+maze_baseprocessing maze_base
+	merge block_0_0 into maze_base!
+	merge block_11_21 into maze_base!
+	merge block_11_20 into maze_base!
+	merge block_11_19 into maze_base!
+	merge block_11_18 into maze_base!
+	merge block_11_17 into maze_base!
+	merge block_11_16 into maze_base!
+	merge block_11_15 into maze_base!
+	merge block_11_14 into maze_base!
+	merge block_11_13 into maze_base!
+	merge block_11_12 into maze_base!
+	merge block_11_11 into maze_base!
+	merge block_11_10 into maze_base!
+	merge block_11_9 into maze_base!
+	merge block_11_8 into maze_base!
+	merge block_11_7 into maze_base!
+	merge block_11_6 into maze_base!
+	merge block_11_5 into maze_base!
+	merge block_11_4 into maze_base!
+	merge block_11_3 into maze_base!
+	merge block_11_2 into maze_base!
+	merge block_11_1 into maze_base!
+	merge block_11_0 into maze_base!
+	merge block_10_21 into maze_base!
+	merge block_10_20 into maze_base!
+	merge block_10_19 into maze_base!
+	merge block_10_18 into maze_base!
+	merge block_10_17 into maze_base!
+	merge block_10_16 into maze_base!
+	merge block_10_14 into maze_base!
+	merge block_10_12 into maze_base!
+	merge block_10_11 into maze_base!
+	merge block_10_10 into maze_base!
+	merge block_10_9 into maze_base!
+	merge block_10_8 into maze_base!
+	merge block_10_7 into maze_base!
+	merge block_10_6 into maze_base!
+	merge block_10_0 into maze_base!
+	merge block_9_21 into maze_base!
+	merge block_9_20 into maze_base!
+	merge block_9_19 into maze_base!
+	merge block_9_18 into maze_base!
+	merge block_9_17 into maze_base!
+	merge block_9_16 into maze_base!
+	merge block_9_15 into maze_base!
+	merge block_9_14 into maze_base!
+	merge block_9_13 into maze_base!
+	merge block_9_12 into maze_base!
+	merge block_9_10 into maze_base!
+	merge block_9_9 into maze_base!
+	merge block_9_7 into maze_base!
+	merge block_9_6 into maze_base!
+	merge block_9_0 into maze_base!
+	merge block_8_21 into maze_base!
+	merge block_8_20 into maze_base!
+	merge block_8_19 into maze_base!
+	merge block_8_18 into maze_base!
+	merge block_8_17 into maze_base!
+	merge block_8_15 into maze_base!
+	merge block_8_14 into maze_base!
+	merge block_8_13 into maze_base!
+	merge block_8_12 into maze_base!
+	merge block_8_11 into maze_base!
+	merge block_8_10 into maze_base!
+	merge block_8_9 into maze_base!
+	merge block_8_8 into maze_base!
+	merge block_8_6 into maze_base!
+	merge block_8_0 into maze_base!
+	merge block_7_21 into maze_base!
+	merge block_7_20 into maze_base!
+	merge block_7_19 into maze_base!
+	merge block_7_18 into maze_base!
+	merge block_7_16 into maze_base!
+	merge block_7_15 into maze_base!
+	merge block_7_14 into maze_base!
+	merge block_7_13 into maze_base!
+	merge block_7_12 into maze_base!
+	merge block_7_11 into maze_base!
+	merge block_7_10 into maze_base!
+	merge block_7_8 into maze_base!
+	merge block_7_0 into maze_base!
+	merge block_6_21 into maze_base!
+	merge block_6_17 into maze_base!
+	merge block_6_15 into maze_base!
+	merge block_6_14 into maze_base!
+	merge block_6_13 into maze_base!
+	merge block_6_12 into maze_base!
+	merge block_6_10 into maze_base!
+	merge block_6_6 into maze_base!
+	merge block_6_0 into maze_base!
+	merge block_5_6 into maze_base!
+	merge block_5_0 into maze_base!
+	merge block_4_21 into maze_base!
+	merge block_4_20 into maze_base!
+	merge block_4_18 into maze_base!
+	merge block_4_17 into maze_base!
+	merge block_4_16 into maze_base!
+	merge block_4_15 into maze_base!
+	merge block_4_14 into maze_base!
+	merge block_4_13 into maze_base!
+	merge block_4_12 into maze_base!
+	merge block_4_11 into maze_base!
+	merge block_4_9 into maze_base!
+	merge block_4_8 into maze_base!
+	merge block_4_7 into maze_base!
+	merge block_4_6 into maze_base!
+	merge block_4_0 into maze_base!
+	merge block_3_21 into maze_base!
+	merge block_3_19 into maze_base!
+	merge block_3_18 into maze_base!
+	merge block_3_17 into maze_base!
+	merge block_3_16 into maze_base!
+	merge block_3_15 into maze_base!
+	merge block_3_14 into maze_base!
+	merge block_3_11 into maze_base!
+	merge block_3_10 into maze_base!
+	merge block_3_9 into maze_base!
+	merge block_3_8 into maze_base!
+	merge block_3_6 into maze_base!
+	merge block_3_0 into maze_base!
+	merge block_2_21 into maze_base!
+	merge block_2_19 into maze_base!
+	merge block_2_18 into maze_base!
+	merge block_2_16 into maze_base!
+	merge block_2_13 into maze_base!
+	merge block_2_12 into maze_base!
+	merge block_2_11 into maze_base!
+	merge block_2_10 into maze_base!
+	merge block_2_9 into maze_base!
+	merge block_2_8 into maze_base!
+	merge block_2_6 into maze_base!
+	merge block_2_0 into maze_base!
+	merge block_1_21 into maze_base!
+	merge block_1_20 into maze_base!
+	merge block_1_19 into maze_base!
+	merge block_1_18 into maze_base!
+	merge block_1_17 into maze_base!
+	merge block_1_16 into maze_base!
+	merge block_1_15 into maze_base!
+	merge block_1_14 into maze_base!
+	merge block_1_13 into maze_base!
+	merge block_1_12 into maze_base!
+	merge block_1_10 into maze_base!
+	merge block_1_7 into maze_base!
+	merge block_1_6 into maze_base!
+	merge block_1_0 into maze_base!
+	merge block_0_21 into maze_base!
+	merge block_0_20 into maze_base!
+	merge block_0_19 into maze_base!
+	merge block_0_18 into maze_base!
+	merge block_0_17 into maze_base!
+	merge block_0_16 into maze_base!
+	merge block_0_15 into maze_base!
+	merge block_0_14 into maze_base!
+	merge block_0_13 into maze_base!
+	merge block_0_12 into maze_base!
+	merge block_0_11 into maze_base!
+	merge block_0_10 into maze_base!
+	merge block_0_9 into maze_base!
+	merge block_0_8 into maze_base!
+	merge block_0_7 into maze_base!
+	merge block_0_6 into maze_base!
+	merge block_0_5 into maze_base!
+	merge block_0_4 into maze_base!
+	merge block_0_3 into maze_base!
+	merge block_0_2 into maze_base!
+	merge block_0_1 into maze_base!
+b3Warning[examples/Importers/ImportURDFDemo/BulletUrdfImporter.cpp,126]:
+No inertial data for link, using mass=1, localinertiadiagonal = 1,1,1, identity local inertial frameb3Warning[examples/Importers/ImportURDFDemo/BulletUrdfImporter.cpp,126]:
+head_camera_linkb3Warning[examples/Importers/ImportURDFDemo/BulletUrdfImporter.cpp,126]:
+No inertial data for link, using mass=1, localinertiadiagonal = 1,1,1, identity local inertial frameb3Warning[examples/Importers/ImportURDFDemo/BulletUrdfImporter.cpp,126]:
+head_camera_rgb_frameb3Warning[examples/Importers/ImportURDFDemo/BulletUrdfImporter.cpp,126]:
+No inertial data for link, using mass=1, localinertiadiagonal = 1,1,1, identity local inertial frameb3Warning[examples/Importers/ImportURDFDemo/BulletUrdfImporter.cpp,126]:
+head_camera_rgb_optical_frameb3Warning[examples/Importers/ImportURDFDemo/BulletUrdfImporter.cpp,126]:
+No inertial data for link, using mass=1, localinertiadiagonal = 1,1,1, identity local inertial frameb3Warning[examples/Importers/ImportURDFDemo/BulletUrdfImporter.cpp,126]:
+head_camera_depth_frameb3Warning[examples/Importers/ImportURDFDemo/BulletUrdfImporter.cpp,126]:
+No inertial data for link, using mass=1, localinertiadiagonal = 1,1,1, identity local inertial frameb3Warning[examples/Importers/ImportURDFDemo/BulletUrdfImporter.cpp,126]:
+head_camera_depth_optical_frameb3Warning[examples/SharedMemory/PhysicsDirect.cpp,1171]:
+getCollisionShapeData failedb3Warning[examples/SharedMemory/PhysicsDirect.cpp,1171]:
+getCollisionShapeData failed
+--- hammer ---
+transitions: [(0, 'settle'), (62, 'go_to_object'), (89, 'grasp'), (235, 'back_off'), (260, 'navigate'), (439, 'retry'), (440, 'settle'), (509, 'go_to_object'), (512, 'grasp'), (666, 'back_off'), (667, 'navigate'), (744, 'retry'), (745, 'settle'), (788, 'go_to_object'), (797, 'grasp'), (950, 'back_off'), (975, 'navigate'), (1101, 'retry'), (1102, 'settle'), (1143, 'go_to_object'), (1148, 'grasp'), (1216, 'retry'), (1217, 'settle'), (1283, 'go_to_object'), (1292, 'grasp'), (1451, 'back_off'), (1452, 'navigate'), (1893, 'retry'), (1894, 'settle'), (1953, 'go_to_object'), (1959, 'grasp'), (2072, 'retry'), (2073, 'settle'), (2127, 'go_to_object'), (2134, 'grasp'), (2289, 'back_off'), (2314, 'navigate'), (2930, 'retry'), (2931, 'stopped')]
+attempt: {failure: object lost during the carry, pick_mode: table, plan_stats: {tried: 1, no_pose: 0, pose_blocked: 0, no_approach: 0, no_lift: 0, no_transit: 0, chosen: 0, grasp: {kind: antipodal, width_mm: 31.7, opening_mm: 47.7, offset_mm: 24.0, approach: [-0.19, -0.03, -0.98], closing: [0.97, 0.15, -0.19], lift_m: 0.3}, carry_step_mm: 7.0, back_off: {tried: [[0.0, 0, no room for a route to begin], [0.15, 0, chosen]], distance_m: 0.15, heading_deg: 0}, fragile: false, travel: {end_spreads_cm: [2, 3, 5, 7, 8, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25], spread_cm: [12, 2], reach_m: 0.6, pose: down, pads along, at_goal_height: true, arm: 0, not_reached: {level, finger under at the goal's height: turning in place, step 14 of 61: load 5 mm, level, finger under: turning in place, step 14 of 61: load 5 mm}}, carry: {route_m: 19.92, step_mm: 10.5, steered: true, rise_m: 0.005, turn_deg: -89, lever_mm: 18, seatable: false}, lost: {tick: 439, phase: turn, led_m: 0.0}}}
+attempt: {failure: object lost while taking the travel pose, pick_mode: table, plan_stats: {tried: 1, no_pose: 0, pose_blocked: 0, no_approach: 0, no_lift: 0, no_transit: 0, chosen: 0, grasp: {kind: antipodal, width_mm: 31.7, opening_mm: 43.7, offset_mm: 24.0, approach: [0.0, -0.18, -0.98], closing: [0.03, -0.98, 0.18], lift_m: 0.3}, carry_step_mm: 7.0, back_off: {tried: [[0.0, 0, chosen]], distance_m: 0.0, heading_deg: 0}, fragile: false, travel: {end_spreads_cm: [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 18, 19, 20, 21, 22, 23], spread_cm: [12, 2], reach_m: 0.6, pose: down, pads along, at_goal_height: true, arm: 0, not_reached: {level, finger under at the goal's height: carry blocked: elbow_flex_link -0 mm at base [3.51, -1.03, 0.88], arm spread [12, 21] cm of [19, 21, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33]; each route: pose 141 turn -86 at [3.51, -1.03, 0.88] elbow_flex_link -0 mm gaps {'scene': 0, 'own': 60, 'object': 60, 'load': 60} / pose 206 turn 274 at [3.51, -1.03, 0.88] elbow_flex_link -0 mm gaps {'scene': 0, 'own': 60, 'object': 60, 'load': 60} / pose 152 turn -98 at [3.53, -0.97, 0.87] elbow_flex_link 6 mm gaps {'scene': 6, 'own': 60, 'object': 60, 'load': 60} / pose 209 turn 262 at [3.53, -0.97, 0.87] elbow_flex_link 6 mm gaps {'scene': 6, 'own': 60, 'object': 60, 'load': 60} / pose 200 turn -98 at [5.63, 0.31, 0.22] elbow_flex_link 11 mm gaps {'scene': 11, 'own': 60, 'object': 60, 'load': 60} / pose 257 turn 262 at [5.63, 0.31, 0.22] elbow_flex_link 11 mm gaps {'scene': 11, 'own': 60, 'object': 60, 'load': 60}}}}}
+attempt: {failure: object lost while taking the travel pose, pick_mode: table, plan_stats: {tried: 1, no_pose: 0, pose_blocked: 0, no_approach: 0, no_lift: 0, no_transit: 0, chosen: 0, grasp: {kind: antipodal, width_mm: 31.7, opening_mm: 43.7, offset_mm: 24.0, approach: [-0.07, -0.16, -0.98], closing: [-0.41, -0.9, 0.18], lift_m: 0.3}, carry_step_mm: 7.1, back_off: {tried: [[0.0, 0, no room for a route to begin], [0.15, 0, chosen]], distance_m: 0.15, heading_deg: 0}, fragile: false, travel: {end_spreads_cm: [22, 24, 25, 26, 28, 30, 31, 32, 33], spread_cm: [15, 22], reach_m: 0.6, pose: level, finger under, at_goal_height: true, arm: 0, not_reached: {}}}}
+attempt: {failure: object lost during the lift, pick_mode: table, plan_stats: {tried: 1, no_pose: 0, pose_blocked: 0, no_approach: 0, no_lift: 0, no_transit: 0, chosen: 0, grasp: {kind: antipodal, width_mm: 31.7, opening_mm: 47.7, offset_mm: 24.0, approach: [0.1, 0.16, -0.98], closing: [-0.52, -0.83, -0.19], lift_m: 0.299}, failed_in: lift}}
+attempt: {failure: object lost during the carry, pick_mode: table, plan_stats: {tried: 1, no_pose: 0, pose_blocked: 0, no_approach: 0, no_lift: 0, no_transit: 0, chosen: 0, grasp: {kind: antipodal, width_mm: 28.9, opening_mm: 52.9, offset_mm: 24.0, approach: [0.05, 0.09, -0.99], closing: [-0.48, -0.87, -0.1], lift_m: 0.3}, carry_step_mm: 6.9, back_off: {tried: [[0.0, 0, chosen]], distance_m: 0.0, heading_deg: 0}, fragile: false, travel: {end_spreads_cm: [13, 15, 16, 17, 18, 19, 20, 21, 27, 28, 30], blocked: turning in place, step 29 of 36: scene 8 mm, way: the move, then the turn, straight_ways: turning in place, step 29 of 36: scene 8 mm, spread_cm: [20, 15], reach_m: 0.6, pose: level, finger under, at_goal_height: false, arm: 0, not_reached: {level, finger under at the goal's height: turning in place, step 29 of 36: scene 8 mm}}, carry: {route_m: 20.2, step_mm: 25.2, steered: false, rise_m: 0.118, turn_deg: -91, lever_mm: 8, seatable: false}, lost: {tick: 1893, phase: turn, led_m: 0.0}}}
+attempt: {failure: object lost during the lift, pick_mode: floor, plan_stats: {tried: 52, no_pose: 46, pose_blocked: 1, no_approach: 0, no_lift: 4, no_transit: 0, chosen: 51, grasp: {kind: rim, width_mm: 9.3, opening_mm: 29.3, offset_mm: 24.0, approach: [0.39, -0.35, -0.85], closing: [-0.85, -0.5, -0.18], lift_m: 0.3}, failed_in: lift}}
+attempt: {failure: object lost during the carry, pick_mode: floor, plan_stats: {tried: 1, no_pose: 0, pose_blocked: 0, no_approach: 0, no_lift: 0, no_transit: 0, chosen: 0, grasp: {kind: antipodal, width_mm: 28.9, opening_mm: 52.9, offset_mm: 20.0, approach: [0.08, -0.08, -0.99], closing: [0.7, -0.71, 0.11], lift_m: 0.2}, carry_step_mm: 6.9, back_off: {tried: [[0.0, 0, carry blocked], [0.15, 0, chosen]], distance_m: 0.15, heading_deg: 0}, fragile: false, travel: {end_spreads_cm: [2, 5, 20, 21, 22], spread_cm: [2, 2], reach_m: 0.6, pose: down, pads along, at_goal_height: true, arm: 0, not_reached: {level, finger under at the goal's height: turning in place, step 18 of 30: own -6 mm, level, finger under: no folded pose within reach and clear}}, carry: {route_m: 20.22, step_mm: 30.0, steered: true, rise_m: 0.0, turn_deg: -31, lever_mm: 9, seatable: false}, lost: {tick: 2930, phase: drive, led_m: 6.5}}}
+ROW:{"object": 13, "name": "hammer", "rest_z": 0.644, "lift_tick": 174, "max_lift_cm": 28.3, "hold_50": true, "held_at_end": false, "backed_off_m": 4.71, "state": "stopped", "attempts": 7, "failure": "object lost during the carry; object lost while taking the travel pose; object lost while taking the travel pose; object lost during the lift; object lost during the carry; object lost during the lift; object lost during the carry", "grasp_error_mm": 16.0, "errors": 0, "ticks": 2951, "wall_s": 295.7, "delivered_tick": null, "goal_cm": 1248.4, "navigate_tick": 261}
+Destroy EGL OpenGL window.
