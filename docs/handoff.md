@@ -1,334 +1,300 @@
-# Handoff: solver rewrite, end of the session of 2026-11-21
+# Handoff: solver rewrite and the report, 2026-11-22 (submission day)
 
-Read this first, then **`NAVIGATE_V2.md`** (the full record of this session:
-findings, problems, hypotheses with verdicts, every table, the change log
-V2-1 to V2-19). `NAVIGATE.md` is the first carry, measured on a regressed
-grasp and a shorter maze; `GRASP.md` is the pick. `docs/plan.md` has not been
-updated for this session.
+Read this first, then **`NAVIGATE_V2.md`**: the full record of the carry
+(findings, problems, hypotheses with verdicts, every table, sections 7.1 to
+7.26, the change log V2-1 to V2-31). `docs/literature_review.md` is the
+literature. `GRASP.md` is the pick, which is frozen. `NAVIGATE.md` is the
+first carry, measured on a regressed grasp and a shorter maze.
+`docs/plan.md` is out of date.
 
 ## Where things stand
 
-Branch `rewrite/solver`, pushed.
+Branch `rewrite/solver`, pushed; one commit of documents after `4b98d4b`
+(the user's push of benchmark 2).
 
 | Commit | What it is |
 |---|---|
 | `b701e73` | The pick the user verified. Still the reference for the grasp. |
-| `0b1b621` | Planning limits count cycles of work, not seconds. The only change to the pick's path since `b701e73`. |
-| `6d0a0b8` | Result tables of the pick's regression run (`runs/pick_cycles`). |
-| `dd0ab31` | The carry rebuilt on top of the untouched pick: back-off chosen from the scene, travel pose, carry, reach, retry. `NAVIGATE_V2.md`. |
-| `3526a5e` | Result tables of the surveys and full runs `NAVIGATE_V2.md` cites. |
+| `dd0ab31` | The carry rebuilt on top of the untouched pick (V2-1 to V2-19). |
+| `376e759` | `tools/bench.py`. **The code of benchmark 1.** |
+| `1bf6206` | The user's benchmark 1 results, `runs/bench_01`. |
+| `fa6a3cf` | Documents: benchmark 1 analysed, V2-20 to V2-31 logged, the literature review. |
+| `4e155e7` | The carry V2-20 to V2-31, `tools/bench.py --ablate`, `tools/bench_report.py`, `tools/trace_trial.py`. **The code of benchmark 2.** |
+| `4b98d4b` | The user's benchmark 2 results, `runs/bench_02` (the full run and `ablate/`). |
+
+The commit after `4b98d4b` (the one that carries this file) holds: this
+file; section 7.26 and two table rows in `NAVIGATE_V2.md`;
+`runs/bench_02/report.md` and the three scripts `runs/tmp/b2_*.py` that
+section 7.26 cites (git-ignored, added with `git add -f`); one corrected
+author initial in `docs/lit_transport_holds.md` (H. Pham, not R. Pham).
+Commit and push only when the user asks.
 
 `assets/maze.urdf` and `pnr/pyvenv.cfg` show as modified and are not ours:
 leave them out of every commit. The untracked `old/`, `pnr/bin`, `pnr/lib`,
-`pnr/lib64` and `pristine/` were there before and are not ours either.
+`pnr/lib64` and `pristine/` are not ours either.
 
-## The task the user set on 2026-11-21
+Nothing is running, here or on the Xeon.
 
-Three tasks and no others:
+## Benchmark 2 is back and written up (2026-11-22)
 
-1. Get all 15 grasps to a carry pose that does not drop the object (the
-   plate and the large marker included).
-2. Then give the solver its retry.
-3. The back-off is not hard-coded.
+`runs/bench_02`: commit `4e155e7`, not dirty, the same 1,500 trials as
+benchmark 1, and 1,666 trials of ablation. Done with it:
 
-| Task | State |
-|---|---|
-| 1 | **Not reached.** 11 of 15 delivered on cloud seed 2, 12 of 15 on seed 3. The bleach and the plate were delivered on neither. |
-| 2 | **Works.** Four objects were dropped, picked up again and delivered (can, hammer on seed 2; sugar box, apple on seed 3), three from the floor. |
-| 3 | **Done.** `transport.choose_back_off`, used on every trial. |
+- `runs/bench_02/report.md` made (`tools/bench_report.py runs/bench_01
+  runs/bench_02`) and its counts recounted from the rows
+  (`runs/tmp/b2_check.py`; per-object attribution `runs/tmp/b2_attr.py`;
+  the same trial in two poses `runs/tmp/b2_pose_pairs.py`).
+- **The three controls pass** (240 of 240, 100 of 100, 40 of 40).
+- **No default was changed.** No part hurts when removed alone. Joint by
+  joint stays on: 29 deliveries gained and 16 lost in the 323 trials in
+  which it acts (the ten local trials of section 7.25 pointed the other
+  way).
+- `NAVIGATE_V2.md` section 7.26 and the task table hold all of it.
+- The paper's Results (five subsections) and abstract are filled from it.
+
+The user's standard for this, in their words: "this is not a cheap test"
+and "the results when back must be clearly explained and ablated, ready
+for neurips reporting".
+
+## The paper
+
+A Claude doc, the user's submission in the style of a NeurIPS paper:
+https://claude.ai/artifact/XGYA8M1uTLg5zabGCx1pio ("Pick-Nav-Reach:
+Classical Grasping, Navigation, and Delivery"). The user said it was
+converted from their LaTeX and paraphrased by another model, so the LaTeX
+source is theirs and edits made in the doc may have to be carried back
+(my reading; ask). Read and edit it with the docs tools, never by fetching
+the link.
+
+What I did to it on 2026-11-22, at the user's request:
+
+- Reviewed it; 13 corrections laid as suggestions, then all accepted on
+  the user's word.
+- **Emptied the Results section** (heading kept): it described the old
+  solver (5 of 10 on five objects).
+- Rewrote Future Work for the current solver, with no result figures.
+- Added to the Methodology "Choosing the travel pose" and "Evaluation
+  protocol" (with a table of the six ablated parts); added Limitations and
+  References (16 entries) and 18 citations in the text.
+
+Done in it on 2026-11-22, after benchmark 2:
+
+- **Results** filled, five subsections: baseline against full, by object,
+  ablation (the three controls first), carries by travel pose, what is
+  still lost. Written into the doc directly, not as suggestions.
+- **The abstract** now quotes benchmark 2 (81 % delivered, 69 % with no
+  drop, +4.4 and +6.5 points against the baseline, 68 % of lost points
+  after the lift).
+- **An appendix, "Appendix: Algorithms"**, after the References: 23
+  algorithms (A.1 to A.23) in the order a trial meets them, each written
+  from the code as it stands at `4e155e7`, with its default parameters. A
+  change to a default in `solver.py`'s `Config` or the settings classes
+  has to be carried into it by hand.
+- **One suggestion is open**, for the user to accept or reject: Future
+  Work said small objects are lost while the pose is taken "rather than
+  during the drive"; benchmark 2 says 23 of the mug's 49 lost first
+  carries and 14 of the strawberry's 62.
+
+Still to do in it:
+
+- **"The median carry speed of 12.8 mm per tick"** in "PyBullet quirks" is
+  benchmark 1's figure over trials with a log. Over every first carry of
+  benchmark 2 the median is 12.2. Not changed: the 202 m/s² beside it is
+  derived from 12.8.
+- **The tables may have to be carried back to the user's LaTeX.**
+- **References to glance at**: [12] and [14] could not be re-fetched;
+  [13], [15] rest on abstracts; the venues of [8] (ICRA 2019) and [11]
+  (IROS 2021) are from memory. Nguyen [3] was verified from abstracts only.
+- The jolt figures in "PyBullet quirks" (202 m/s² and so on) are derived
+  from the documented control law by an agent and have not been measured
+  in a trace. The paper says so.
 
 ## Results to quote, with what they rest on
 
-All in the maze `run.sh` builds (layout seed 42), one trial per object.
+**Benchmark 1** (`runs/bench_01`, the Xeon, commit `376e759`: the carry
+before V2-20). 15 objects on seeds 1000 to 1099; the seed is the layout,
+the env and the cloud. 3,000 ticks, one trial each.
 
-| Run | Code | Cloud seed | Delivered |
-|---|---|---|---|
-| `runs/deliver_12` | first version, four motion faults still in | 2 | 5 of 15 |
-| `runs/deliver_13` | faults fixed, level poses first | 2 | 5 of 15 (a different five) |
-| `runs/deliver_14` | as committed | 2 | **11 of 15** |
-| `runs/deliver_15_seed3` | as committed | 3 | **12 of 15** |
+| | Of 1,500 trials |
+|---|---|
+| Lifted | 1,426 (95 %) |
+| Delivered | 1,142 (76 %) |
+| Delivered with no drop | 939 (63 %) |
+| Mean points of 40 | 34.2 |
 
-| Object | Seed 2 | Seed 3 |
-|---|---|---|
-| master chef can | 2,367 (after a re-pick) | lost |
-| sugar box | 2,428 | 2,637 (third pick) |
-| tomato soup can | 2,458 | 2,613 |
-| mustard bottle | 2,439 | 2,601 |
-| potted meat can | 2,417 | 2,430 |
-| banana | 2,445 | 2,615 |
-| strawberry | lost | 2,438 |
-| apple | 2,442 | 2,709 (after a re-pick) |
-| bleach cleanser | lost | lost |
-| bowl | 2,456 | 2,598 |
-| mug | 2,552 | 2,593 |
-| plate | lost | lost |
-| large marker | lost | 2,393 |
-| hammer | 2,482 (third pick) | 2,475 |
-| foam brick | 2,610 | 2,430 |
+Delivered per object: potted meat and foam brick 100, mustard 98, banana
+96, soup can 94, bowl 87, sugar box, apple, mug and hammer 84, strawberry
+77, bleach 53, marker 47, can 30, plate 24. 72 % of the points lost are
+lost after the lift. It cost 56 core-hours (3.7 h at `-j 15`).
 
-The pick is unchanged: on both seeds every lift tick equals that of the pick
-alone (`runs/pick_cycles/seed2`, `seed3`). The 105 fast tests pass.
+**Benchmark 2** (`runs/bench_02`, the Xeon, commit `4e155e7`: V2-31), the
+same 1,500 trials, paired with benchmark 1 (section 7.26):
 
-Two draws are not the pass bar, which is per object over five. Seeds 1, 4
-and 5 and the unseeded cloud `run.sh` uses have not been run with a carry.
+| | Benchmark 1 | Benchmark 2 | Difference (95 %) | Gained | Lost |
+|---|---|---|---|---|---|
+| Lifted | 1,426 | 1,426 | the same tick in 1,500 of 1,500 | | |
+| Delivered | 1,142 (76.1 %) | 1,208 (80.5 %) | +4.4 points (+3.2 to +5.7) | 99 | 33 |
+| Delivered with no drop | 939 (62.6 %) | 1,036 (69.1 %) | +6.5 points (+5.0 to +8.0) | 123 | 26 |
+| Mean points of 40 | 34.15 | 34.88 | +0.72 (+0.55 to +0.90) | | |
+
+- By object: bleach 53 to 77, sugar box 84 to 98 (no drop 53 to 88),
+  hammer no drop 44 to 60, can 30 to 38. **The soup can is worse, 94 to
+  90**: finger-under carries that the new parts made possible; hand down
+  never loses it (31 of 31).
+- Ablation, effect on delivered and on no drop, in points: both other ways
+  in +2.4 and +4.4 (joint by joint alone +0.9 and +2.2), stall +0.7 and
+  +0.6, the weak hold's pace +0.5 and +0.8, more arms +0.3 and +0.8,
+  re-seating 0 and 0.
+- The weak hold's pace gains 17 bleach deliveries and loses 5; for the can
+  it gains 2 and loses 6.
+- The same trial in two poses (the ablation of the ways in): finger under
+  keeps the object in 219 of 274 first carries, hand down in 193; level in
+  73 of 77, hand down in 40.
+- All 15 delivered on 4 seeds of 100 (1 before); the middle seed 12.
+
+**Old against new on four local draws** (all 15, one trial each; old is
+`376e759`, new is `4e155e7`; sections 7.22 and 7.25):
+
+| Draw (layout, cloud seed) | Delivered, old | new | No drop, old | new |
+|---|---|---|---|---|
+| 42, 2 | 11 | 13 | 9 | 11 |
+| 42, 3 | 12 | 13 | 10 | 11 |
+| 67, 67 | 11 | 11 | 9 | 10 |
+| 21, 21 | 13 | 12 | 11 | 10 |
+
+The trial lost on 21 is the bowl, after finger under was reached joint by
+joint; with `travel_more_ways=1` it is delivered. Layout 42 is the layout
+the changes were tuned on. All lift ticks equal the pick alone. The 105
+fast tests pass.
+
+## What benchmark 1 showed (section 7.24)
+
+- **The ticks leave room for one carry.** The pick ends near tick 290, the
+  route is 22 m (17.6 to 30.1 over 100 layouts), so the first carry runs
+  near 13 mm per tick and arrives near tick 2,460.
+- **A drop is recovered in 47 % of trials**, by object from 74 % (mug) to
+  3 % (can).
+- **The layout is not a shared cause.** Failures are close to independent
+  between the objects of a seed. Route length matters a little.
+- **Within one object, a late pick does not make a drop likelier.** The
+  pooled trend is the object's identity.
+- **The solver's friction limit does not predict a drop.**
+- **Two kinds of loss.** Heavy or weakly held objects go in the drive, at
+  any distance. Small ones (strawberry, mug) go while the hand is moved
+  into its pose, or in the first half metre.
+- **Not readable from it:** whether hand down loses more than finger
+  under, and whether slower is safer. Only failed trials kept a log.
+  Benchmark 2 records every carry of every trial for this.
+- **The pick:** marker lifted by tick 600 in 17 trials of 100; never
+  lifted: marker 34, can 22, plate 18. Five objects never lift on their
+  first attempt (mustard, bleach, mug, plate, marker).
 
 ## The user's rules for this work
 
-Everything in the previous handoff still holds (grasp and travel pose are
-two problems; planning limits count work, not time; always test for
-regressions on the same seeds; empirical only; the base turns with the
-route; work in the main session; no side branches or worktrees; every file
-inside the repo; commit and push only when asked; one simulation at a time
-under the memory cap; no `rm -rf`). Added on 2026-11-21:
-
-- **The grasp library is frozen.** "do not touch the grasp library any
-  more". Nothing under `custom_libraries/grasping/` is edited, nor the
-  pick's functions in `solver.py` (`_settle` to `_drag`). Where the carry
-  needed something the pick's code would not do, it got its own copy
-  (`travel_pose.solve_arm`).
-- **Only the three tasks above.**
-- **The whole trial has to be run**, so the solver navigates.
-- **Edit files with the Edit and Write tools**, not `sed` or Python patch
-  scripts in the shell. The user's GUI shows a diff only for those.
-- **`NAVIGATE_V2.md` holds all findings, problems faced, hypotheses tested
-  and fixes.** Keep it that way: every experiment goes in with its seed,
-  maze and number of trials.
-- **The library run of `NAVIGATE.md` came from `f09377d`, whose grasp had
-  regressed.** Its recovery and pick counts do not describe the current
-  pick (noted in `NAVIGATE.md` and at the top of `runs/library_01/report.txt`).
+- **The grasp library is frozen.** Nothing under
+  `custom_libraries/grasping/` is edited, nor the pick's functions in
+  `solver.py` (`_settle` to `_drag`). Grasp and travel pose are two
+  problems: never change the grasp to fix a carry. The limits may be
+  loosened for a late pick once the carry is settled; the grasp is not to
+  be rewritten.
+- **Planning limits count work, not seconds.**
+- **Every change gets old against new on the same seeded draws**, with a
+  baseline. Outcomes flip with the cloud.
+- **A benchmark on the Xeon is costly**: design it to run once, try the
+  whole pipeline here first, and deliver the result explained and ablated.
+- **`NAVIGATE_V2.md` holds all findings, problems, hypotheses and fixes**,
+  each with its seed, maze and number of trials.
+- **A pose per object** only if proven to reach 15 of 15.
+- **Work in the main session**; agents only when the user asks, with short
+  briefs. No side branches or worktrees. Every file inside the repo
+  (`runs/tmp/` for scratch).
+- **Edit with the Edit and Write tools**, never `sed` or patch scripts.
+- **One simulation at a time**, `-j 1`, under the memory cap (`$LOCK`
+  below). Never edit code while a run is in progress.
+- **No `rm -rf`.** New names for run output; list and tell before deleting.
+- **Commit and push only when asked.**
+- **Do not open the videos or logs in the Xeon's zips** under `runs/`
+  (about 1 GB each); `runs/xeon/NAME/` holds the small files.
+- Scoring: `readme.md`, section Rubrics. Five test objects, five test
+  mazes, unprovided seeds; the layout may differ by examiner.
 
 ## How the carry works now
 
 `custom_libraries/navigation/transport.py` plans everything after the pick;
 `solver.py`'s `_back_off`, `_navigate`, `_reach` and `_retry` call it.
 
-1. **Back-off** (`choose_back_off`): the shortest straight retreat, none if
-   that will do, from whose end a route can begin (the base clear of the
-   table and walls by the route's own margin), the travel pose can be taken
-   and the carry can start. Straight away first at 0.15, 0.3, 0.45, 0.6 m,
-   then seven other directions. Falls back to the old fixed retreat.
+1. **Back-off** (`choose_back_off`): a held object that rests against
+   something is first taken straight off it. Then the shortest retreat,
+   none if that will do, from whose end the travel pose can be taken and
+   the carry can start; judged a second time with the other way in before
+   the fixed 0.6 m retreat.
 2. **Travel pose** (`plan_travel`, `travel_poses`): the first pose in the
    rule's order that is within reach, has a clear way in, and in which the
-   whole route to the goal is clear. The rule: a hand that does not point
-   down is kept and folded; from 0.6 kg, level first; otherwise one finger
-   under the object, then the hand straight down. The object is brought to
-   the goal's height where the arm can, 0.60 m from the base's centre.
+   whole carry is clear with a 12 mm margin. The rule: a hand that does
+   not point down is kept and folded; from 0.6 kg, level first; otherwise
+   one finger under the object, then the hand straight down, then folded.
+   Up to three arms are tried for a pose. Ways in: straight; then the move
+   before the turn; then joint by joint (never for a weak hold). The object
+   rides 0.60 m from the base's centre, at the goal's height where the arm
+   can.
 3. **Carry** (`plan_carry`, `navigation/carry.py`): the object is led along
-   the route, the base trailing on it; the turn on the spot at 6 mm per
-   tick; the drive at 1.25 times what the ticks left require.
+   the route, the base an arm's length behind; the drive at 1.25 times
+   what the ticks left require, or exactly that for a weak hold (the
+   solver's own limit under 4.5 mm per tick). An object that has sunk
+   35 mm across the pads of a level hand is re-seated: the drive rests and
+   the wrist rolls half a turn.
 4. **Reach** (`reach_step`, `plan_raise`, `plan_reach`): the base and torso
-   close the gap with the arm still; an object more than 5 cm under the
-   goal is raised by laying the hand level; the arm's straight move is last.
-5. **Retry**: a drop is judged by `in_hand` (on a finger or the palm), not
-   by both pads. After a drop the hand opens where it is and the pick starts
-   again from where the object lies.
+   close the gap with the arm still.
+5. **Retry**: a carry refused with the object in the hand is planned again
+   with a smaller margin and the pose chosen again. After a drop the hand
+   opens where it is and the pick starts again from where the object lies.
 
-## What is known (the short form; `NAVIGATE_V2.md` has the evidence)
+Every part added since benchmark 1 has a setting that switches it off:
+`travel_arms=1`, `travel_more_ways=0` (or 1 for joint by joint alone),
+`carry_fragile=0`, `reseat_sag=0`, `free_reach=0`,
+`carry_retry_margins=(1.0,)`. With all of them off the code reproduced
+`376e759` tick for tick on the two local control trials.
 
-- **`run.sh`'s route is 27.8 m**, not the 21 m of the env's own maze. The
-  object is led at 14 to 16 mm per tick on a first carry.
-- **Four faults in the carry's own motion** caused most early losses, all in
-  code `f09377d` also ran: a 9 degree jump in heading as the drive began; a
-  230 mm jump in the base's target; a hook at the start of the route; the
-  base moving up to 40 mm in a tick. Fixed (V2-6 to V2-9).
+## What is known about the carry (the evidence is in `NAVIGATE_V2.md`)
+
+- **The base jolts the hand at every tick**, by an amount set by the step
+  alone (derived, not measured: about 21 g at 12.8 mm per tick). Friction
+  cannot hold the heavy objects through it, so a friction-held object
+  slips a little every tick. What decides a carry is where the slips add
+  up to and what stops them.
 - **Each pose blocks two directions of slip and leaves one to friction.**
-  Hand down: heavy objects slide out along the fingers (sugar box 5 mm per
-  metre). Hand level: they slide into the palm and stay, then sag across
-  the pads. Finger under: the weight rests on a finger; they slide sideways
-  after a bend.
-- **A level pose on a route the planner had checked was delivered on the
-  first carry 13 times of 14** on seed 2 (full runs 2 and 3).
-- **Finger under carried the whole route at 20 to 30 mm per tick four
-  times**, all after a re-pick.
-- **The level poses are wide**: the elbow stands off the centre line, and at
-  0.70 m it met the door jamb where the route enters the maze. At 0.60 m it
-  passes; at 0.50 m the arm cannot take the pose.
-- **Outcomes are reproducible and very sensitive.** A hand straightened by
-  a degree or two changed the marker from lost at 5.3 m to carried 27.9 m,
-  twice. Single trials do not separate poses that are close.
-- **The surveys (`tools/travel_poses.py`) do not check the turn or the
-  route for collisions.** In survey 3 the arm touched a wall in 10 of 23
-  level carries. Surveys 1 to 3 were also run at 0.70 m and before the
-  planner's faults were fixed, so their "out of reach" entries are not all
-  the arm's reach.
+  Hand down: the object slides out along the fingers. Hand level: into the
+  palm, where it stops, then it sinks across the pads, but only while the
+  base turns through bends. Finger under: the weight rests on a finger.
+- **A pose reached joint by joint is a poor start for a carry.**
+- **The level poses are wide.** Finger under is refused on some routes by
+  a real collision of the upper arm, not by the margin (banana, layout 67).
+- **Outcomes are repeatable and very sensitive.** A degree or two changes
+  a trial. Single trials do not separate close alternatives.
 
-## The user's answers after this handoff was first pushed (2026-11-21)
+## Open, in the order I would take them
 
-They change the order of the next steps below.
-
-- **Submission is 2026-11-22.** The user writes the report on the 21st
-  while the last fixes and tests are made.
-- **Scoring: `readme.md`, section Rubrics.** Per trial, navigation and
-  reach: within 10 cm of the goal 6 points, within 15,000 sim steps 6,
-  carry stability 4 ("no drop that requires re-grasp during navigation").
-  Pick: lift within 3,000 sim steps 6, lift 10 cm 6, hold 50 steps 6, final
-  pose close to the target grasp 6. Five test objects, five test mazes,
-  unprovided seeds. (The project reads "sim steps" as physics steps, 5 per
-  tick: 600 and 3,000 ticks.) So a drop on the first carry costs 4 points
-  even when a retry delivers, and a failed delivery costs 12.
-- **The maze's layout may differ depending on the examiner.** Nothing may
-  rest on layout seed 42 alone. The 0.60 m reach was chosen at that maze's
-  doorway.
-- **The grasp:** once the carry is settled, the limits may be loosened to
-  allow for a late pick; the grasp is not to be rewritten.
-- **A pose per object** is acceptable only if it is proven to raise the
-  success to 15 of 15.
-
-What I would do first, given these: run the full trial on two or three
-other layout seeds (`--maze-seed`) before anything else; then step 2 below
-(the retry that gives up); then steps 1, 4 and 5.
-
-## The user's four runs on the Xeon machine (2026-11-21)
-
-`NAVIGATE_V2.md`, section 7.13. Commit `1b8c126`, `run_batch.py` on layouts 42, 17, 67 and 21
-with the unseeded cloud, all 15, one trial each: **11, 12, 12 and 12 of 15
-delivered**, 47 of 60, and 41 of 60 with no drop after the lift. Read from
-`summary.jsonl` only (`runs/xeon/NAME/`); the zips in `runs/` are about 1 GB
-each, and the user asked that their videos and logs not be opened.
-
-- The layout step above is done: the carry does not rest on layout 42.
-- **Master chef can 0 of 4**: lifted, then dropped on its first carry or
-  while the pose is taken; the re-pick finds no plan.
-- **Large marker 0 of 4**: never lifted ("object moved before the close" on
-  the first attempt every time). This is the pick.
-- Bleach 2 of 4, plate 2 of 4 (their first deliveries), hammer 3 of 4
-  (dropped on its first carry in three). The other ten 4 of 4.
-
-## The session of 2026-11-21, afternoon: V2-20 to V2-30
-
-`NAVIGATE_V2.md` sections 7.14 to 7.22 and the change log. Not committed
-when this was written, except `tools/bench.py` (`376e759`).
-
-**Result: 13 of 15 delivered on cloud seed 2 and 13 of 15 on seed 3**
-(layout 42, one trial each; 11 and 12 before), 11 on each with no drop
-after the lift (9 and 10 before). Every lift tick is that of the pick
-alone and nothing delivered before is lost. Not delivered: strawberry and
-bleach on seed 2, can and plate on seed 3. `runs/deliver_20_s2`,
-`runs/deliver_21_s3`.
-
-What was added, each with a setting that turns it off:
-
-- **Re-seating** (`reseat_sag`): an object that has sunk 35 mm across the
-  pads of a level hand is turned over by half a roll of the wrist, the
-  drive at rest. It delivers the side-grasped can (seed 5); it does not
-  help the bleach.
-- **No haste for a weak hold** (`carry_fragile`): where the solver's own
-  speed limit for the hold is under 4.5 mm per tick (can, bleach, plate),
-  the object is led as slowly as the ticks allow and is not swung into its
-  pose joint by joint. It delivers the plate (seed 2) and the bleach
-  (seed 3). Those carries arrive at tick 2,677 to 2,904.
-- **Three arms per pose** (`travel_arms`) and **two more ways into a pose**
-  (`travel_more_ways`): the marker's first delivery on seed 2. A way made
-  joint by joint is a poor start: 8 carried, 13 lost.
-- **A held object resting against something is first taken off it**
-  (`free_reach`), and **a refused carry is planned again with a smaller
-  margin** (`carry_retry_margins`), so the solver no longer stops with the
-  object in its hand.
-- `tools/trace_trial.py`: a line per tick of a whole trial, with where the
-  object sits in the hand. `tools/bench.py`: many seeds in parallel.
-
-What the traces showed: the can sinks across the pads only while the base
-turns through bends, with the pads still pressing 185 N; the three
-weakest holds by the solver's own speed limit are the three objects that
-had never been delivered here.
-
-Open, in the order I would take them:
-
-1. **Run `tools/bench.py` on this code on the Xeon machine.** Two local
-   seeds are not a rate; every result above is one trial.
-2. **The can's other first carries**: lost in the back-off on seed 1,
-   while the folded pose is taken on seed 2, hand down on seed 3 (grasped
-   from above; "folded" tried before "hand down" got 11.8 m instead of 0.5).
-3. **The bleach on seed 2** (finger under, 14.8 mm per tick, lost at 19.6
-   m) and **the plate on seed 3** (lost at 1.9 m): both are led faster than
-   13.6 to 14.3 mm per tick because their picks end late.
-4. **The marker is not lifted under the unseeded cloud** (section 7.13).
-   That is the pick.
-5. **The strawberry on seed 2**: finger under reached joint by joint, lost
-   at 16.8 m.
-
-## The session of 2026-11-21, evening: benchmark 1, and benchmark 2 prepared
-
-`NAVIGATE_V2.md` sections 7.23 to 7.25, change log V2-31.
-
-- **Benchmark 1** (`runs/bench_01`, the user's run on the Xeon, commit
-  `376e759`, which is the carry before V2-20): 1,500 trials, 15 objects on
-  100 mazes. Delivered 76 %, with no drop 63 %, 34.2 points of 40. 72 % of
-  the points lost are lost after the lift. It took 56 core-hours (3.7 h at
-  `-j 15`).
-- **What it overturned** (section 7.24): a late pick does not make a drop
-  likelier within one object; the layout is not a shared cause (failures
-  are close to independent between objects on a seed); the solver's
-  friction limit does not predict a drop. "Hand down loses the object" and
-  "slower is safer" cannot be read off it, because only failed trials kept
-  a log.
-- **Layouts 67 and 21, old against new** (section 7.25): 11 and 12
-  delivered against 11 and 13. The trial lost is the bowl on 21, after
-  finger under was reached joint by joint; with `travel_more_ways=1` it is
-  delivered and the nine other trials that used joint by joint keep their
-  outcome. The default is still 2, for benchmark 2 to decide.
-- **The user's conditions for benchmark 2:** it is not cheap, so it is run
-  once; the result must be explained and ablated to the standard of a
-  conference paper.
-- **Benchmark 2, one command** (to be run on the Xeon once this code is
-  pushed; `runs/bench_01` is its baseline):
-
-      pnr/bin/python tools/bench.py runs/bench_02 --seed-range 1000 1100 -j N --ablate
-      pnr/bin/python tools/bench_report.py runs/bench_01 runs/bench_02     # writes runs/bench_02/report.md
-
-  It runs the full system on the same 1,500 trials, then each part of the
-  carry switched off (`bench.COMPONENTS`) on the trials in which that part
-  acted, plus 40 others as a check that they run the same, plus 100 trials
-  with every part off, which should reproduce benchmark 1. The reasoning: a
-  trial is repeatable, and each part is either planning without side
-  effects or acts at a recorded moment, so a trial in which a part did not
-  act is the same without it.
-- **The literature** is in `docs/literature_review.md` (a synthesis of
-  `old/paper_review/`, `docs/lit_transport_holds.md` and
-  `docs/lit_cited_references.md`, the last two written by agents and not
-  checked by a second reading). Its main point for the carry: the
-  environment's position control makes a jolt at every tick whose size is
-  set by the step alone, larger than friction can hold for the heavy
-  objects, so every friction-held object slips a little each tick; what
-  decides a carry is where the slips add up to and what stops them.
-
-## Next steps
-
-As they stood on the morning of 2026-11-21; the list above is newer.
-In the order I would take them. None needs the grasp library.
-
-1. **Measure the pass bar.** The same full run on cloud seeds 1, 4 and 5
-   (about 25 minutes each), then per object out of five. Seed 1 does not
-   lift the plate or the marker in the pick.
-2. **The plate on seed 3 stopped at tick 619 with the plate in its hand.**
-   The folded pose was refused ("the arm would jump" at step 10 of 24 of
-   turning the hand in place); the arm as lifted was refused a route, the
-   wrist 5 and 11 mm from a wall where 12 are asked for; and the retry
-   planned the same carry three times and gave up (`carry_retries`). The
-   retry should try something different: another pose, a different
-   back-off, or setting the object down.
-3. **Lead the first carry faster where a finger is under the object.** It
-   held at 20 to 30 mm per tick; arriving by tick 1,800 would leave time
-   for a second carry. `carry_haste` and `carry_reserve` in `Config`.
-4. **Hand-down carries drop the heavy objects** (can, sugar box, apple on
-   seed 3). On seed 3 the level poses were refused or out of reach for
-   seven first carries. Find out why they were refused there
-   (`plan_stats["travel"]["not_reached"]` names the link and the base
-   pose) before changing the rule.
-5. **The wrist's roll with the hand down** drops things before the drive
-   (strawberry, hammer). Slower (`CarrySettings.max_roll`), or skipped where
-   the pads' line is already near the route.
-6. **The bleach** (0.97 kg): led at 18 mm per tick because it is lifted
-   only at tick 511 to 514 and its carry starts near tick 625; dropped
-   after 5.9 and 15.4 m. Not delivered in any run.
-7. **Never exercised:** the raise at the goal (`plan_raise`, V2-15); the
-   0.6 m back-off in directions other than straight away.
-8. **Not measured on their own:** V2-4 (`in_hand`), V2-5 (open in place
-   after a drop), V2-9 (the base's step limit).
-9. **No tests cover `transport.py`.** `tests/test_carry.py` still passes
-   with the new `CarryPlan.trail`.
-10. **A survey at 0.60 m with the route checked**, if the pose rule is to be
-    revisited. The existing tables are at 0.70 m, unchecked.
+1. Benchmark 2 and the paper's Results: done (above).
+2. **Which pose loses what**: answered in section 7.26. Hand down is the
+   worse pose for the sugar box and the hammer, no different for the
+   strawberry, and the better one for the soup can and perhaps the bowl.
+   A rule that puts hand down first for those two is a pose per object,
+   which the user allows only if proven to reach 15 of 15; not done.
+3. **Small objects lost on the way into the pose** (strawberry, mug):
+   check that a finger or the palm stays under the object along the whole
+   way in.
+4. **Recovery after a drop** for the can, bleach and plate: the pick from
+   the maze floor finds no plan or no parking pose.
+5. **The pick of the marker, can and plate**, if the user loosens the
+   limits: the can's collision hull is about a millimetre wider than the
+   open hand (an agent's measurement, not re-checked); the plate's rim
+   grasp is not force-closure.
+6. **The unseeded cloud.** Every benchmark trial is seeded; the graded
+   runs are not. The four Xeon runs of 2026-11-21 (section 7.13: 11, 12,
+   12, 12 of 15) are the only unseeded data.
+7. Ideas from the literature not tried (`docs/literature_review.md`,
+   section 7): banking the hand in bends; a clearance cost in the route;
+   creep per metre against speed measured in the planning copy.
 
 ## How to run things
 
@@ -339,97 +305,112 @@ Always from the repo root, one simulation at a time:
     # the whole trial, all 15, run.sh's maze, one cloud seed (about 25 minutes: run it in the background)
     $LOCK pnr/bin/python tools/pick_all.py --batch-maze --cloud-seed 2 --deliver --out runs/NAME > runs/NAME.log 2>&1
 
+    # another layout, as the benchmark does (layout, env and cloud seeded alike)
+    $LOCK pnr/bin/python tools/pick_all.py --batch-maze --maze-seed 67 --cloud-seed 67 --deliver --out runs/NAME > runs/NAME.log 2>&1
+
     # some objects only, with the solver's record of each attempt
     $LOCK pnr/bin/python tools/pick_all.py --batch-maze --cloud-seed 2 --deliver --objects 8 11 -v --out runs/NAME
 
-    # up to the start of the carry only (which pose was chosen and why others were not)
-    $LOCK pnr/bin/python tools/pick_all.py --batch-maze --cloud-seed 2 --deliver --objects 2 --ticks 700 --out runs/NAME
-    grep "^attempt:" runs/NAME/02_tomato_soup_can.log | grep -o "travel: {.*"
+    # one line per trial of a run: lift, delivery, each attempt's pose, speed and loss
+    pnr/bin/python runs/tmp/show_runs.py runs/NAME
 
     # a setting for one run
-    ... --set travel_reach=0.6 carry_haste=1.5
+    ... --set travel_more_ways=1 carry_haste=1.5
 
     # the pick alone (the regression check for the pick: lift ticks must equal runs/pick_cycles/seedN)
     $LOCK pnr/bin/python tools/pick_all.py --batch-maze --cloud-seed 2 --out runs/NAME
 
-    # the travel-pose survey: poses by index into travel_pose.SURVEY, whole route, a trace per tick
-    $LOCK pnr/bin/python tools/travel_poses.py --objects 8 --cloud-seed 2 --turn-mm 6 --step-mm 15 \
-        --distance 30 --poses 1 6 8 10 --trace --out runs/NAME
-    grep "^T " runs/NAME/08_bleach_cleanser.log        # tick, phase, metres led, base pose, object in the hand, forces
+    # a whole trial with a line per tick of the carry: where the object sits in the hand, the forces
+    $LOCK pnr/bin/python tools/trace_trial.py 0 --cloud-seed 5 > runs/NAME.log
 
-    # the benchmark over many seeds: headless, no video, trials in parallel (for the Xeon machine; here -j 1 under $LOCK).
-    # Seed S is the layout, the env and the cloud seed. Collect OUT: results.jsonl, results.csv, summary.md, logs/ of the failures
-    pnr/bin/python tools/bench.py runs/NAME --seed-range 1000 1100 -j 30
-    pnr/bin/python tools/bench.py runs/NAME --resume --seed-range 1000 1100 -j 30    # after an interruption
-    pnr/bin/python tools/bench.py runs/NAME --report                                  # the tables again
-    # with --ablate: then each part of the carry switched off, into runs/NAME/ablate/ (--resume works here too)
+    # the benchmark over many seeds: headless, no video, trials in parallel (for the Xeon; here -j 1 under $LOCK)
     pnr/bin/python tools/bench.py runs/NAME --seed-range 1000 1100 -j 30 --ablate
-    pnr/bin/python tools/bench_report.py runs/BASELINE runs/NAME                      # paired comparison, runs/NAME/report.md
+    pnr/bin/python tools/bench.py runs/NAME --seed-range 1000 1100 -j 30 --ablate --resume    # after an interruption
+    pnr/bin/python tools/bench_report.py runs/BASELINE runs/NAME                              # writes runs/NAME/report.md
+
+    # the old code, for a baseline: a copy of 376e759's code under runs/tmp/base_376e759 (its output lands in that folder's runs/)
+    $LOCK pnr/bin/python runs/tmp/base_376e759/tools/pick_all.py --batch-maze --maze-seed 67 --cloud-seed 67 --deliver --out runs/NAME
 
     # fast tests (37 simulator tests are skipped unless PNR_SIM_TESTS=1)
     pnr/bin/python -m unittest discover -s tests
 
 Where to look in a full run's log (`runs/NAME/NN_object.log`): the line
 `transitions:` gives the tick of every state change; each `attempt:` line
-has `back_off` (what was tried and chosen), `travel` (the pose, whether at
-the goal's height, and why earlier poses were refused), `carry` (route
-length, speed, turn) and, after a drop, `lost` (tick, phase, metres led).
+has `back_off`, `travel` (the pose, the arm, the way in, and why earlier
+poses were refused), `carry` (route length, speed), `fragile`, `reseats`,
+and, after a drop, `lost` (tick, phase, metres led).
+
+## What is lying around under `runs/` (git-ignored unless added by hand)
+
+- `runs/bench_01/`: benchmark 1, committed.
+- `runs/deliver_new_m67`, `runs/deliver_new_m21`, `runs/ways1_*`,
+  `runs/probe_m67_banana_margin5`, `runs/deliver_20_s2`,
+  `runs/deliver_21_s3`: the local runs sections 7.22 and 7.25 cite.
+- `runs/tmp/base_376e759/`: the old code's copy, with its own `runs/`
+  (`deliver_old_m67`, `deliver_old_m21`). Not a git worktree.
+- `runs/tmp/smoke_base`, `runs/tmp/smoke_full`: the rehearsal of the
+  benchmark pipeline on four trials. `runs/tmp/report_selftest`: made-up
+  data for the report script. All three can go once someone has looked.
+- `runs/tmp/reapply/`: three stale file copies from 2026-11-21.
+- `runs/xeon/NAME/`: the small files of the user's four unseeded runs.
 
 ## Pitfalls
 
 - Do not edit code or run tests while a background run is in progress: each
-  object runs in a fresh process that imports whatever is on disk.
+  trial runs in a fresh process that imports whatever is on disk. This
+  includes `tools/bench.py` itself while a benchmark runs.
 - A full run takes longer than the 10 minutes a foreground command gets:
-  start it in the background.
-- `pkill -f PATTERN` and `pgrep -f PATTERN` match the shell that runs them.
-  Use a bracket in the pattern: `pgrep -f "tools/pick_al[l]\\.py"`.
-- No `rm -rf`. Give each run a new output folder; if something must go,
-  list it and say so before deleting.
-- `runs/` is git-ignored; result tables referred to in the documents were
-  added with `git add -f` (`results.csv` and `settings.json` only).
-- `runs/tmp/reapply/` holds three copies of files from the middle of this
-  session (`solver.py`, `carry.py`, `travel_poses.py`). They are stale and
-  can go once someone has looked.
-- The planner's "out of reach" may be "out of work": `fold_path` now says
-  which.
-- `tools/pick_all.py`'s wall time per object is 30 to 190 s; the work
-  limits are counts, so a slow machine changes the time, not the plan.
+  start it in the background, and do not poll it.
+- `pgrep -f PATTERN` matches the shell that runs it. Use a bracket:
+  `pgrep -f "tools/pick_al[l]\\.py"`.
+- A shell `cd` persists between commands: use absolute paths or `cd` back.
+- `runs/` is git-ignored; result tables cited in the documents were added
+  with `git add -f`.
+- The system `python3` has no numpy; use `pnr/bin/python`. `unzip` is not
+  installed; use Python's `zipfile`.
+- `rest_z` in a result row is the object's own origin: the mug (0.045) and
+  the marker (0.011) lie on the floor at the start, in every run.
+- In the paper's doc, suggestions are accepted one call each (a batch of
+  accepts is refused), and whole-block deletes need the hash and the
+  revision of the read that showed them.
 
 ## Things I got wrong, so the next session does not repeat them
 
-- **I patched three files with shell scripts** and the user saw no diffs. I
-  then misread "show the diffs on the right side" as a request for a page.
-  Edits go through the Edit tool.
-- **I wrote two temporary files to the session's scratch folder**, against
-  the rule that every file stays in the repo. Use `runs/tmp/`.
-- **Survey 1 was 2.5 m at 11 mm per tick** and I built the first rule on
-  it. The route is 27.8 m at 15. Measure the thing that will be run.
-- **My first "back-off from the scene" let the base stand inside the
-  route's margin**, which put a hook in the route and exposed two faults in
-  the carry. The planner's check passed; the motion was wrong.
-- **Full run 2 lost four objects that run 1 had delivered**, because I let
-  the rule pick poses the route could not pass. I ran all 15 before
-  checking the three that mattered most.
+- **I read causes off the failures' logs.** "A late pick causes drops",
+  "hand down loses the object" and "slower is safer" all came from trials
+  that had failed; the trials that succeeded had no log. The user asked
+  whether there were confounding factors, and three of the claims did not
+  survive. Ask what the comparison group is before believing a pattern.
+- **I told the user 26 of 30 outcomes were identical; it was 28.** Count
+  from the table before writing the number.
+- **I tuned on layout 42 and reported its gain first.** On two other
+  layouts the gain was none. Say which layout a change was tuned on.
+- **An agent's review gave a wrong author initial** (R. Pham for H. Pham),
+  found only when the citation was checked against the page. Agents'
+  derivations and measurements in `docs/lit_*.md` are not checked by a
+  second reading; check before quoting.
+- **I patched files with shell scripts** on 2026-11-21 and the user saw no
+  diffs. Edits go through the Edit tool.
 - **I guessed the sugar box touched the table.** The contact record said
-  no. A trace of the last ticks found the real cause in one run; I should
-  have traced first.
-- **I gave a tally in a status message and corrected it mid-sentence.**
-  Count from the table before writing the number.
+  no. Trace first.
 
 ## A word to whoever picks this up
 
-The hard part moved this session. It was "how does an object stay in the
-hand", and most of that turned out to be the carry throwing it: a heading
-that jumped, a base that leapt, an elbow in a door jamb. With those gone,
-eleven and twelve of fifteen arrive, and a dropped object can be picked up
-and still make it.
+The question changed twice. It was "how does the object stay in the
+hand", and much of that was the carry throwing it. Then it was "which
+pose holds", and benchmark 1 showed that most of what I thought I knew
+about that came from looking only at failures. What is solid now is
+narrower and better founded: the pick works for twelve objects, the robot
+arrives when the object stays in the hand, and the object leaves the hand
+through small slips at every tick that add up in a direction the pose
+decides.
 
-What is left is narrower than it looks. Two objects have never arrived, and
-both are carried fast because they are picked late. The pose that works
-holds at twice the speed it is being driven. And the one trial that stopped
-with 2,400 ticks unused stopped because the retry does not know how to try
-something else.
+Benchmark 2 is the first measurement built to answer that properly. Read
+its controls before its headline, and when a part turns out to hurt, say
+so plainly in the paper: an ablation with a negative row is more
+convincing than one without.
 
-Trace before you theorise: every wrong turn this session ended when I
-printed the last twenty ticks. And when a run gets better, check what it
-got worse at before saying so.
+The user has been running the expensive machine by hand through the
+night, on the day the work is due. Have the next thing ready before they
+ask, and do not spend their run on something that could have been tried
+here first.

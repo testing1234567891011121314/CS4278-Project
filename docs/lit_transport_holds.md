@@ -26,7 +26,7 @@ and **grasp rules** (only if the grasp limits are loosened later).
 | # | Source | Checked |
 |---|---|---|
 | T1 | A. Heins, A. P. Schoellig, "Keep it Upright: Model Predictive Control for Nonprehensile Object Transportation with Obstacle Avoidance on a Mobile Manipulator", IEEE RA-L 2023, doi:10.1109/LRA.2023.3324520; https://arxiv.org/abs/2305.17484 | [read] Sec. IV to VII |
-| T2 | R. Pham, Q.-C. Pham, "Critically fast pick-and-place with suction cups", ICRA 2019 [venue: mem]; https://arxiv.org/abs/1809.03151 | [read] Sec. II to IV |
+| T2 | H. Pham, Q.-C. Pham, "Critically fast pick-and-place with suction cups", ICRA 2019 [venue: mem]; https://arxiv.org/abs/1809.03151 | [read] Sec. II to IV |
 | T3 | N. Trupin, Z. Wang, A. H. Qureshi, "Physics-Conditioned Grasping for Stable Tool Use", arXiv 2025 (under review); https://arxiv.org/abs/2505.01399 | [abs] |
 | T4 | M. R. Cutkosky, "On grasp choice, grasp models, and the design of hands for manufacturing tasks", IEEE T-RA 5(3):269–279, 1989, doi:10.1109/70.34763; and M. R. Cutkosky, R. D. Howe, "Human grasp choice and robotic grasp analysis", in *Dextrous Robot Hands*, Springer 1990, https://biorobotics.harvard.edu/pubs/1990/human%20grasp%20choice.pdf | [abs] |
 | T5 | Reduction of friction by vibration: V. L. Popov, Frontiers in Mechanical Engineering 6:69, 2020, doi:10.3389/fmech.2020.00069; M. Popov, V. L. Popov, N. V. Popov, Friction 5(1), 2017, doi:10.1007/s40544-016-0136-4 | [abs] (exact titles not checked; see the doi) |

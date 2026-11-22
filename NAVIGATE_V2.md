@@ -33,7 +33,7 @@ Where each stands:
 
 | Task | State |
 |---|---|
-| 1. Non-dropping carry pose for all 15 | **Not reached: 13 of 15 delivered on cloud seed 2 and 13 of 15 on seed 3** with V2-20 to V2-29 (section 7.22; 11 and 12 with V2-19), 11 of 15 on each with no drop. Not delivered: strawberry and bleach on seed 2, can and plate on seed 3; each is delivered on the other seed. On four other layouts with the unseeded cloud, V2-19 delivered 11, 12, 12 and 12 (section 7.13); V2-20 on has not been run there |
+| 1. Non-dropping carry pose for all 15 | **Not reached. Over 100 layouts (benchmark 2, section 7.26): 80.5 % of 1,500 trials delivered and 69.1 % with no drop (76.1 % and 62.6 % with V2-19 on the same trials); all 15 delivered on 4 seeds of 100, the middle seed 12.** On layout 42: 13 of 15 delivered on cloud seed 2 and 13 of 15 on seed 3 with V2-20 to V2-29 (section 7.22; 11 and 12 with V2-19), 11 of 15 on each with no drop. Not delivered: strawberry and bleach on seed 2, can and plate on seed 3; each is delivered on the other seed. On four other layouts with the unseeded cloud, V2-19 delivered 11, 12, 12 and 12 (section 7.13); V2-20 on has not been run there |
 | 2. Retry | In the solver (V2-5, V2-13) and seen to work: four objects were dropped, picked up again and delivered (can and hammer on seed 2, sugar box and apple on seed 3), three of them from the floor and raised to the goal's height |
 | 3. Back-off from the scene | In the solver (V2-1, V2-8). Chosen per trial: no retreat, or 0.15 to 0.6 m in one of eight directions. First carries on seed 2 take none or 0.15 m straight back; one re-pick in a corridor took 0.15 m at 45 degrees to one side |
 
@@ -1074,6 +1074,207 @@ code otherwise:
   measures it: its ablation re-runs every trial in which joint by joint
   acted, which gives the exact outcome of the system without it.
 
+### 7.26 Benchmark 2 on the Xeon: V2-20 to V2-31 against benchmark 1, and each part switched off
+
+`runs/bench_02` (`tools/bench.py --ablate`, commit `4e155e7`, no uncommitted
+changes, the same machine as 7.23): the same 1,500 trials as benchmark 1, 15
+objects on seeds 1000 to 1099, 3,000 ticks, one trial each, the cloud seeded
+with the trial's seed. Every trial records every carry. The tables are in
+`runs/bench_02/report.md` (`tools/bench_report.py runs/bench_01
+runs/bench_02`); its counts were recounted from the rows
+(`runs/tmp/b2_check.py`), and the tables below that are not in the report
+come from `runs/tmp/b2_attr.py` and `runs/tmp/b2_pose_pairs.py`. The 1,500
+trials took 55 core-hours and the 1,666 trials of the ablation 72.
+
+**The three controls pass**, so the ablation's shortcut (a trial in which a
+part did not act is not run again) may be quoted:
+
+| Control | Trials | Ran the same (lift tick, delivery tick, last tick, failures) |
+|---|---|---|
+| A part did not act in the trial; run without it | 40 at random for each of the six parts | 240 of 240 |
+| Every part off, against benchmark 1's same trials | 100 at random | 100 of 100 |
+| The same settings again | 40 at random | 40 of 40 |
+
+The second says two things: the six switches cover every change since
+`376e759`, and the machine repeats a trial a day later. The first is a
+sample: none of 40 differing puts the share of such trials that would differ
+under 7 % for each part (95 %).
+
+**Benchmark 1 (V2-19) against benchmark 2 (V2-31), the same 1,500 trials:**
+
+| Measure | V2-19 | V2-31 | Difference (95 % interval, seeds resampled) | Trials gained | lost | p (sign test) |
+|---|---|---|---|---|---|---|
+| Delivered | 1,142 (76.1 %) | 1,208 (80.5 %) | +4.4 points (+3.2 to +5.7) | 99 | 33 | 7.5e-09 |
+| Delivered with no drop | 939 (62.6 %) | 1,036 (69.1 %) | +6.5 points (+5.0 to +8.0) | 123 | 26 | 2.8e-16 |
+| Mean points of 40 | 34.15 | 34.88 | +0.72 (+0.55 to +0.90) | | | |
+| Lifted | 1,426 | 1,426 | 0 | 0 | 0 | |
+
+The first lift is at the same tick in 1,500 of 1,500 trials: the pick is
+untouched. Delivered on a seed: 15 of 15 on four seeds (one before), the
+middle seed 12 (12 before), the worst 9 (7 before), mean 12.1 (11.4).
+
+| Object | Delivered: V2-19 | V2-31 | gained | lost | No drop: V2-19 | V2-31 | gained | lost |
+|---|---|---|---|---|---|---|---|---|
+| master chef can | 30 | 38 | 9 | 1 | 29 | 36 | 8 | 1 |
+| sugar box | 84 | **98** | 16 | 2 | 53 | **88** | 38 | 3 |
+| tomato soup can | 94 | **90** | 1 | 5 | 91 | **85** | 0 | 6 |
+| mustard bottle | 98 | 100 | 2 | 0 | 94 | 95 | 1 | 0 |
+| potted meat can | 100 | 100 | 0 | 0 | 100 | 100 | 0 | 0 |
+| banana | 96 | 99 | 3 | 0 | 89 | 91 | 2 | 0 |
+| strawberry | 77 | 81 | 9 | 5 | 36 | 37 | 3 | 2 |
+| apple | 84 | 86 | 4 | 2 | 75 | 78 | 6 | 3 |
+| bleach cleanser | 53 | **77** | 26 | 2 | 49 | **75** | 26 | 0 |
+| bowl | 87 | 87 | 6 | 6 | 78 | 81 | 8 | 5 |
+| mug | 84 | 86 | 5 | 3 | 45 | 48 | 6 | 3 |
+| plate | 24 | 26 | 4 | 2 | 21 | 24 | 5 | 2 |
+| large marker | 47 | 49 | 3 | 1 | 40 | 40 | 1 | 1 |
+| hammer | 84 | 91 | 11 | 4 | 44 | **60** | 16 | 0 |
+| foam brick | 100 | 100 | 0 | 0 | 95 | 98 | 3 | 0 |
+
+- **Three objects carry the gain:** the bleach (+24 delivered), the sugar
+  box (+14, and +35 with no drop) and the hammer (+7, +16 with no drop).
+  These, both measures for the first two and no drop for the hammer, are the
+  only per-object differences that stand after correcting for 30 tests
+  (p under 0.0017). The can's +8 (p 0.021) does not.
+- **One object is worse: the tomato soup can**, 94 to 90 delivered and 91 to
+  85 with no drop (0 gained, 6 lost, p 0.031; not significant once
+  corrected for 15 objects, but the cause is found, below).
+- **The bowl is unchanged in sum and not in its parts:** 6 trials gained and
+  6 lost.
+
+**Each part switched off**, on the trials of the full run in which it acted
+(the effect is over all 1,500 trials):
+
+| Part | Switched off by | Acted in | Delivered: gained by the part | lost by it | p | No drop: gained | lost | p | Effect on delivered, points (95 %) | on no drop | on points of 40 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| More arms (V2-23) | `travel_arms=1` | 142 | 14 | 9 | 0.40 | 18 | 6 | 0.023 | +0.3 (-0.2 to +0.9) | +0.8 (+0.1 to +1.5) | +0.07 (-0.01 to +0.15) |
+| Both other ways in (V2-24) | `travel_more_ways=0` | 489 | 60 | 24 | 0.00011 | 88 | 22 | 1.6e-10 | +2.4 (+1.3 to +3.6) | +4.4 (+3.1 to +5.7) | +0.46 (+0.29 to +0.63) |
+| Joint by joint alone | `travel_more_ways=1` | 323 | 29 | 16 | 0.072 | 46 | 13 | 1.9e-05 | +0.9 (+0.0 to +1.7) | +2.2 (+1.2 to +3.3) | +0.19 (+0.07 to +0.32) |
+| No haste for a weak hold (V2-28) | `carry_fragile=0` | 243 | 23 | 15 | 0.26 | 25 | 13 | 0.073 | +0.5 (-0.2 to +1.3) | +0.8 (+0.1 to +1.5) | +0.10 (-0.02 to +0.21) |
+| Re-seating (V2-27) | `reseat_sag=0` | 27 | 1 | 1 | 1 | 1 | 1 | 1 | 0.0 (-0.2 to +0.2) | 0.0 (-0.2 to +0.2) | 0.00 (-0.03 to +0.03) |
+| Stall (V2-21, V2-22) | `free_reach=0`, `carry_retry_margins=(1.0,)` | 62 | 11 | 1 | 0.0063 | 9 | 0 | 0.0039 | +0.7 (+0.2 to +1.1) | +0.6 (+0.2 to +1.1) | +0.06 (0.00 to +0.11) |
+
+| System | Delivered, % | No drop, % | Points of 40 |
+|---|---|---|---|
+| V2-19 (benchmark 1) | 76.1 | 62.6 | 34.15 |
+| V2-31 with no other way in | 78.1 | 64.7 | 34.42 |
+| V2-31 with the move before the turn, no joint by joint | 79.7 | 66.9 | 34.69 |
+| **V2-31, full** | **80.5** | **69.1** | **34.88** |
+| full without more arms | 80.2 | 68.3 | 34.81 |
+| full without the weak hold's pace | 80.0 | 68.3 | 34.78 |
+| full without re-seating | 80.5 | 69.1 | 34.88 |
+| full without the stall parts | 79.9 | 68.5 | 34.82 |
+
+- **No part hurts, so no default changes.** Every row without a part is at
+  or below the full system on all three measures.
+- **Joint by joint stays on.** The ten local trials of 7.25 said one better
+  without it and nine the same. On the 323 trials in which it acts it gains
+  29 deliveries and loses 16, and gains 46 clean deliveries and loses 13.
+  The rule set before the run (switch it off if the system without it is at
+  least as good) is not met.
+- **The ways in are over half of the gain:** +2.4 of the +4.4 points
+  delivered, +4.4 of the +6.5 with no drop. The two rows are nested: the
+  move before the turn gives +1.5 delivered and joint by joint +0.9 on top
+  of it.
+- **What stands after correcting for the twelve tests of the table**
+  (Holm): both ways in on both measures, joint by joint on no drop, the
+  stall parts on no drop. More arms and the weak hold's pace have intervals
+  on no drop that exclude zero and sign tests that do not pass; on delivered
+  neither is told from zero.
+- **Re-seating does nothing measurable:** it acts in 27 trials (the can 19,
+  the sugar box 6) and changes the outcome of two, one each way.
+- **Not measured:** two parts off at once. The single effects on delivered
+  add up to +3.9 (arms, both ways in, the weak hold's pace, the stall parts)
+  against +4.4 for all together, and to +6.6 against +6.5 on no drop.
+
+**Which part acts for which object** (delivered: gained by the part, lost
+by it; of the trials in which it acted):
+
+| Object | Both ways in | of which joint by joint | No haste for a weak hold | Stall | More arms |
+|---|---|---|---|---|---|
+| sugar box | 14, 2 of 65 | 5, 2 of 48 | | 1, 0 of 2 | 0, 2 of 17 |
+| bleach | 12, 2 of 40 | never (a weak hold) | 17, 5 of 100 | | 1, 0 of 7 |
+| hammer | 10, 3 of 39 | 10, 3 of 33 | 0, 1 of 6 | | 2, 0 of 10 |
+| strawberry | 7, 3 of 45 | 1, 3 of 32 | | | 2, 2 of 12 |
+| apple | 4, 2 of 44 | 3, 0 of 35 | | | 3, 0 of 13 |
+| mug | 3, 0 of 25 | 4, 0 of 22 | | 1, 1 of 6 | 2, 2 of 11 |
+| master chef can | 3, 1 of 5 | | **2, 6 of 74** | | 1, 0 of 5 |
+| plate | | | 3, 3 of 57 | 3, 0 of 24 | 1, 0 of 3 |
+| bowl | **2, 6 of 35** | **2, 5 of 26** | | 5, 0 of 6 | 1, 0 of 6 |
+| tomato soup can | **0, 4 of 28** | **0, 2 of 18** | | 1, 0 of 1 | **0, 2 of 12** |
+
+- **The weak hold's pace is the bleach's gain and the can's loss.** All 100
+  bleach trials, 74 of the can's and 57 of the plate's have a weak hold. Led
+  without haste the bleach gains 17 and loses 5; the can gains 2 and loses
+  6. Their clean deliveries arrive at tick 2,863 and 2,862 (median; every
+  delivery of the twelve objects with no weak hold, 2,446 to 2,554), which
+  leaves no second carry.
+- **Of the 33 trials delivered by V2-19 and not by V2-31, 32 are delivered
+  again with one part off:** a way in for 21 (joint by joint for 16 of
+  them), more arms alone for 4, the weak hold's pace for 6, the stall parts
+  for 1. So the losses are these parts' doing and not noise between two
+  runs.
+- **The soup can's five lost trials** are all finger-under carries that a
+  new part made possible (more arms, the move before the turn, or joint by
+  joint), lost at 12 to 22 m; with the part off each is carried hand down
+  and delivered.
+
+**Which pose loses what** (the handoff's open question, and the claim 7.24
+could not settle). The ablation answers it without the selection: with a
+way in switched off the same trial takes another pose, so the two poses are
+compared on the same trial. First carries, kept (not lost) with the part and
+without, for `travel_more_ways=0`:
+
+| Pose with the other ways in | Pose without | Trials | Kept with | Kept without | Kept only with | only without | p |
+|---|---|---|---|---|---|---|---|
+| level, finger under | hand down | 274 | 219 | 193 | 45 | 19 | 0.0016 |
+| level | hand down | 77 | 73 | 40 | 33 | 0 | 2e-10 |
+| level | level, finger under | 46 | 44 | 42 | 4 | 2 | 0.69 |
+| folded | as lifted | 14 | 7 | 2 | 5 | 0 | 0.06 |
+
+Finger under against hand down, by object (kept with finger under, kept
+with hand down, of trials): hammer 20, 4 of 25; sugar box 9, 3 of 13; apple
+34, 30 of 40; banana 18, 16 of 21; foam brick 21, 19 of 21; strawberry 10,
+9 of 22; potted meat 40, 40 of 40; mustard 9, 9 of 9; mug 6, 7 of 11;
+**bowl 19, 21 of 29; soup can 21, 26 of 26**.
+
+- **Hand down is the worse pose for the heavy objects** (level against hand
+  down: 33 trials kept only level, none only hand down) and for the hammer.
+- **For the strawberry it makes no difference** (10 and 9 of 22).
+- **For the soup can hand down is the better pose:** it is never lost hand
+  down (26 of 26 here; 31 of 31 over all its hand-down first carries) and
+  lost in 15 of its 68 finger-under first carries, at 17.8 m (median).
+- These are trials in which the hand could not be led straight into the
+  level pose, so the level pose here is one reached by another way.
+- First carries of the full run by pose, all ways in: level 182 of 192 kept
+  (95 %), finger under 603 of 788 (77 %), hand down 168 of 257 (65 %),
+  folded 62 of 136 (46 %), as lifted 11 of 41 (27 %). These are not rates of
+  the pose: the rule gives level to the heavy objects and folded to the can
+  and the plate.
+
+**What is still lost** (V2-31, of 60,000 points): 7,686 (12.8 %; 8,770
+before). After the lift 5,232, which is 68 % (72 % before): the goal 3,504
+(plate 888, can 744, marker 612, bleach 276, strawberry 228), no drop 1,728
+(strawberry 252, can 240, plate 224, marker 220, mug 200, hammer 160). The
+pick 2,454, as before. The marker (1,954), the plate (1,664) and the can
+(1,584) lose 68 % of all points lost.
+
+- **How the 292 undelivered trials ended:** never lifted 74; dropped and no
+  pick succeeded before the attempts ran out 143 (160 before); dropped and
+  out of ticks 43 (68); stopped with no drop 32 (56).
+- **A drop is recovered in 48 % of trials (172 of 358; 47 % before)**, and
+  fewer trials have one (431 before). By object: mug 38 of 50, strawberry
+  44 of 63, hammer 31 of 40, sugar box 10 of 12; can 2 of 38, plate 2 of
+  38, bleach 2 of 25.
+- **Where the strawberry and the mug are lost on their first carry:**
+  strawberry, 62 lost: 14 while the pose is taken, 14 within 0.5 m of the
+  drive, 30 further on, 4 with no distance recorded. Mug, 49 lost: 23 while
+  the pose is taken, 6 within 0.5 m, 20 further on.
+
+**What this changes:** no default. The pose rule could be changed for the
+soup can and the bowl (hand down before finger under), but that is a pose
+per object, which the user allows only if proven to reach 15 of 15.
+
 ## 8. Fixes (change log)
 
 | # | Change | Fixed | Broke or left failing |
@@ -1107,7 +1308,7 @@ code otherwise:
 | V2-27 | Re-seating (`CarryFollower.reseat`, `transport.sag`; `reseat_sag`, `reseat_room`, `reseat_lever`): during the drive, an object that has sunk 35 mm below the axis of a level hand, across the pads, and at least half of that since the carry began, is re-seated: the drive slows to rest, the wrist rolls half a turn, the drive goes on. Only where the wrist is not steering, the pads hold the object within 3 cm of its centre along the hand, and the turn is clear of everything by 4 cm. | The can on seed 5 delivered on its first carry (was lost at 21.0 m). | Does not save the bleach (section 7.21). Each re-seat costs about 100 ticks. |
 | V2-28 | A weak hold gets no haste (`carry_fragile`): where the solver's own speed limit for the hold (`_carry_step`) is under 4.5 mm per tick, the object is led as slowly as the ticks left allow, and no way into a pose is made joint by joint. | Plate delivered on seed 2 and bleach on seed 3, both for the first time here, on the first carry. | Those carries arrive at tick 2,677 to 2,904: no time for a second carry after a drop. |
 | V2-30 | Before the back-off falls back to the fixed 0.6 m retreat, every retreat is judged again with the travel pose reached by the move before the turn (`choose_back_off`). | The plate on seed 3 takes no retreat and starts its pose 159 ticks sooner (`runs/backoff2_s3`). | It is still lost (1.9 m, at 15.0 mm per tick). The three other trials that use the fallback (mug on seed 3, marker and the strawberry's re-pick on seed 2) are unchanged, tick for tick (`runs/backoff2_s3_mug`, `runs/backoff2_s2`). Not in full runs 7 and 8. |
-| V2-31 | `travel_more_ways` is a level: 0 no other way in, 1 the move before the turn, 2 also joint by joint (default 2, as before). A carry planned again with the object in the hand is recorded (`carry_retries`). `tools/bench.py`: every carry and every part of the carry that acted is recorded per trial; `--ablate` runs each part switched off on the trials in which it acted, a sample of the others as a check, and every part off on a sample. `tools/bench_report.py`: baseline against full, paired, and the ablation. | With joint by joint off the bowl on layout 21 is delivered again (section 7.25). | No change of behaviour at the defaults. Benchmark 2 is to decide the default for joint by joint. |
+| V2-31 | `travel_more_ways` is a level: 0 no other way in, 1 the move before the turn, 2 also joint by joint (default 2, as before). A carry planned again with the object in the hand is recorded (`carry_retries`). `tools/bench.py`: every carry and every part of the carry that acted is recorded per trial; `--ablate` runs each part switched off on the trials in which it acted, a sample of the others as a check, and every part off on a sample. `tools/bench_report.py`: baseline against full, paired, and the ablation. | With joint by joint off the bowl on layout 21 is delivered again (section 7.25). | No change of behaviour at the defaults. Benchmark 2 decided the default for joint by joint: it stays on (section 7.26: 29 deliveries gained, 16 lost, in the 323 trials in which it acts). |
 | V2-29 | After a re-seat the pace is set again from the ticks left, to end 150 ticks early, never under the plan's (`CarryFollower.set_pace`, `reseat_slack`). | The can on seed 5 at pace 1.0 arrives at 2,856 (2,977 without). | A tick reserve up front instead (tried first) led the bleach at 15.5 mm per tick on seed 3 and lost it at 24.0 m. |
 
 ## 9. Open
